@@ -363,3 +363,223 @@ export function assignLanesPerSource(apps) {
   }
   return out;
 }
+
+// ---------- snap-to-word / sentence / paragraph (F4.4) ----------
+//
+// JS mirror of `scribe.selection_snap`. Same semantics, same outputs;
+// the parallel suite in tests/js/selection-snap.test.mjs exercises
+// the same fixtures as tests/test_selection_snap.py and the two
+// must agree.
+
+const _CLOSING_TRIM = `"')]}»›”’`;
+const _SENTENCE_FINAL = ".?!";
+
+/**
+ * Return true iff `text` (a single token) ends a sentence.
+ * Strips trailing closing-quote / bracket characters before
+ * checking the final character. Mirrors `_is_sentence_final` in
+ * scribe.selection_snap.
+ */
+export function isSentenceFinal(text) {
+  if (typeof text !== "string") return false;
+  let s = text.replace(/\s+$/u, "");
+  while (s && _CLOSING_TRIM.indexOf(s[s.length - 1]) >= 0) {
+    s = s.slice(0, -1);
+  }
+  if (!s) return false;
+  return _SENTENCE_FINAL.indexOf(s[s.length - 1]) >= 0;
+}
+
+/**
+ * Return inclusive [startWordIdx, endWordIdx] sentence ranges for a
+ * segment's words. Mirrors `sentence_ranges_in_segment`.
+ *
+ * `words` is an array of `{text}` objects (extra fields ignored).
+ * Returns `[]` for empty input. The output partitions [0, n) exactly.
+ */
+export function sentenceRangesInSegment(words) {
+  if (!words || words.length === 0) return [];
+  const ranges = [];
+  let start = 0;
+  for (let i = 0; i < words.length; i++) {
+    const text = (words[i] && typeof words[i].text === "string") ? words[i].text : "";
+    if (isSentenceFinal(text)) {
+      ranges.push([start, i]);
+      start = i + 1;
+    }
+  }
+  if (start <= words.length - 1) {
+    ranges.push([start, words.length - 1]);
+  }
+  return ranges;
+}
+
+/**
+ * Return inclusive [startSegIdx, endSegIdx] paragraph ranges for the
+ * transcript. Two consecutive segments share a paragraph iff they
+ * share a non-null `speaker`; null/undefined speakers always start a
+ * new paragraph. Mirrors `paragraph_ranges`.
+ */
+export function paragraphRanges(segments) {
+  if (!segments || segments.length === 0) return [];
+  const ranges = [];
+  let start = 0;
+  for (let i = 1; i < segments.length; i++) {
+    const prev = segments[i - 1] ? segments[i - 1].speaker : null;
+    const cur = segments[i] ? segments[i].speaker : null;
+    if (prev == null || cur == null || prev !== cur) {
+      ranges.push([start, i - 1]);
+      start = i;
+    }
+  }
+  ranges.push([start, segments.length - 1]);
+  return ranges;
+}
+
+function _segmentWordCount(segments, segIdx) {
+  if (segIdx < 0 || segIdx >= segments.length) {
+    throw new Error(`segment index ${segIdx} out of range [0, ${segments.length})`);
+  }
+  const seg = segments[segIdx];
+  if (!seg || typeof seg !== "object") {
+    throw new Error(`segment ${segIdx} must be an object`);
+  }
+  const words = seg.words;
+  if (!Array.isArray(words)) return 0;
+  return words.length;
+}
+
+function _segmentWords(segments, segIdx) {
+  const seg = segments[segIdx];
+  if (!seg || typeof seg !== "object") return [];
+  return Array.isArray(seg.words) ? seg.words : [];
+}
+
+function _validateWordRef(segments, wordId) {
+  const parsed = parseWordId(wordId);
+  if (!parsed) {
+    throw new Error(`word id must match s<seg>w<word>; got ${JSON.stringify(wordId)}`);
+  }
+  const [segIdx, wordIdx] = parsed;
+  const n = _segmentWordCount(segments, segIdx);
+  if (n === 0) {
+    throw new Error(`segment ${segIdx} has no words; cannot resolve ${wordId}`);
+  }
+  if (wordIdx >= n) {
+    throw new Error(
+      `word index ${wordIdx} out of range [0, ${n}) in segment ${segIdx}`
+    );
+  }
+  return [segIdx, wordIdx];
+}
+
+function _sentenceFor(sentences, wordIdx) {
+  for (const r of sentences) {
+    if (r[0] <= wordIdx && wordIdx <= r[1]) return r;
+  }
+  throw new Error(`word index ${wordIdx} is not in any sentence range`);
+}
+
+function _paragraphFor(paragraphs, segIdx) {
+  for (const r of paragraphs) {
+    if (r[0] <= segIdx && segIdx <= r[1]) return r;
+  }
+  throw new Error(`segment index ${segIdx} is not in any paragraph range`);
+}
+
+/**
+ * A selection record, mirroring `scribe.selection_snap.Selection`.
+ * Fields are camelCase to match the rest of helpers.mjs:
+ *   - startWordId, endWordId (string, `s<seg>w<word>`)
+ *   - startCharOffset, endCharOffset (number or null)
+ */
+function _validateSelection(sel) {
+  if (!sel || typeof sel !== "object") {
+    throw new Error("selection must be an object");
+  }
+  if (typeof sel.startWordId !== "string" || typeof sel.endWordId !== "string") {
+    throw new Error("selection.{startWordId,endWordId} must be strings");
+  }
+}
+
+/**
+ * Drop sub-word character offsets; return a whole-word selection.
+ * Mirrors `snap_to_word`. Idempotent.
+ */
+export function snapToWord(sel) {
+  _validateSelection(sel);
+  if (!parseWordId(sel.startWordId)) {
+    throw new Error(`startWordId malformed: ${sel.startWordId}`);
+  }
+  if (!parseWordId(sel.endWordId)) {
+    throw new Error(`endWordId malformed: ${sel.endWordId}`);
+  }
+  if (sel.startCharOffset == null && sel.endCharOffset == null) {
+    return sel;
+  }
+  return {
+    ...sel,
+    startCharOffset: null,
+    endCharOffset: null,
+  };
+}
+
+/**
+ * Snap to sentence boundaries within each endpoint's segment.
+ * Mirrors `snap_to_sentence`. Drops sub-word offsets, never narrows.
+ */
+export function snapToSentence(sel, segments) {
+  _validateSelection(sel);
+  if (!Array.isArray(segments)) {
+    throw new Error("segments must be an array");
+  }
+  const [sSeg, sWord] = _validateWordRef(segments, sel.startWordId);
+  const [eSeg, eWord] = _validateWordRef(segments, sel.endWordId);
+  if (sSeg > eSeg || (sSeg === eSeg && sWord > eWord)) {
+    throw new Error("selection start is after selection end; cannot snap");
+  }
+  const startSentences = sentenceRangesInSegment(_segmentWords(segments, sSeg));
+  const endSentences = sentenceRangesInSegment(_segmentWords(segments, eSeg));
+  const [newStartWord] = _sentenceFor(startSentences, sWord);
+  const newEndWord = _sentenceFor(endSentences, eWord)[1];
+  return {
+    ...sel,
+    startWordId: `s${sSeg}w${newStartWord}`,
+    endWordId: `s${eSeg}w${newEndWord}`,
+    startCharOffset: null,
+    endCharOffset: null,
+  };
+}
+
+/**
+ * Snap to whole-paragraph boundaries (consecutive same-speaker
+ * segments form one paragraph). Mirrors `snap_to_paragraph`.
+ */
+export function snapToParagraph(sel, segments) {
+  _validateSelection(sel);
+  if (!Array.isArray(segments)) {
+    throw new Error("segments must be an array");
+  }
+  const [sSeg, sWord] = _validateWordRef(segments, sel.startWordId);
+  const [eSeg, eWord] = _validateWordRef(segments, sel.endWordId);
+  if (sSeg > eSeg || (sSeg === eSeg && sWord > eWord)) {
+    throw new Error("selection start is after selection end; cannot snap");
+  }
+  const paragraphs = paragraphRanges(segments);
+  const startPara = _paragraphFor(paragraphs, sSeg);
+  const endPara = _paragraphFor(paragraphs, eSeg);
+  const endSegIdx = endPara[1];
+  const endWordCount = _segmentWordCount(segments, endSegIdx);
+  if (endWordCount === 0) {
+    throw new Error(
+      `paragraph end segment ${endSegIdx} has no words; cannot snap`
+    );
+  }
+  return {
+    ...sel,
+    startWordId: `s${startPara[0]}w0`,
+    endWordId: `s${endSegIdx}w${endWordCount - 1}`,
+    startCharOffset: null,
+    endCharOffset: null,
+  };
+}
