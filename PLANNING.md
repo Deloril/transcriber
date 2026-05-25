@@ -10,7 +10,71 @@ This document captures the next-phase feature backlog. It's a working planning d
 - ✅ Transcript editor with playback, word highlighting, inline edit, search, export
 - ✅ Persistence across server restarts; per-job error logs
 - 🚧 **Test infrastructure** (in progress — pytest + Vitest set up; per-module test files still being written)
+- ⬜ **AMD / ROCm GPU support** (this doc)
 - ⬜ **Academic coding engine** (this doc)
+
+---
+
+# Feature: AMD / ROCm GPU support
+
+Until CTranslate2 v4.7.0 (Feb 2026), AMD users had no path to GPU-accelerated Whisper at all. That changed: with the right wheels, **the full Scribe pipeline can run on AMD GPUs on Linux today**. This section captures the plan; deep research is in `docs/research/amd-rocm-research.md`.
+
+## Tiering
+
+The honest story:
+
+| Tier | Hardware | Strategy | Status |
+|------|----------|----------|--------|
+| **Tier 1** | Linux + RDNA 3 / RDNA 4 (RX 7000, RX 9000) | CTranslate2 ROCm wheel + PyTorch ROCm 6.3 + LSTM dropout patch for pyannote. Full pipeline GPU-accelerated. | Primary path |
+| **Tier 2** | Linux + RDNA 2 (RX 6000) | Same stack + `CT2_CUDA_ALLOCATOR=cub_caching` + `HSA_OVERRIDE_GFX_VERSION=10.3.0` env vars. AMD-officially-unsupported but works. | Best-effort |
+| **Tier 3** | Windows AMD, RDNA 1, dropped cards | whisper.cpp Vulkan backend. Loses CT2 int8 quants and our existing faster-whisper integration; uses GGUF Whisper weights. | Future, not blocking |
+| **Out of scope** | Parakeet on AMD | NeMo is NVIDIA-only; no community fork. Hide Parakeet in the UI when AMD is the active backend. | Won't fix |
+
+## Backlog
+
+### Foundation: detection + device routing
+
+- **G1.1** Detect ROCm at runtime via `torch.version.hip` (PyTorch's ROCm wheels alias `torch.cuda.*` to HIP, so `is_available()` is True on both — `torch.version.hip` is the discriminator).
+- **G1.2** Extend `_torch_device()` / `_diarization_device()` / `_whisper_device_and_compute()` to return a 4-state result: `cuda` / `rocm` / `mps` / `cpu`. CTranslate2 still takes `device="cuda"` on a ROCm wheel (HIP shim), so the engine wrappers translate `rocm` → CT2 `"cuda"` while keeping the user-facing label honest.
+- **G1.3** `scribe.devices` reports ROCm details (HIP version, gfx target, OS) so support tickets show the right context.
+- **G1.4** UI shows the active backend (cuda / rocm / mps / cpu) on the Recording details card.
+
+### CTranslate2 ROCm install
+
+- **G2.1** Installer subcommand or `setup.sh --rocm` that fetches the right ZIP from the CT2 GitHub release (currently v4.7.2), unzips, pip-installs the wheel. Pin a known-good version; surface it in `scribe.devices` so we can spot drift.
+- **G2.2** Mirror the wheel on our own host as a fallback if GitHub Releases is unavailable. (Optional, future.)
+- **G2.3** Document Linux distro support: Ubuntu 22/24 first-class, RHEL 9/10 supported, Fedora/Arch/Debian best-effort. Windows is Tier 3 only.
+
+### pyannote LSTM dropout patch
+
+- **G3.1** When `torch.version.hip` is set, patch the segmentation model's LSTM dropout to 0.0 after `Pipeline.from_pretrained(...).to(device)`. Inference behaviour is unchanged (dropout is a no-op outside training); avoids the open MIOpen header bug ([pyannote-audio#1995](https://github.com/pyannote/pyannote-audio/issues/1995)). Hide behind the same engine-load shim.
+
+### RDNA 2 workarounds
+
+- **G4.1** Auto-detect gfx103x via `torch.cuda.get_device_name()` and set `CT2_CUDA_ALLOCATOR=cub_caching` in the worker process before loading CT2.
+- **G4.2** Document `HSA_OVERRIDE_GFX_VERSION=10.3.0` for users hitting allocator faults on RX 6600/6700.
+
+### Engine routing
+
+- **G5.1** When the active backend is `rocm`, hide the Parakeet model options in the UI dropdown (NeMo doesn't run on ROCm). Show a tooltip explaining why.
+- **G5.2** Prefer `int8_float16` on AMD cards with <8 GB (matches our existing CUDA tiering). RDNA 3 24 GB cards (7900 XTX) get `float16`.
+
+### Validation
+
+- **G6.1** Smoke test script (`scribe/scripts/check_rocm.py`) that loads a tiny Whisper model, runs alignment, runs diarization, reports timing. Run on user's machine after install.
+- **G6.2** In-house benchmark vs CUDA on a representative file before publishing performance claims.
+
+### Known issues to monitor (live upstream bugs)
+
+- [CT2 #2021](https://github.com/OpenNMT/CTranslate2/issues/2021) RX 9070 XT (gfx1201) crashes on Fedora 43 + ROCm 7.2. Open. Workaround: use Ubuntu 24.04 or wait for upstream fix.
+- [CT2 #2038](https://github.com/OpenNMT/CTranslate2/issues/2038) Windows HIP allocator deadlock on `del model`. Confirms Windows is Tier 3 only.
+- [pyannote-audio #1995](https://github.com/pyannote/pyannote-audio/issues/1995) LSTM dropout MIOpen header missing on ROCm ≥ 6.1.1. Our G3.1 patch covers this.
+
+## Phasing
+
+- **Phase A** — Detection + device routing + Parakeet hiding + scribe.devices reporting (tasks G1.1–G1.4, G5.1–G5.2). No install changes; just makes the existing code paths AMD-aware. Ships a dev-time win even before the wheel is installed.
+- **Phase B** — `setup.sh --rocm` installer that fetches the CT2 ROCm wheel (G2.1, G2.3). LSTM dropout patch (G3.1). RDNA 2 workarounds (G4.1, G4.2). This is the milestone that says "AMD GPU support shipped."
+- **Phase C** — Smoke-test script + in-house benchmark (G6.1, G6.2). Mirror the wheel (G2.2). Optional whisper.cpp Vulkan backend for Tier 3 if there's demand.
 
 ---
 
