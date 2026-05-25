@@ -1739,6 +1739,109 @@ _ai_backend_transport_override: _ai_backend.Transport | None = None
 
 
 # --------------------------------------------------------------------------- #
+# AI gate (F8.10)
+#
+# Exposes the "first-N-transcripts AI-off" gate's status + config:
+#
+#   * GET /ai/gate           — current status (allowed / reason / counts /
+#                              thresholds), optionally for a specific
+#                              feature via ?feature=<id>.
+#   * PUT /ai/gate           — replace the saved config (thresholds,
+#                              override, exempt features, enabled flag).
+#
+# These endpoints don't *invoke* AI; they tell the UI / future AI
+# endpoints whether AI is allowed yet. Future iterations wire each AI
+# feature endpoint to consult :func:`evaluate_project_ai_gate` before
+# running.
+# --------------------------------------------------------------------------- #
+
+from . import ai_gate as _ai_gate  # noqa: E402
+
+
+@app.get("/api/projects/{project_id}/ai/gate")
+async def get_project_ai_gate_endpoint(
+    project_id: str, feature: str = ""
+) -> JSONResponse:
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            status = _ai_gate.evaluate_project_ai_gate(
+                _projects_root(), project_id, feature=feature
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        # Echo the saved config separately so the UI can edit it
+        # without re-deriving from the status.
+        project = _projects.load_project(_projects_root(), project_id)
+        cfg = _ai_gate.load_ai_gate_config(project)
+    return JSONResponse(
+        {
+            "status": status.to_dict(),
+            "config": {
+                **cfg.to_dict(),
+                "exempt_features": list(cfg.exempt_features),
+            },
+            "available_overrides": list(_ai_gate.GATE_OVERRIDES),
+            "available_reasons": list(_ai_gate.REASONS),
+        }
+    )
+
+
+@app.put("/api/projects/{project_id}/ai/gate")
+async def put_project_ai_gate_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Invalid JSON: {e}")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Body must be a JSON object")
+    exempt = body.get("exempt_features")
+    if exempt is not None and not isinstance(exempt, list):
+        raise HTTPException(400, "exempt_features must be a list")
+    try:
+        cfg = _ai_gate.AIGateConfig.from_dict(
+            {
+                k: v
+                for k, v in body.items()
+                if k != "exempt_features"
+            },
+            exempt_features=exempt,
+        )
+    except _projects.ProjectValidationError as e:
+        raise HTTPException(400, str(e))
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            _ai_gate.store_ai_gate_config(project, cfg)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _projects.save_project(_projects_root(), project)
+        # Recompute the status so the response reflects the new config.
+        status = _ai_gate.evaluate_project_ai_gate(
+            _projects_root(), project_id
+        )
+    return JSONResponse(
+        {
+            "status": status.to_dict(),
+            "config": {
+                **cfg.to_dict(),
+                "exempt_features": list(cfg.exempt_features),
+            },
+        }
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 
