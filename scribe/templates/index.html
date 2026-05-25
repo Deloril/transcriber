@@ -637,6 +637,40 @@
       <div id="errBox" class="err hidden"></div>
     </div>
 
+    <!-- F10.3 — Import existing transcript -->
+    <div class="card" id="importCard">
+      <div id="importHead" class="adv-head" style="cursor:pointer;display:flex;align-items:center;gap:8px;">
+        <span id="importCaret" class="caret">▶</span>
+        <span class="title" style="font-weight:600;">Already have a transcript? Import it</span>
+        <span class="hint" style="margin:0;">TXT · SRT · VTT · Scribe JSON</span>
+      </div>
+      <div id="importBody" class="hidden" style="margin-top:14px;">
+        <div id="importDrop" class="drop" style="padding:24px;">
+          <strong>Drop a finished transcript here</strong>
+          <small>or click to choose — Plain text (Scribe .txt), SRT, WebVTT, or Scribe JSON</small>
+          <input id="importFile" type="file" class="hidden"
+                 accept=".txt,.srt,.vtt,.json,text/plain,text/vtt,application/json,application/x-subrip">
+          <div id="importFileInfo" class="file-info"></div>
+        </div>
+        <div style="height:12px;"></div>
+        <div id="importMediaWrap">
+          <label>Optional companion media (audio/video for playback)</label>
+          <div id="importMediaDrop" class="drop" style="padding:18px;">
+            <strong>Drop the original recording here</strong>
+            <small>If skipped, the editor will work but playback is disabled.</small>
+            <input id="importMediaFile" type="file" class="hidden"
+                   accept="video/*,audio/*,.mkv,.mp4,.mov,.wav,.m4a,.mp3,.flac,.ogg,.webm">
+            <div id="importMediaInfo" class="file-info"></div>
+          </div>
+        </div>
+        <div style="height:14px;display:flex;align-items:center;gap:10px;margin-top:14px;">
+          <button id="importGo" disabled>Import transcript</button>
+          <span id="importStatus" class="hint" style="margin-left:6px;"></span>
+        </div>
+        <div id="importErr" class="err hidden" style="margin-top:10px;"></div>
+      </div>
+    </div>
+
     <!-- Slide-in docs -->
     <div id="docOverlay" class="doc-overlay" aria-hidden="true"></div>
     <aside id="docPanel" class="doc-panel" aria-hidden="true" aria-label="Documentation">
@@ -980,6 +1014,99 @@
       }
     }
     $("model").addEventListener("change", updateModelHint);
+
+    // -------- F10.3: Import existing transcript --------
+    let _importTranscript = null;
+    let _importMedia = null;
+    const importHead = $("importHead"), importBody = $("importBody"),
+          importCaret = $("importCaret"), importDrop = $("importDrop"),
+          importFile = $("importFile"), importFileInfo = $("importFileInfo"),
+          importMediaDrop = $("importMediaDrop"),
+          importMediaFile = $("importMediaFile"),
+          importMediaInfo = $("importMediaInfo"),
+          importGo = $("importGo"), importStatus = $("importStatus"),
+          importErr = $("importErr");
+
+    importHead.addEventListener("click", () => {
+      const open = !importBody.classList.contains("hidden");
+      if (open) {
+        importBody.classList.add("hidden");
+        importCaret.textContent = "▶";
+      } else {
+        importBody.classList.remove("hidden");
+        importCaret.textContent = "▼";
+      }
+    });
+
+    function setImportTranscript(f) {
+      _importTranscript = f;
+      const kb = (f.size / 1024).toFixed(1);
+      importFileInfo.textContent = `${f.name} · ${kb} KB`;
+      importGo.disabled = false;
+    }
+    function setImportMedia(f) {
+      _importMedia = f;
+      const mb = (f.size / (1024 * 1024)).toFixed(1);
+      importMediaInfo.textContent = `${f.name} · ${mb} MB`;
+    }
+
+    importDrop.addEventListener("click", () => importFile.click());
+    importDrop.addEventListener("dragover", (e) => { e.preventDefault(); importDrop.classList.add("drag"); });
+    importDrop.addEventListener("dragleave", () => importDrop.classList.remove("drag"));
+    importDrop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      importDrop.classList.remove("drag");
+      if (e.dataTransfer.files && e.dataTransfer.files.length) {
+        setImportTranscript(e.dataTransfer.files[0]);
+      }
+    });
+    importFile.addEventListener("change", () => {
+      if (importFile.files && importFile.files.length) setImportTranscript(importFile.files[0]);
+    });
+
+    importMediaDrop.addEventListener("click", () => importMediaFile.click());
+    importMediaDrop.addEventListener("dragover", (e) => { e.preventDefault(); importMediaDrop.classList.add("drag"); });
+    importMediaDrop.addEventListener("dragleave", () => importMediaDrop.classList.remove("drag"));
+    importMediaDrop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      importMediaDrop.classList.remove("drag");
+      if (e.dataTransfer.files && e.dataTransfer.files.length) {
+        setImportMedia(e.dataTransfer.files[0]);
+      }
+    });
+    importMediaFile.addEventListener("change", () => {
+      if (importMediaFile.files && importMediaFile.files.length) setImportMedia(importMediaFile.files[0]);
+    });
+
+    importGo.addEventListener("click", async () => {
+      if (!_importTranscript) return;
+      importGo.disabled = true;
+      importErr.classList.add("hidden"); importErr.textContent = "";
+      importStatus.textContent = "Uploading…";
+      const fd = new FormData();
+      fd.append("transcript", _importTranscript);
+      if (_importMedia) fd.append("media", _importMedia);
+      // Carry over the language picker so a French TXT lands as fr.
+      fd.append("language", $("language").value || "");
+      let resp;
+      try {
+        resp = await fetch("/api/import", { method: "POST", body: fd });
+      } catch (e) {
+        importErr.classList.remove("hidden");
+        importErr.textContent = "Import failed: " + e;
+        importGo.disabled = false; importStatus.textContent = ""; return;
+      }
+      if (!resp.ok) {
+        const t = await resp.text();
+        importErr.classList.remove("hidden");
+        importErr.textContent = "Import failed: " + t;
+        importGo.disabled = false; importStatus.textContent = ""; return;
+      }
+      const j = await resp.json();
+      importStatus.textContent =
+        `Imported ${j.segment_count} segments (${j.format}) — opening editor…`;
+      window.location.href = `/edit/${j.job_id}`;
+    });
 
     // Initial load
     loadPersistedSettings();

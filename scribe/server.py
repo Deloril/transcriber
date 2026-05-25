@@ -2166,6 +2166,181 @@ async def list_jobs_endpoint(q: str = "") -> JSONResponse:
     return JSONResponse({"jobs": rows, "total": len(rows)})
 
 
+# --------------------------------------------------------------------------- #
+# F10.3 — Import an existing transcript
+#
+# Researchers often arrive with an already-finished transcript (their
+# own .txt, an SRT, a Scribe export from another machine). We give
+# them a way in without re-running the engine: the parser produces
+# the same envelope the worker would, the writers run normally, and
+# the resulting job lands in the library indistinguishable from a
+# transcribed one — except ``media_discarded=True`` when no companion
+# media file is uploaded.
+# --------------------------------------------------------------------------- #
+
+
+from . import transcript_import as _transcript_import  # noqa: E402
+
+
+# Cap the size of an uploaded transcript file. Even a several-hour
+# interview's text export is well under 1 MB; subtitle files are
+# similar. 10 MB is paranoia, not a real ceiling.
+_TRANSCRIPT_MAX_BYTES = 10 * 1024 * 1024
+# Companion media can be anything ffmpeg reads; same cap as a normal
+# upload (FastAPI doesn't impose one and we don't want a runaway
+# file to fill the disk).
+_IMPORT_MEDIA_MAX_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB
+
+
+@app.post("/api/import")
+async def import_transcript_endpoint(
+    transcript: UploadFile = File(...),
+    media: UploadFile | None = File(None),
+    fmt: str = Form(""),
+    language: str = Form(""),
+) -> JSONResponse:
+    """Treat an uploaded transcript as a finished job.
+
+    Accepts ``transcript`` as the required transcript file (TXT /
+    SRT / VTT / Scribe JSON; sniffed automatically unless ``fmt`` is
+    set), and an optional ``media`` companion file so the editor can
+    play audio/video alongside the transcript. When ``media`` is
+    omitted the resulting job is created with
+    ``media_discarded=True`` (F10.2): the editor degrades to
+    no-playback, but everything else (text, search, edit, export)
+    works.
+
+    Returns the same shape as ``POST /api/upload`` so the client UI
+    can route to the editor with no special-casing.
+    """
+    raw = await transcript.read(_TRANSCRIPT_MAX_BYTES + 1)
+    if len(raw) > _TRANSCRIPT_MAX_BYTES:
+        raise HTTPException(413, "Transcript file is too large (>10 MB).")
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            content = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            raise HTTPException(400, "Transcript must be UTF-8 text.")
+
+    fname = Path(transcript.filename or "").name or "imported.txt"
+    fmt_arg: str | None = fmt.strip() or None
+    if fmt_arg and fmt_arg not in _transcript_import.KNOWN_FORMATS:
+        raise HTTPException(400, f"Unknown transcript format: {fmt_arg!r}")
+
+    try:
+        envelope = _transcript_import.parse_transcript(
+            fname, content, fmt=fmt_arg
+        )
+    except ValueError as e:
+        raise HTTPException(400, f"Could not parse transcript: {e}")
+
+    # Honour an explicit override of the detected language (the form
+    # field comes from the upload UI's existing language picker).
+    if language.strip():
+        envelope["language"] = language.strip()
+
+    job_id = uuid.uuid4().hex[:12]
+    output_dir = OUTPUT_DIR / job_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    upload_dir = UPLOAD_DIR / job_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    # Stem is the transcript's filename without its extension; the
+    # writers append the right extension per format.
+    stem = Path(fname).stem or "transcript"
+
+    # Pull in the companion media if present, otherwise note that the
+    # job has no source media and the editor should degrade.
+    media_discarded = True
+    media_input_path: Path = upload_dir / fname  # placeholder for path field
+    if media is not None and (media.filename or "").strip():
+        media_name = Path(media.filename).name
+        if not media_name:
+            media_name = f"{stem}.bin"
+        media_input_path = upload_dir / media_name
+        bytes_written = 0
+        with media_input_path.open("wb") as f:
+            while chunk := await media.read(1024 * 1024):
+                bytes_written += len(chunk)
+                if bytes_written > _IMPORT_MEDIA_MAX_BYTES:
+                    f.close()
+                    media_input_path.unlink(missing_ok=True)
+                    raise HTTPException(413, "Companion media file too large.")
+                f.write(chunk)
+        media_discarded = False
+        try:
+            streams = probe_audio_streams(media_input_path)
+        except Exception:
+            streams = []
+        try:
+            media_info = probe_media_info(media_input_path)
+        except Exception:
+            media_info = None
+        audio_streams = len(streams) if streams else 0
+    else:
+        # Drop the empty upload dir if there's no media — F10.2's
+        # discard logic already handles "no uploads/<id>/" gracefully
+        # but it's tidy to not leave it behind.
+        try:
+            upload_dir.rmdir()
+        except OSError:
+            pass
+        media_info = None
+        audio_streams = 0
+
+    # Build the standard TranscriptionResult and write the sidecars
+    # (.json, .txt, .srt, .vtt) so the rest of the system sees this
+    # job as indistinguishable from a transcribed one.
+    result = _result_from_payload(envelope, input_path=media_input_path)
+    base = output_dir / stem
+    paths = write_all(result, base)
+
+    now_iso = datetime.utcnow().isoformat() + "Z"
+    import time as _time
+    now_epoch = _time.time()
+    job = Job(
+        id=job_id,
+        input_path=media_input_path,
+        output_dir=output_dir,
+        mode=envelope.get("mode", "diarize"),
+        speakers=envelope.get("speakers") or None,
+        num_speakers=None,
+        language=envelope.get("language", "en"),
+        model="imported",
+        created_at=now_iso,
+        status="done",
+        progress=1.0,
+        message="Imported",
+        result=result.to_dict(),
+        output_paths={k: str(v.relative_to(ROOT)) for k, v in paths.items()},
+        audio_streams=audio_streams,
+        input_filename=fname,
+        options={},
+        batch_size=8,
+        started_at=now_epoch,
+        finished_at=now_epoch,
+        media_discarded=media_discarded,
+    )
+    with JOBS_LOCK:
+        JOBS[job_id] = job
+    _persist_job(job)
+
+    return JSONResponse(
+        {
+            "job_id": job_id,
+            "audio_streams": audio_streams,
+            "stream_titles": [],
+            "media_info": media_info,
+            "imported": True,
+            "media_discarded": media_discarded,
+            "format": fmt_arg or _transcript_import.sniff_format(fname, content),
+            "segment_count": len(envelope.get("segments") or []),
+        }
+    )
+
+
 @app.post("/api/job/{job_id}/discard-media")
 async def discard_media_endpoint(job_id: str) -> JSONResponse:
     """F10.2 — drop the source media for a job, keep the transcript.

@@ -3667,3 +3667,224 @@ class TestExportAnonymisedQdpxAPI:
             ]},
         )
         assert r.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# F10.3 — POST /api/import (transcript-import endpoint)
+# --------------------------------------------------------------------------- #
+
+
+class TestImportTranscriptAPI:
+    """``POST /api/import`` accepts a finished transcript file (TXT /
+    SRT / VTT / Scribe JSON) and creates a job whose status is
+    immediately ``done``, with ``media_discarded=True`` when no
+    companion media file is uploaded.
+    """
+
+    def test_imports_plain_text(self, server_env) -> None:
+        srv, client, _ = server_env
+        body = b"[00:00] LUKE: Hello there.\n\n[00:03] GUEST: Hi back.\n"
+        r = client.post(
+            "/api/import",
+            files={"transcript": ("interview.txt", body, "text/plain")},
+        )
+        assert r.status_code == 200, r.text
+        j = r.json()
+        assert j["imported"] is True
+        assert j["media_discarded"] is True
+        assert j["format"] == "txt"
+        assert j["segment_count"] == 2
+
+        # Job is in JOBS, status=done, transcript sidecars on disk.
+        job = srv.JOBS[j["job_id"]]
+        assert job.status == "done"
+        assert job.media_discarded is True
+        assert job.input_filename == "interview.txt"
+        assert "txt" in job.output_paths
+        assert "json" in job.output_paths
+        sidecar = srv.ROOT / job.output_paths["json"]
+        assert sidecar.exists()
+
+    def test_imports_srt(self, server_env) -> None:
+        srv, client, _ = server_env
+        body = (
+            b"1\n00:00:00,000 --> 00:00:02,000\nLUKE: Hello.\n\n"
+            b"2\n00:00:02,000 --> 00:00:04,000\nGUEST: Hi.\n"
+        )
+        r = client.post(
+            "/api/import",
+            files={"transcript": ("clip.srt", body, "application/x-subrip")},
+        )
+        assert r.status_code == 200, r.text
+        j = r.json()
+        assert j["format"] == "srt"
+        assert j["segment_count"] == 2
+        job = srv.JOBS[j["job_id"]]
+        assert job.result["segments"][0]["speaker"] == "LUKE"
+
+    def test_imports_vtt(self, server_env) -> None:
+        srv, client, _ = server_env
+        body = (
+            b"WEBVTT\n\n"
+            b"00:00:00.000 --> 00:00:02.000\n<v LUKE>Hello.\n"
+        )
+        r = client.post(
+            "/api/import",
+            files={"transcript": ("clip.vtt", body, "text/vtt")},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["format"] == "vtt"
+
+    def test_imports_scribe_json(self, server_env) -> None:
+        srv, client, _ = server_env
+        import json as _json
+        payload = {
+            "language": "en",
+            "mode": "diarize",
+            "speakers": ["LUKE"],
+            "segments": [
+                {
+                    "text": "hello",
+                    "start": 0.0,
+                    "end": 1.0,
+                    "speaker": "LUKE",
+                    "words": [
+                        {"text": "hello", "start": 0.0, "end": 1.0,
+                         "speaker": "LUKE", "score": 0.9},
+                    ],
+                }
+            ],
+        }
+        body = _json.dumps(payload).encode("utf-8")
+        r = client.post(
+            "/api/import",
+            files={"transcript": ("transcript.json", body, "application/json")},
+        )
+        assert r.status_code == 200, r.text
+        j = r.json()
+        assert j["format"] == "scribe-json"
+        # Word-level timings survive verbatim.
+        job = srv.JOBS[j["job_id"]]
+        assert job.result["segments"][0]["words"][0]["score"] == 0.9
+
+    def test_explicit_format_overrides_sniff(self, server_env) -> None:
+        srv, client, _ = server_env
+        # File looks like JSON but caller forces TXT.  Should fail
+        # because parse_txt picks "{...}" up as a single segment of
+        # gibberish and that segment exists, so it imports — just
+        # without speaker labels.  We assert it imports as txt.
+        body = b'[00:00] LUKE: literal payload\n'
+        r = client.post(
+            "/api/import",
+            data={"fmt": "txt"},
+            files={"transcript": ("foo.json", body, "application/json")},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["format"] == "txt"
+
+    def test_unknown_format_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            "/api/import",
+            data={"fmt": "docx"},
+            files={"transcript": ("foo.txt", b"hi\n", "text/plain")},
+        )
+        assert r.status_code == 400
+        assert "Unknown" in r.text
+
+    def test_unparseable_transcript_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            "/api/import",
+            files={"transcript": ("foo.txt", b"   \n\n", "text/plain")},
+        )
+        assert r.status_code == 400
+
+    def test_invalid_utf8_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            "/api/import",
+            files={"transcript": ("foo.txt", b"\xff\xfe\x00bad bytes",
+                                  "text/plain")},
+        )
+        assert r.status_code == 400
+
+    def test_with_companion_media(self, server_env) -> None:
+        srv, client, tmp = server_env
+        # Tiny "media" payload — the audio probe will likely fail on
+        # a non-media binary, but the endpoint should still create
+        # the job with media_discarded=False since the upload
+        # succeeded.
+        text_body = b"[00:00] LUKE: hello\n"
+        media_body = b"\x00" * 1024
+        r = client.post(
+            "/api/import",
+            files={
+                "transcript": ("foo.txt", text_body, "text/plain"),
+                "media": ("audio.bin", media_body, "application/octet-stream"),
+            },
+        )
+        assert r.status_code == 200, r.text
+        j = r.json()
+        assert j["media_discarded"] is False
+        job = srv.JOBS[j["job_id"]]
+        assert job.media_discarded is False
+        # Companion media saved under uploads/<id>/.
+        assert job.input_path.exists()
+        assert job.input_path.read_bytes() == media_body
+
+    def test_language_form_field_overrides_detected(self, server_env) -> None:
+        srv, client, _ = server_env
+        r = client.post(
+            "/api/import",
+            data={"language": "fr"},
+            files={"transcript": ("foo.txt", b"[00:00] hi\n", "text/plain")},
+        )
+        assert r.status_code == 200, r.text
+        job = srv.JOBS[r.json()["job_id"]]
+        assert job.language == "fr"
+
+    def test_imports_show_in_library(self, server_env) -> None:
+        # The library endpoint (F10.1) should treat imported jobs
+        # the same as transcribed ones.
+        srv, client, _ = server_env
+        client.post(
+            "/api/import",
+            files={"transcript": ("foo.txt", b"[00:00] LUKE: hi\n",
+                                  "text/plain")},
+        )
+        r = client.get("/api/jobs")
+        assert r.status_code == 200
+        rows = r.json()["jobs"]
+        assert len(rows) == 1
+        assert rows[0]["status"] == "done"
+        assert rows[0]["media_discarded"] is True
+        assert rows[0]["input_filename"] == "foo.txt"
+
+    def test_no_companion_media_does_not_leave_empty_upload_dir(
+        self, server_env
+    ) -> None:
+        srv, client, _ = server_env
+        r = client.post(
+            "/api/import",
+            files={"transcript": ("foo.txt", b"[00:00] hi\n", "text/plain")},
+        )
+        job_id = r.json()["job_id"]
+        # uploads/<id>/ shouldn't exist when there's no media.
+        assert not (srv.UPLOAD_DIR / job_id).exists()
+
+    def test_persists_across_restart(self, server_env) -> None:
+        srv, client, _ = server_env
+        r = client.post(
+            "/api/import",
+            files={"transcript": ("foo.txt", b"[00:00] LUKE: hi\n",
+                                  "text/plain")},
+        )
+        job_id = r.json()["job_id"]
+        # Wipe in-memory state and reload from disk; the imported
+        # job should round-trip via job.json.
+        srv.JOBS.clear()
+        srv._load_jobs_from_disk()
+        assert job_id in srv.JOBS
+        assert srv.JOBS[job_id].status == "done"
+        assert srv.JOBS[job_id].media_discarded is True
