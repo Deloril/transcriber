@@ -269,3 +269,83 @@ class TestLinuxDistro:
             raising=False,
         )
         assert devices._linux_distro() is None
+
+
+class TestCt2RocmPinReport:
+    """G2.1: scribe.devices surfaces the CT2 ROCm wheel pin + drift."""
+
+    def _stub_rocm(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        installed: str | None,
+        pinned: str = "4.7.2",
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(
+            devices.torch.cuda, "get_device_name", lambda i: "AMD Radeon RX 7900 XTX"
+        )
+        monkeypatch.setattr(devices, "_cuda_vram_gb", lambda: 24.0)
+        monkeypatch.setattr(devices, "_is_rdna2", lambda: False)
+        monkeypatch.setattr(devices.torch.version, "hip", "6.3", raising=False)
+        monkeypatch.setattr(devices, "gpu_arch_name", lambda: "gfx1100")
+        monkeypatch.setattr(devices, "pinned_ct2_rocm_version", lambda: pinned)
+        monkeypatch.setattr(devices, "installed_ct2_version", lambda: installed)
+        # ct2_drift_message is allowed to use the real implementation; the
+        # tests below pass arguments through it via these stubs.
+
+    def test_reports_pin_when_versions_match(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub_rocm(monkeypatch, installed="4.7.2", pinned="4.7.2")
+        out = _run(capsys)
+        assert "CT2 ROCm pin:" in out
+        assert "v4.7.2" in out
+        assert "installed: 4.7.2" in out
+        # No drift line when versions match.
+        assert "drift:" not in out
+
+    def test_warns_on_version_drift(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub_rocm(monkeypatch, installed="4.6.0", pinned="4.7.2")
+        out = _run(capsys)
+        assert "CT2 ROCm pin:" in out
+        assert "installed: 4.6.0" in out
+        assert "drift:" in out
+        assert "setup.sh --rocm" in out
+
+    def test_warns_when_ctranslate2_missing(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub_rocm(monkeypatch, installed=None, pinned="4.7.2")
+        out = _run(capsys)
+        assert "CT2 ROCm pin:" in out
+        assert "installed: not installed" in out
+        assert "drift:" in out
+
+    def test_pin_omitted_on_cuda(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The CT2 build a CUDA user has installed is unrelated to the
+        # ROCm pin — don't show the line on NVIDIA hardware.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.cuda, "get_device_name", lambda i: "FakeGPU")
+        monkeypatch.setattr(devices, "_cuda_vram_gb", lambda: 24.0)
+        monkeypatch.setattr(devices.torch.version, "cuda", "12.4", raising=False)
+        monkeypatch.setattr(devices.torch.version, "hip", None, raising=False)
+        out = _run(capsys)
+        assert "CT2 ROCm pin:" not in out
+
+    def test_pin_omitted_on_cpu(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        out = _run(capsys)
+        assert "CT2 ROCm pin:" not in out

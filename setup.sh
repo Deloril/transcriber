@@ -59,7 +59,13 @@ if [ "${1:-}" = "--rocm" ]; then
   # shellcheck disable=SC1091
   source .venv/bin/activate
 
-  CT2_VERSION="${SCRIBE_CT2_ROCM_VERSION:-4.7.2}"
+  # The pinned CT2 ROCm wheel version is canonically defined in
+  # scribe/rocm_install.py — read it from there so setup.sh and the
+  # devices report can never drift apart (G2.1). Fall back to the
+  # last-known-good literal if the import somehow fails (corrupted
+  # venv, partial repo).
+  DEFAULT_CT2_VERSION="$(python -c 'from scribe.rocm_install import PINNED_CT2_ROCM_VERSION; print(PINNED_CT2_ROCM_VERSION)' 2>/dev/null || echo 4.7.2)"
+  CT2_VERSION="${SCRIBE_CT2_ROCM_VERSION:-$DEFAULT_CT2_VERSION}"
   ROCM_TORCH_INDEX="${SCRIBE_ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.3}"
 
   echo ">> Installing PyTorch ROCm 6.3 wheel (replacing CUDA build)"

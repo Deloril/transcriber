@@ -16,6 +16,11 @@ from .engine import (
     gpu_arch_name,
     gpu_backend,
 )
+from .rocm_install import (
+    ct2_drift_message,
+    installed_ct2_version,
+    pinned_ct2_rocm_version,
+)
 
 
 def _linux_distro() -> str | None:
@@ -73,6 +78,17 @@ def main() -> int:
                 print(f"  GFX target:       {arch}")
         if backend == "rocm" and _is_rdna2():
             print("  Note: RDNA 2 detected — auto-applying CT2_CUDA_ALLOCATOR=cub_caching")
+        # G2.1: surface the pinned CT2 ROCm wheel version (and warn on drift)
+        # only when the active backend is ROCm — on CUDA / MPS / CPU the
+        # ctranslate2 build that's installed is unrelated to the ROCm pin.
+        if backend == "rocm":
+            pinned = pinned_ct2_rocm_version()
+            installed = installed_ct2_version()
+            shown = installed or "not installed"
+            print(f"  CT2 ROCm pin:     v{pinned} (installed: {shown})")
+            drift = ct2_drift_message(installed=installed, pinned=pinned)
+            if drift:
+                print(f"  ⚠  drift:          {drift}")
     print(f"MPS available:      {torch.backends.mps.is_available()}")
 
     w_dev, w_compute = _whisper_device_and_compute()
