@@ -7,3 +7,8 @@ outputs/
 models/
 .DS_Store
 profiles.json
+node_modules/
+coverage/
+.pytest_cache/
+htmlcov/
+.coverage

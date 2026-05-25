@@ -305,6 +305,33 @@ After processing, you get several files next to the original recording:
 - `<name>.srt` — subtitles
 - `<name>.vtt` — WebVTT subtitles
 
+## Testing
+
+Scribe has two test suites — a fast Python unit suite and a fast JS unit suite. A pre-commit hook runs both before allowing a commit.
+
+### Python (pytest)
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/pytest                       # fast suite (no models, no GPU)
+.venv/bin/pytest -m slow               # real-model integration tests
+.venv/bin/pytest -m gpu                # tests requiring CUDA
+.venv/bin/pytest --cov=scribe          # with coverage
+```
+
+The default invocation deselects `slow` and `gpu` markers so the suite stays under a few seconds. Real-model tests live behind `-m slow` and load whisperx/pyannote/NeMo, so you'll only run them locally during integration work.
+
+### JavaScript (Vitest + jsdom)
+
+```bash
+npm install        # one-time
+npm test           # run once
+npm run test:watch # watch mode
+npm run test:coverage
+```
+
+JS tests live in `tests/js/**/*.test.mjs` and exercise the pure helpers in `scribe/static/js/helpers.mjs` (formatters, ETA math, word-highlight search, etc).
+
 ## Troubleshooting
 
 **Slow on first run.** First time WhisperX runs it downloads ~3 GB of weights. Subsequent runs are offline.
