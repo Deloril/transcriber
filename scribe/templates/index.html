@@ -1177,19 +1177,17 @@
       return `${s}s`;
     }
 
-    // Job-time tracking. SSE delivers started_at/finished_at; we tick locally
-    // every 250 ms so the elapsed counter stays smooth between server updates.
-    // The ETA itself is intentionally throttled to ~5s so it doesn't flicker
-    // every quarter second on long jobs (a 0.1-second nudge to "32m 17s left"
-    // from "32m 18s left" is just noise).
+    // Job-time tracking. The elapsed counter ticks every 250 ms so it stays
+    // smooth. The ETA is held as a *predicted finish time* (epoch seconds),
+    // not a remaining duration — so between SSE progress updates it counts
+    // down naturally as `now` advances. New SSE updates revise the predicted
+    // finish time based on the latest progress reading.
     let _jobStartedAt = null;          // epoch seconds
     let _jobFinishedAt = null;
     let _jobLastProgress = 0;
-    let _jobLastProgressTime = null;
+    let _jobLastProgressTime = null;   // epoch seconds when _jobLastProgress was set
+    let _predictedFinishAt = null;     // epoch seconds; null until we have enough signal
     let _jobTickHandle = null;
-    let _etaLastComputedAt = 0;        // ms (Date.now)
-    let _etaText = "—";
-    const ETA_REFRESH_MS = 5000;
 
     function startJobTicker() {
       stopJobTicker();
@@ -1204,21 +1202,23 @@
       _jobFinishedAt = null;
       _jobLastProgress = 0;
       _jobLastProgressTime = null;
-      _etaLastComputedAt = 0;
-      _etaText = "—";
+      _predictedFinishAt = null;
       $("elapsedTime").textContent = "0s";
       $("etaTime").textContent = "—";
     }
 
-    function computeEtaText(elapsed) {
-      if (_jobFinishedAt != null) return "done";
-      // Refuse to estimate too early.
-      if (_jobLastProgress > 0.05 && elapsed > 8) {
-        const total = elapsed / _jobLastProgress;
-        const remaining = Math.max(0, total - elapsed);
-        return fmtElapsed(remaining) + " left";
+    // Recompute the predicted finish time from the latest progress reading.
+    // Called when an SSE progress update arrives, not on every tick.
+    function refreshEtaFromProgress() {
+      if (_jobStartedAt == null || _jobLastProgressTime == null) return;
+      if (_jobLastProgress <= 0.05) {
+        _predictedFinishAt = null;     // not enough signal yet
+        return;
       }
-      return "calculating…";
+      const elapsedAtUpdate = _jobLastProgressTime - _jobStartedAt;
+      if (elapsedAtUpdate <= 0) return;
+      const totalEstimate = elapsedAtUpdate / _jobLastProgress;
+      _predictedFinishAt = _jobStartedAt + totalEstimate;
     }
 
     function updateTimers() {
@@ -1232,15 +1232,16 @@
       const elapsed = Math.max(0, finishOrNow - _jobStartedAt);
       $("elapsedTime").textContent = fmtElapsed(elapsed);
 
-      // Recompute the ETA at most every ETA_REFRESH_MS, plus once at finish.
-      const nowMs = Date.now();
-      const stale = nowMs - _etaLastComputedAt >= ETA_REFRESH_MS;
-      const justFinished = _jobFinishedAt != null && _etaText !== "done";
-      if (stale || justFinished || _etaText === "—") {
-        _etaText = computeEtaText(elapsed);
-        _etaLastComputedAt = nowMs;
+      if (_jobFinishedAt != null) {
+        $("etaTime").textContent = "done";
+        return;
       }
-      $("etaTime").textContent = _etaText;
+      if (_predictedFinishAt == null || elapsed < 8) {
+        $("etaTime").textContent = "calculating…";
+        return;
+      }
+      const remaining = Math.max(0, _predictedFinishAt - now);
+      $("etaTime").textContent = fmtElapsed(remaining) + " left";
     }
 
     function streamProgress(jobId) {
@@ -1254,12 +1255,9 @@
         if (typeof d.started_at === "number") _jobStartedAt = d.started_at;
         if (typeof d.finished_at === "number") _jobFinishedAt = d.finished_at;
         if (typeof d.progress === "number" && d.progress > _jobLastProgress) {
-          // A meaningful (>=2pp) jump means we should refresh the ETA now
-          // rather than wait for the 5-second tick — phase boundaries can
-          // shift the projection sharply.
-          if (d.progress - _jobLastProgress >= 0.02) _etaLastComputedAt = 0;
           _jobLastProgress = d.progress;
           _jobLastProgressTime = Date.now() / 1000;
+          refreshEtaFromProgress();
         }
         updateTimers();
         if (d.status === "done") {
