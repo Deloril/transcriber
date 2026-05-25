@@ -123,6 +123,67 @@
     .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
     .hidden { display: none; }
 
+    .hf-token-box {
+      margin-top: 16px;
+      padding: 12px 14px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .hf-token-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .hf-token-summary { flex: 1; min-width: 0; }
+    .hf-token-summary .hint { margin-top: 2px; }
+    .hf-token-status {
+      display: inline-block;
+      font-size: 12px;
+      padding: 2px 9px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .hf-token-status.set { color: var(--ok); border-color: rgba(95,212,155,.4); }
+    .hf-token-status.unset { color: var(--muted); }
+    .hf-token-toggle {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 12px;
+      font-size: 13px;
+      font-weight: 500;
+      flex-shrink: 0;
+    }
+    .hf-token-toggle:hover { border-color: var(--accent); }
+    .hf-token-form { margin-top: 12px; }
+    .hf-token-form input[type="password"] { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .hf-token-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .hf-token-save {
+      padding: 8px 14px;
+      font-size: 13px;
+    }
+    .hf-token-clear {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .hf-token-clear:hover { border-color: var(--err); color: var(--err); }
+    #hfTokenMsg.ok { color: var(--ok); }
+    #hfTokenMsg.err { color: var(--err); }
+
     /* Header docs button */
     .doc-btn {
       margin-left: auto;
@@ -250,9 +311,33 @@
         </div>
       </div>
 
-      {% if not hf_token_set %}
-      <p class="hint">⚠ Diarize mode needs an HF_TOKEN in <code>.env</code>. See the README. Multi-track mode does not.</p>
-      {% endif %}
+      <div id="hfTokenBox" class="hf-token-box">
+        <div class="hf-token-row">
+          <div class="hf-token-summary">
+            <span id="hfTokenStatus" class="hf-token-status">Checking…</span>
+            <span class="hint" id="hfTokenHint">Required for diarize mode (single-track AI speaker ID). Multi-track mode does not need it.</span>
+          </div>
+          <button type="button" id="hfTokenToggle" class="hf-token-toggle">Set token</button>
+        </div>
+        <div id="hfTokenForm" class="hf-token-form hidden">
+          <label for="hfTokenInput">Hugging Face token</label>
+          <input id="hfTokenInput" type="password" autocomplete="off" spellcheck="false" placeholder="hf_…">
+          <div class="hf-token-actions">
+            <button type="button" id="hfTokenSave" class="hf-token-save">Save</button>
+            <button type="button" id="hfTokenClear" class="hf-token-clear">Clear</button>
+            <span id="hfTokenMsg" class="hint"></span>
+          </div>
+          <p class="hint">
+            Stored locally in <code>.env</code> and reused next session.
+            Get one at <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a>
+            after accepting the licenses on the
+            <a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank" rel="noopener">pyannote/speaker-diarization-3.1</a>
+            and
+            <a href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank" rel="noopener">pyannote/segmentation-3.0</a>
+            model pages.
+          </p>
+        </div>
+      </div>
 
       <div style="margin-top: 18px;">
         <button id="go" disabled>Transcribe</button>
@@ -446,6 +531,96 @@
       errBox.textContent = msg;
       errBox.classList.remove("hidden");
     }
+
+    // ---- HF token settings ----
+    const hfStatus = $("hfTokenStatus");
+    const hfToggle = $("hfTokenToggle");
+    const hfForm = $("hfTokenForm");
+    const hfInput = $("hfTokenInput");
+    const hfSave = $("hfTokenSave");
+    const hfClear = $("hfTokenClear");
+    const hfMsg = $("hfTokenMsg");
+
+    function renderHfStatus(state) {
+      if (state.set) {
+        hfStatus.textContent = `Token saved · ${state.masked}`;
+        hfStatus.className = "hf-token-status set";
+        hfToggle.textContent = "Change";
+        hfClear.classList.remove("hidden");
+      } else {
+        hfStatus.textContent = "No token set";
+        hfStatus.className = "hf-token-status unset";
+        hfToggle.textContent = "Set token";
+        hfClear.classList.add("hidden");
+      }
+    }
+
+    async function loadHfStatus() {
+      try {
+        const r = await fetch("/api/settings/hf_token");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        renderHfStatus(await r.json());
+      } catch (e) {
+        hfStatus.textContent = "Status unknown";
+        hfStatus.className = "hf-token-status unset";
+      }
+    }
+
+    function setHfMsg(text, ok) {
+      hfMsg.textContent = text;
+      hfMsg.className = "hint " + (ok === true ? "ok" : ok === false ? "err" : "");
+    }
+
+    hfToggle.addEventListener("click", () => {
+      hfForm.classList.toggle("hidden");
+      if (!hfForm.classList.contains("hidden")) {
+        hfInput.value = "";
+        setHfMsg("");
+        hfInput.focus();
+      }
+    });
+
+    async function saveHfToken(token) {
+      hfSave.disabled = true;
+      hfClear.disabled = true;
+      setHfMsg(token ? "Saving…" : "Clearing…");
+      try {
+        const r = await fetch("/api/settings/hf_token", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token })
+        });
+        if (!r.ok) {
+          const t = await r.text();
+          setHfMsg(t || `HTTP ${r.status}`, false);
+          return;
+        }
+        renderHfStatus(await r.json());
+        setHfMsg(token ? "Saved." : "Cleared.", true);
+        hfInput.value = "";
+        if (!token) hfForm.classList.add("hidden");
+      } catch (e) {
+        setHfMsg(String(e), false);
+      } finally {
+        hfSave.disabled = false;
+        hfClear.disabled = false;
+      }
+    }
+
+    hfSave.addEventListener("click", () => {
+      const token = hfInput.value.trim();
+      if (!token) { setHfMsg("Enter a token first.", false); return; }
+      saveHfToken(token);
+    });
+    hfInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); hfSave.click(); }
+    });
+    hfClear.addEventListener("click", () => {
+      if (!confirm("Remove the saved Hugging Face token?")) return;
+      saveHfToken("");
+    });
+
+    loadHfStatus();
 
     // ---- Docs panel ----
     const docsBtn = $("docsBtn"), docOverlay = $("docOverlay"), docPanel = $("docPanel");

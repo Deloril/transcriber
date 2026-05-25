@@ -31,6 +31,7 @@ load_dotenv()
 ROOT = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = ROOT / "uploads"
 OUTPUT_DIR = ROOT / "outputs"
+ENV_PATH = ROOT / ".env"
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -182,11 +183,7 @@ async def _startup() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {"hf_token_set": bool(os.environ.get("HF_TOKEN"))},
-    )
+    return templates.TemplateResponse(request, "index.html", {})
 
 
 @app.get("/edit/{job_id}", response_class=HTMLResponse)
@@ -432,6 +429,93 @@ async def download(job_id: str, kind: str) -> FileResponse:
     if not _is_under(full, OUTPUT_DIR):
         raise HTTPException(403, "Forbidden")
     return FileResponse(full, filename=full.name)
+
+
+# --------------------------------------------------------------------------- #
+# Settings — Hugging Face token
+# --------------------------------------------------------------------------- #
+
+
+_HF_TOKEN_RE = re.compile(r"^hf_[A-Za-z0-9]{20,}$")
+
+
+def _mask_token(token: str) -> str:
+    if len(token) <= 8:
+        return "•" * len(token)
+    return f"{token[:4]}…{token[-4:]}"
+
+
+def _read_env_file() -> dict[str, str]:
+    """Parse .env into a dict. Only handles simple KEY=VALUE lines we write ourselves."""
+    if not ENV_PATH.exists():
+        return {}
+    out: dict[str, str] = {}
+    for line in ENV_PATH.read_text().splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def _write_env_file(values: dict[str, str]) -> None:
+    """Rewrite .env preserving comments/blank lines, updating known keys in place."""
+    seen: set[str] = set()
+    new_lines: list[str] = []
+
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text().splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                new_lines.append(line)
+                continue
+            key = stripped.split("=", 1)[0].strip()
+            if key in values:
+                new_lines.append(f"{key}={values[key]}")
+                seen.add(key)
+            else:
+                new_lines.append(line)
+
+    for key, val in values.items():
+        if key not in seen:
+            new_lines.append(f"{key}={val}")
+
+    ENV_PATH.write_text("\n".join(new_lines).rstrip() + "\n")
+    try:
+        ENV_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
+@app.get("/api/settings/hf_token")
+async def get_hf_token() -> JSONResponse:
+    token = os.environ.get("HF_TOKEN", "")
+    return JSONResponse({"set": bool(token), "masked": _mask_token(token) if token else ""})
+
+
+@app.put("/api/settings/hf_token")
+async def put_hf_token(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Expected JSON object")
+    token = (payload.get("token") or "").strip()
+    if token and not _HF_TOKEN_RE.match(token):
+        raise HTTPException(400, "Token must look like 'hf_…' (alphanumeric, ≥20 chars after prefix)")
+
+    values = _read_env_file()
+    if token:
+        values["HF_TOKEN"] = token
+        os.environ["HF_TOKEN"] = token
+    else:
+        values["HF_TOKEN"] = ""
+        os.environ.pop("HF_TOKEN", None)
+    _write_env_file(values)
+
+    return JSONResponse({"set": bool(token), "masked": _mask_token(token) if token else ""})
 
 
 # --------------------------------------------------------------------------- #
