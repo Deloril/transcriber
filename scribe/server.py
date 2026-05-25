@@ -382,6 +382,111 @@ async def delete_profile(name: str) -> JSONResponse:
 
 
 # --------------------------------------------------------------------------- #
+# Projects (F1.1) — academic-coding research projects
+#
+# A project is the parent of {sources, codebook, memos, audit trail}.
+# F1.1 ships only the entity itself; F1.2 onwards layer in sources,
+# codebook, etc. Storage lives under ``PROJECTS_DIR/<id>/project.json``.
+# --------------------------------------------------------------------------- #
+
+from . import projects as _projects  # noqa: E402  (after module-level state)
+
+PROJECTS_DIR = ROOT / "projects"
+PROJECTS_LOCK = threading.Lock()
+
+
+def _projects_root() -> Path:
+    """Resolve the projects root lazily so tests can monkeypatch
+    PROJECTS_DIR at runtime, mirroring how UPLOAD_DIR/OUTPUT_DIR work.
+    """
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    return PROJECTS_DIR
+
+
+def _check_project_id(project_id: str) -> None:
+    if not _projects.PROJECT_ID_RE.match(project_id):
+        raise HTTPException(400, "Invalid project id")
+
+
+@app.get("/api/projects")
+async def list_projects_endpoint() -> JSONResponse:
+    with PROJECTS_LOCK:
+        out = [p.to_dict() for p in _projects.list_projects(_projects_root())]
+    return JSONResponse({"projects": out})
+
+
+@app.post("/api/projects")
+async def create_project_endpoint(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    try:
+        project = _projects.Project.new(
+            name=str(body.get("name", "")),
+            research_question=str(body.get("research_question", "") or ""),
+            methodology=str(body.get("methodology", "") or ""),
+            sensitising_concepts=body.get("sensitising_concepts") or [],
+            description=str(body.get("description", "") or ""),
+            codebook_stage=str(body.get("codebook_stage", "initial") or "initial"),
+        )
+    except _projects.ProjectValidationError as e:
+        raise HTTPException(400, str(e))
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, f"Invalid project payload: {e}")
+
+    with PROJECTS_LOCK:
+        _projects.save_project(_projects_root(), project)
+    return JSONResponse(project.to_dict(), status_code=201)
+
+
+@app.get("/api/projects/{project_id}")
+async def get_project_endpoint(project_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+    return JSONResponse(project.to_dict())
+
+
+@app.patch("/api/projects/{project_id}")
+async def patch_project_endpoint(project_id: str, request: Request) -> JSONResponse:
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            project.apply_update(body)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _projects.save_project(_projects_root(), project)
+    return JSONResponse(project.to_dict())
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project_endpoint(project_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        ok = _projects.delete_project(_projects_root(), project_id)
+    if not ok:
+        raise HTTPException(404, "Project not found")
+    return JSONResponse({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 

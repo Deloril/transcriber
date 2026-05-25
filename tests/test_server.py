@@ -45,6 +45,11 @@ def server_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(srv, "UPLOAD_DIR", upload)
     monkeypatch.setattr(srv, "OUTPUT_DIR", output)
     monkeypatch.setattr(srv, "ROOT", tmp_path)
+    # Projects (F1.1) live under tmp too so tests don't trample the
+    # developer's real `projects/` directory.
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    monkeypatch.setattr(srv, "PROJECTS_DIR", projects_dir)
 
     client = TestClient(srv.app)
     yield srv, client, tmp_path
@@ -724,3 +729,176 @@ class TestPersistence:
         srv._load_jobs_from_disk()
         assert srv.JOBS["0123456abcde"].status == "error"
         assert "restarted" in (srv.JOBS["0123456abcde"].error or "").lower()
+
+
+# --------------------------------------------------------------------------- #
+# Projects (F1.1)
+# --------------------------------------------------------------------------- #
+
+
+class TestProjectsAPI:
+    def test_list_empty(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get("/api/projects")
+        assert r.status_code == 200
+        assert r.json() == {"projects": []}
+
+    def test_create_minimal(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post("/api/projects", json={"name": "Pilot"})
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["name"] == "Pilot"
+        assert body["codebook_stage"] == "initial"
+        assert re.match(r"^[a-f0-9]{12}$", body["id"])
+        assert body["created_at"] == body["modified_at"]
+
+    def test_create_full_fields(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post("/api/projects", json={
+            "name": "Consent in care",
+            "research_question": "How do nurses interpret consent?",
+            "methodology": "charmaz",
+            "sensitising_concepts": ["agency", "structure"],
+            "description": "Pilot",
+            "codebook_stage": "focused",
+        })
+        assert r.status_code == 201
+        body = r.json()
+        assert body["methodology"] == "charmaz"
+        assert body["sensitising_concepts"] == ["agency", "structure"]
+        assert body["codebook_stage"] == "focused"
+
+    def test_create_persists_to_disk(self, server_env) -> None:
+        srv, client, tmp = server_env
+        r = client.post("/api/projects", json={"name": "On disk"})
+        pid = r.json()["id"]
+        on_disk = json.loads(
+            (srv.PROJECTS_DIR / pid / "project.json").read_text()
+        )
+        assert on_disk["name"] == "On disk"
+
+    def test_create_blank_name_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post("/api/projects", json={"name": "   "})
+        assert r.status_code == 400
+
+    def test_create_invalid_stage_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post("/api/projects", json={
+            "name": "ok", "codebook_stage": "bogus",
+        })
+        assert r.status_code == 400
+
+    def test_create_non_object_body_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post("/api/projects", json=["not", "an", "object"])
+        assert r.status_code == 400
+
+    def test_create_invalid_json_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            "/api/projects",
+            content=b"not json",
+            headers={"content-type": "application/json"},
+        )
+        assert r.status_code == 400
+
+    def test_get_existing(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = client.post("/api/projects", json={"name": "Fetch me"}).json()["id"]
+        r = client.get(f"/api/projects/{pid}")
+        assert r.status_code == 200
+        assert r.json()["name"] == "Fetch me"
+
+    def test_get_missing_404(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get("/api/projects/aaaaaaaaaaaa")
+        assert r.status_code == 404
+
+    def test_get_invalid_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        for bad in ("BAD", "../etc", "x" * 12):
+            r = client.get(f"/api/projects/{bad}")
+            # routing-level vs validator: either 400 or 404; never 500.
+            assert r.status_code in (400, 404), (bad, r.status_code)
+
+    def test_list_returns_created(self, server_env) -> None:
+        _, client, _ = server_env
+        client.post("/api/projects", json={"name": "A"})
+        client.post("/api/projects", json={"name": "B"})
+        r = client.get("/api/projects")
+        names = sorted(p["name"] for p in r.json()["projects"])
+        assert names == ["A", "B"]
+
+    def test_patch_updates_fields(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = client.post("/api/projects", json={"name": "Old"}).json()["id"]
+        r = client.patch(f"/api/projects/{pid}", json={
+            "name": "New",
+            "codebook_stage": "focused",
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["name"] == "New"
+        assert body["codebook_stage"] == "focused"
+        # Persisted on disk.
+        again = client.get(f"/api/projects/{pid}").json()
+        assert again["name"] == "New"
+
+    def test_patch_advances_modified_at(self, server_env) -> None:
+        _, client, _ = server_env
+        created = client.post("/api/projects", json={"name": "Time"}).json()
+        pid = created["id"]
+        original_modified = created["modified_at"]
+        # Sleep a tiny bit to guarantee a different microsecond.
+        import time
+        time.sleep(0.005)
+        updated = client.patch(f"/api/projects/{pid}", json={"name": "Time2"}).json()
+        assert updated["created_at"] == created["created_at"]
+        assert updated["modified_at"] >= original_modified
+
+    def test_patch_unknown_field_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = client.post("/api/projects", json={"name": "ok"}).json()["id"]
+        r = client.patch(f"/api/projects/{pid}", json={"haxx": True})
+        assert r.status_code == 400
+
+    def test_patch_invalid_stage_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = client.post("/api/projects", json={"name": "ok"}).json()["id"]
+        r = client.patch(f"/api/projects/{pid}", json={"codebook_stage": "garbage"})
+        assert r.status_code == 400
+
+    def test_patch_missing_404(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.patch("/api/projects/aaaaaaaaaaaa", json={"name": "x"})
+        assert r.status_code == 404
+
+    def test_patch_id_in_body_ignored(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = client.post("/api/projects", json={"name": "ok"}).json()["id"]
+        # User tries to rewrite their id mid-update — server must ignore.
+        r = client.patch(f"/api/projects/{pid}", json={
+            "id": "ffffffffffff", "name": "renamed",
+        })
+        assert r.status_code == 200
+        assert r.json()["id"] == pid
+
+    def test_delete(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = client.post("/api/projects", json={"name": "Doomed"}).json()["id"]
+        r = client.delete(f"/api/projects/{pid}")
+        assert r.status_code == 200
+        assert client.get(f"/api/projects/{pid}").status_code == 404
+
+    def test_delete_missing_404(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.delete("/api/projects/aaaaaaaaaaaa")
+        assert r.status_code == 404
+
+    def test_create_isolated_per_test(self, server_env) -> None:
+        # Confirms the fixture redirects PROJECTS_DIR — projects from
+        # one test don't leak into another.
+        _, client, _ = server_env
+        assert client.get("/api/projects").json() == {"projects": []}
