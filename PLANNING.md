@@ -11,6 +11,7 @@ This document captures the next-phase feature backlog. It's a working planning d
 - ✅ Persistence across server restarts; per-job error logs
 - 🚧 **Test infrastructure** (in progress — pytest + Vitest set up; per-module test files still being written)
 - ⬜ **AMD / ROCm GPU support** (this doc)
+- ⬜ **Transcription management** (this doc)
 - ⬜ **Academic coding engine** (this doc)
 
 ---
@@ -75,6 +76,39 @@ The honest story:
 - **Phase A** — Detection + device routing + Parakeet hiding + scribe.devices reporting (tasks G1.1–G1.4, G5.1–G5.2). No install changes; just makes the existing code paths AMD-aware. Ships a dev-time win even before the wheel is installed.
 - **Phase B** — `setup.sh --rocm` installer that fetches the CT2 ROCm wheel (G2.1, G2.3). LSTM dropout patch (G3.1). RDNA 2 workarounds (G4.1, G4.2). This is the milestone that says "AMD GPU support shipped."
 - **Phase C** — Smoke-test script + in-house benchmark (G6.1, G6.2). Mirror the wheel (G2.2). Optional whisper.cpp Vulkan backend for Tier 3 if there's demand.
+
+---
+
+# Feature: Transcription management
+
+Today, every transcription job creates `outputs/<job_id>/` and `uploads/<job_id>/` and the only way to get back to one is the `/edit/<job_id>` URL the user happens to remember. These three features close that gap so the home screen becomes a real library, source media can be reclaimed without losing transcripts, and externally-produced transcripts can join the set.
+
+## Backlog
+
+- **F10.1** Library view: a list of all completed (and in-progress) transcriptions on the home page, or one click away under `/library`. Shows filename, duration, mode (multi-track / diarize), speaker count, language, created date, status, and per-row actions (open editor, download, delete). Sortable, with a search box that matches filenames and detected speakers. Backed by the persisted `outputs/<id>/job.json` files we already write — no schema changes for the basic view. Surfaces interrupted-by-restart jobs (status=`error`) so the user sees them and can clean them up.
+
+- **F10.2** Delete the source media while keeping the transcript. Today, source files (`uploads/<id>/<file>`) are needed for the editor's media playback (`/api/job/<id>/media`). After F10.2:
+  - A **"Discard source media"** action on each library row and on the editor page.
+  - Confirms once with a clear "playback will no longer work for this transcription" warning.
+  - Removes `uploads/<id>/` and rewrites `job.json` with a `media_discarded: true` flag.
+  - The editor degrades gracefully when the flag is set: hides the player, shows a notice, keeps everything else (transcript text, word-level edit, search, export).
+  - The library view shows a small icon when source media has been discarded.
+  - Outputs (`outputs/<id>/*.json/.txt/.srt/.vtt/edited.json/waveform_*.json`) are untouched.
+  - Disk-space rationale: video sources can be hundreds of MB; once the transcript is final and reviewed, users want to reclaim that space without losing their edited transcript or coding work.
+
+- **F10.3** Import an existing transcript. Three import paths researchers actually have:
+  1. **Plain text + speaker labels** (`[00:01] LUKE: Hello.` style — what we export as `.txt`).
+  2. **SRT / VTT subtitle files**.
+  3. **Scribe JSON** (the same shape we produce in `outputs/<id>/<name>.json`, including word-level timestamps if present).
+  - Drag-and-drop on the home page (alongside the existing audio/video drop), with a content-type sniff to decide which parser to use.
+  - Optionally upload a *companion media file* alongside the transcript so playback works. If no media is provided, the resulting job lands with `media_discarded: true` from the start (F10.2 already gave us that flag).
+  - Treat the import as a finished job: skip the engine entirely, populate `result` directly from the parsed transcript, write the standard sidecars (`.txt/.srt/.vtt/.json`), assign a normal job id, set `status=done`, jump straight to the editor on success.
+  - Word-level timestamps when missing (TXT, SRT, VTT) are synthesised proportionally across each segment span using the same `spreadTokensAcrossSpan` helper the editor already uses for resync after edits.
+
+## Phasing
+
+- **Phase A — Library + delete source** (F10.1, F10.2). Needs only persistence + UI work; no parsing.
+- **Phase B — Import** (F10.3). Builds on F10.2's `media_discarded` flag for the no-media path.
 
 ---
 
