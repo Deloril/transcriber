@@ -583,3 +583,199 @@ export function snapToParagraph(sel, segments) {
     endCharOffset: null,
   };
 }
+
+// ---------- playback ranges for coded segments (F4.6) ----------
+//
+// JS mirror of `scribe.application_playback`. Same semantics, same
+// outputs; the parallel suite in tests/js/playback.test.mjs
+// exercises the same fixtures as tests/test_application_playback.py
+// and the two must agree.
+
+/**
+ * A timing record for a single word in the transcript. Fields match
+ * `scribe.application_playback.WordTime`.
+ *
+ *   { start, end, text }
+ */
+
+/**
+ * Coerce `value` to a finite Number or return null. Mirrors the
+ * Python `_coerce_time` helper: bool / NaN / ±Infinity / non-numeric
+ * inputs all become null. JS's typeof-bool catches `true` / `false`
+ * (which are falsy/truthy but not Numbers in JS, so the typeof
+ * check below already handles them).
+ */
+function _coerceTime(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "boolean") return null;
+  if (typeof value !== "number") return null;
+  if (!Number.isFinite(value)) return null;
+  return value;
+}
+
+/**
+ * Flatten a Scribe transcript's `segments[].words[]` into a
+ * `{ "s<seg>w<word>": { start, end, text } }` dictionary.
+ *
+ * Words missing or with invalid timing are skipped — callers learn
+ * by absence (`!(wordId in map)`). Mirrors `build_word_time_map` in
+ * Python; insertion order is preserved.
+ *
+ * Throws on a non-array `segments` input. Empty `segments` returns
+ * an empty object.
+ */
+export function buildWordTimeMap(segments) {
+  if (!Array.isArray(segments)) {
+    throw new Error("segments must be an array");
+  }
+  const out = Object.create(null);
+  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+    const seg = segments[segIdx];
+    if (!seg || typeof seg !== "object") continue;
+    const words = seg.words;
+    if (!Array.isArray(words)) continue;
+    for (let wordIdx = 0; wordIdx < words.length; wordIdx++) {
+      const w = words[wordIdx];
+      if (!w || typeof w !== "object") continue;
+      const start = _coerceTime(w.start);
+      const end = _coerceTime(w.end);
+      if (start === null || end === null) continue;
+      if (end < start) continue;
+      const text = typeof w.text === "string"
+        ? w.text
+        : (w.text == null ? "" : String(w.text));
+      out[`s${segIdx}w${wordIdx}`] = { start, end, text };
+    }
+  }
+  return out;
+}
+
+function _segmentTime(segments, segIdx) {
+  if (segIdx < 0 || segIdx >= segments.length) return [null, null];
+  const seg = segments[segIdx];
+  if (!seg || typeof seg !== "object") return [null, null];
+  return [_coerceTime(seg.start), _coerceTime(seg.end)];
+}
+
+function _interpolateOffset(word, charOffset, side) {
+  const textLen = word.text ? word.text.length : 0;
+  if (textLen <= 0) return side === "start" ? word.start : word.end;
+  const span = word.end - word.start;
+  if (span <= 0) return word.start;
+  const clamped = Math.max(0, Math.min(charOffset, textLen));
+  return word.start + span * (clamped / textLen);
+}
+
+/**
+ * Compute the wall-clock playback range `[start, end]` for one
+ * application's anchor over `segments`. Mirrors
+ * `playback_range_for_application` in Python.
+ *
+ * `app` carries the camelCase fields used elsewhere in helpers.mjs:
+ *   - id, sourceId
+ *   - anchorStartWordId, anchorEndWordId
+ *   - startCharOffset, endCharOffset (number or null)
+ *
+ * Returns `null` when neither the anchor words nor their segments
+ * have any usable timing — the caller should hide the play button.
+ *
+ * Returns
+ *   { applicationId, sourceId, start, end }
+ *
+ * Throws on malformed anchor word ids and on anchors whose segment
+ * index falls outside `segments` (matches the Python behaviour;
+ * F4.5 is the right place to handle out-of-range anchors long-term).
+ *
+ * `wordTimeMap` may be passed by callers that already built one.
+ */
+export function playbackRangeForApplication(app, segments, wordTimeMap) {
+  if (!app || typeof app !== "object") {
+    throw new Error("app must be an object");
+  }
+  if (!Array.isArray(segments)) {
+    throw new Error("segments must be an array");
+  }
+  const startParsed = parseWordId(app.anchorStartWordId);
+  const endParsed = parseWordId(app.anchorEndWordId);
+  if (!startParsed) {
+    throw new Error(`anchorStartWordId malformed: ${app.anchorStartWordId}`);
+  }
+  if (!endParsed) {
+    throw new Error(`anchorEndWordId malformed: ${app.anchorEndWordId}`);
+  }
+  const [saSeg] = startParsed;
+  const [eaSeg] = endParsed;
+  if (saSeg < 0 || saSeg >= segments.length) {
+    throw new Error(
+      `anchorStartWordId segment ${saSeg} out of range [0, ${segments.length})`
+    );
+  }
+  if (eaSeg < 0 || eaSeg >= segments.length) {
+    throw new Error(
+      `anchorEndWordId segment ${eaSeg} out of range [0, ${segments.length})`
+    );
+  }
+
+  const wmap = wordTimeMap || buildWordTimeMap(segments);
+  const startWord = wmap[app.anchorStartWordId];
+  const endWord = wmap[app.anchorEndWordId];
+  const [segStart] = _segmentTime(segments, saSeg);
+  const segEnd = _segmentTime(segments, eaSeg)[1];
+
+  let startTime;
+  if (startWord) {
+    startTime = app.startCharOffset != null
+      ? _interpolateOffset(startWord, app.startCharOffset, "start")
+      : startWord.start;
+  } else if (segStart != null) {
+    startTime = segStart;
+  } else {
+    return null;
+  }
+
+  let endTime;
+  if (endWord) {
+    endTime = app.endCharOffset != null
+      ? _interpolateOffset(endWord, app.endCharOffset, "end")
+      : endWord.end;
+  } else if (segEnd != null) {
+    endTime = segEnd;
+  } else {
+    return null;
+  }
+
+  if (endTime < startTime) endTime = startTime;
+
+  return {
+    applicationId: app.id,
+    sourceId: app.sourceId,
+    start: startTime,
+    end: endTime,
+  };
+}
+
+/**
+ * Bulk variant. `segmentsBySource` is `{ sourceId: segments }`.
+ * Returns `{ applicationId: { applicationId, sourceId, start, end } }`,
+ * skipping applications whose source isn't in the map and applications
+ * whose individual lookup returns null.
+ *
+ * Builds the word-time map once per source. Mirrors
+ * `playback_ranges_for_applications` in Python.
+ */
+export function playbackRangesForApplications(apps, segmentsBySource) {
+  const cache = Object.create(null);
+  const out = Object.create(null);
+  for (const app of apps || []) {
+    const segs = segmentsBySource ? segmentsBySource[app.sourceId] : undefined;
+    if (!segs) continue;
+    let wmap = cache[app.sourceId];
+    if (!wmap) {
+      wmap = buildWordTimeMap(segs);
+      cache[app.sourceId] = wmap;
+    }
+    const r = playbackRangeForApplication(app, segs, wmap);
+    if (r !== null) out[app.id] = r;
+  }
+  return out;
+}
