@@ -902,3 +902,302 @@ class TestProjectsAPI:
         # one test don't leak into another.
         _, client, _ = server_env
         assert client.get("/api/projects").json() == {"projects": []}
+
+
+# --------------------------------------------------------------------------- #
+# Sources (F1.2)
+# --------------------------------------------------------------------------- #
+
+
+class TestSourcesAPI:
+    def _make_project(self, client) -> str:
+        r = client.post("/api/projects", json={"name": "Holder"})
+        assert r.status_code == 201
+        return r.json()["id"]
+
+    def test_list_empty(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.get(f"/api/projects/{pid}/sources")
+        assert r.status_code == 200
+        assert r.json() == {"sources": []}
+
+    def test_list_404_when_project_missing(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get("/api/projects/aaaaaaaaaaaa/sources")
+        assert r.status_code == 404
+
+    def test_create_minimal(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/sources",
+            json={"name": "Interview 1"},
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["name"] == "Interview 1"
+        assert body["project_id"] == pid
+        assert body["source_type"] == "transcript"
+        assert body["transcript_job_id"] is None
+        assert re.match(r"^[a-f0-9]{12}$", body["id"])
+        assert body["created_at"] == body["modified_at"]
+
+    def test_create_full_fields(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/sources",
+            json={
+                "name": "P03 second visit",
+                "source_type": "transcript",
+                "transcript_job_id": "0123456789ab",
+                "language": "en-US",
+                "recording_date": "2024-04-01",
+                "notes": "Audio quality good.",
+                "custom_attributes": {"site": "B", "round": "2"},
+            },
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["transcript_job_id"] == "0123456789ab"
+        assert body["language"] == "en-US"
+        assert body["recording_date"] == "2024-04-01"
+        assert body["custom_attributes"] == {"site": "B", "round": "2"}
+
+    def test_create_persists_to_disk(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/sources",
+            json={"name": "On disk"},
+        )
+        sid = r.json()["id"]
+        on_disk = json.loads(
+            (srv.PROJECTS_DIR / pid / "sources" / f"{sid}.json").read_text()
+        )
+        assert on_disk["name"] == "On disk"
+
+    def test_create_blank_name_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/sources", json={"name": "  "}
+        )
+        assert r.status_code == 400
+
+    def test_create_invalid_source_type_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/sources",
+            json={"name": "ok", "source_type": "podcast"},
+        )
+        assert r.status_code == 400
+
+    def test_create_invalid_transcript_job_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/sources",
+            json={"name": "ok", "transcript_job_id": "../etc/passwd"},
+        )
+        assert r.status_code == 400
+
+    def test_create_invalid_recording_date_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/sources",
+            json={"name": "ok", "recording_date": "01/04/2024"},
+        )
+        assert r.status_code == 400
+
+    def test_create_unknown_project_404(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            "/api/projects/aaaaaaaaaaaa/sources",
+            json={"name": "ok"},
+        )
+        assert r.status_code == 404
+
+    def test_create_invalid_project_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            "/api/projects/BAD/sources",
+            json={"name": "ok"},
+        )
+        assert r.status_code in (400, 404)
+
+    def test_create_non_object_body_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/sources",
+            json=["not", "an", "object"],
+        )
+        assert r.status_code == 400
+
+    def test_create_invalid_json_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/sources",
+            content=b"not json",
+            headers={"content-type": "application/json"},
+        )
+        assert r.status_code == 400
+
+    def test_get_existing(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        sid = client.post(
+            f"/api/projects/{pid}/sources", json={"name": "Fetch"}
+        ).json()["id"]
+        r = client.get(f"/api/projects/{pid}/sources/{sid}")
+        assert r.status_code == 200
+        assert r.json()["name"] == "Fetch"
+
+    def test_get_missing_404(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.get(f"/api/projects/{pid}/sources/aaaaaaaaaaaa")
+        assert r.status_code == 404
+
+    def test_get_invalid_source_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        for bad in ("BAD", "x" * 12, "../escape"):
+            r = client.get(f"/api/projects/{pid}/sources/{bad}")
+            assert r.status_code in (400, 404), (bad, r.status_code)
+
+    def test_list_returns_created(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        client.post(f"/api/projects/{pid}/sources", json={"name": "A"})
+        client.post(f"/api/projects/{pid}/sources", json={"name": "B"})
+        names = sorted(
+            s["name"]
+            for s in client.get(f"/api/projects/{pid}/sources").json()["sources"]
+        )
+        assert names == ["A", "B"]
+
+    def test_list_only_returns_own_project_sources(self, server_env) -> None:
+        # Two projects; sources don't leak across.
+        _, client, _ = server_env
+        a = self._make_project(client)
+        b = client.post("/api/projects", json={"name": "Other"}).json()["id"]
+        client.post(f"/api/projects/{a}/sources", json={"name": "A1"})
+        client.post(f"/api/projects/{b}/sources", json={"name": "B1"})
+        a_names = [s["name"] for s in client.get(f"/api/projects/{a}/sources").json()["sources"]]
+        b_names = [s["name"] for s in client.get(f"/api/projects/{b}/sources").json()["sources"]]
+        assert a_names == ["A1"]
+        assert b_names == ["B1"]
+
+    def test_patch_updates_fields(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        sid = client.post(
+            f"/api/projects/{pid}/sources", json={"name": "Old"}
+        ).json()["id"]
+        r = client.patch(
+            f"/api/projects/{pid}/sources/{sid}",
+            json={"name": "New", "language": "en-GB"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["name"] == "New"
+        assert body["language"] == "en-GB"
+        # Persisted on disk.
+        again = client.get(f"/api/projects/{pid}/sources/{sid}").json()
+        assert again["name"] == "New"
+
+    def test_patch_advances_modified_at(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        created = client.post(
+            f"/api/projects/{pid}/sources", json={"name": "Time"}
+        ).json()
+        sid = created["id"]
+        original = created["modified_at"]
+        import time
+        time.sleep(0.005)
+        updated = client.patch(
+            f"/api/projects/{pid}/sources/{sid}", json={"name": "Time2"}
+        ).json()
+        assert updated["created_at"] == created["created_at"]
+        assert updated["modified_at"] >= original
+
+    def test_patch_unknown_field_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        sid = client.post(
+            f"/api/projects/{pid}/sources", json={"name": "ok"}
+        ).json()["id"]
+        r = client.patch(
+            f"/api/projects/{pid}/sources/{sid}", json={"haxx": True}
+        )
+        assert r.status_code == 400
+
+    def test_patch_invalid_value_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        sid = client.post(
+            f"/api/projects/{pid}/sources", json={"name": "ok"}
+        ).json()["id"]
+        r = client.patch(
+            f"/api/projects/{pid}/sources/{sid}",
+            json={"source_type": "garbage"},
+        )
+        assert r.status_code == 400
+
+    def test_patch_id_in_body_ignored(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        sid = client.post(
+            f"/api/projects/{pid}/sources", json={"name": "ok"}
+        ).json()["id"]
+        r = client.patch(
+            f"/api/projects/{pid}/sources/{sid}",
+            json={"id": "ffffffffffff", "project_id": "ffffffffffff", "name": "renamed"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["id"] == sid
+        assert body["project_id"] == pid
+
+    def test_patch_missing_404(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.patch(
+            f"/api/projects/{pid}/sources/aaaaaaaaaaaa",
+            json={"name": "x"},
+        )
+        assert r.status_code == 404
+
+    def test_delete(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        sid = client.post(
+            f"/api/projects/{pid}/sources", json={"name": "Doomed"}
+        ).json()["id"]
+        r = client.delete(f"/api/projects/{pid}/sources/{sid}")
+        assert r.status_code == 200
+        assert client.get(f"/api/projects/{pid}/sources/{sid}").status_code == 404
+
+    def test_delete_missing_404(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.delete(f"/api/projects/{pid}/sources/aaaaaaaaaaaa")
+        assert r.status_code == 404
+
+    def test_delete_project_cascades_sources(self, server_env) -> None:
+        # Cleanup contract: deleting a project removes its sources.
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        client.post(f"/api/projects/{pid}/sources", json={"name": "S1"})
+        client.post(f"/api/projects/{pid}/sources", json={"name": "S2"})
+        assert (srv.PROJECTS_DIR / pid / "sources").exists()
+        r = client.delete(f"/api/projects/{pid}")
+        assert r.status_code == 200
+        assert not (srv.PROJECTS_DIR / pid).exists()

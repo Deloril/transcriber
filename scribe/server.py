@@ -487,6 +487,125 @@ async def delete_project_endpoint(project_id: str) -> JSONResponse:
 
 
 # --------------------------------------------------------------------------- #
+# Sources (F1.2) — primary-data items attached to a project
+#
+# A source is most commonly a Scribe transcript (linked via
+# ``transcript_job_id``) but the schema is forward-compatible with field
+# notes, documents, and images. Sources live under
+# ``PROJECTS_DIR/<pid>/sources/<sid>.json``; deleting the parent project
+# wipes them as a side-effect.
+# --------------------------------------------------------------------------- #
+
+from . import sources as _sources  # noqa: E402  (after module-level state)
+
+
+def _check_source_id(source_id: str) -> None:
+    if not _sources.SOURCE_ID_RE.match(source_id):
+        raise HTTPException(400, "Invalid source id")
+
+
+def _project_must_exist(project_id: str) -> None:
+    """Raise 404 if the parent project doesn't have a project.json."""
+    if not _projects.project_state_path(_projects_root(), project_id).exists():
+        raise HTTPException(404, "Project not found")
+
+
+@app.get("/api/projects/{project_id}/sources")
+async def list_sources_endpoint(project_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        out = [
+            s.to_dict()
+            for s in _sources.list_sources(_projects_root(), project_id)
+        ]
+    return JSONResponse({"sources": out})
+
+
+@app.post("/api/projects/{project_id}/sources")
+async def create_source_endpoint(project_id: str, request: Request) -> JSONResponse:
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            source = _sources.Source.new(
+                project_id=project_id,
+                name=str(body.get("name", "")),
+                source_type=str(body.get("source_type", "transcript") or "transcript"),
+                transcript_job_id=body.get("transcript_job_id") or None,
+                language=str(body.get("language", "") or ""),
+                recording_date=str(body.get("recording_date", "") or ""),
+                notes=str(body.get("notes", "") or ""),
+                custom_attributes=body.get("custom_attributes") or {},
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid source payload: {e}")
+        _sources.save_source(_projects_root(), source)
+    return JSONResponse(source.to_dict(), status_code=201)
+
+
+@app.get("/api/projects/{project_id}/sources/{source_id}")
+async def get_source_endpoint(project_id: str, source_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            source = _sources.load_source(_projects_root(), project_id, source_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+    return JSONResponse(source.to_dict())
+
+
+@app.patch("/api/projects/{project_id}/sources/{source_id}")
+async def patch_source_endpoint(
+    project_id: str, source_id: str, request: Request
+) -> JSONResponse:
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            source = _sources.load_source(_projects_root(), project_id, source_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+        try:
+            source.apply_update(body)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _sources.save_source(_projects_root(), source)
+    return JSONResponse(source.to_dict())
+
+
+@app.delete("/api/projects/{project_id}/sources/{source_id}")
+async def delete_source_endpoint(project_id: str, source_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        ok = _sources.delete_source(_projects_root(), project_id, source_id)
+    if not ok:
+        raise HTTPException(404, "Source not found")
+    return JSONResponse({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 
