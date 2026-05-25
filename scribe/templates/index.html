@@ -1178,12 +1178,18 @@
     }
 
     // Job-time tracking. SSE delivers started_at/finished_at; we tick locally
-    // every 250 ms so the counter stays smooth between server updates.
+    // every 250 ms so the elapsed counter stays smooth between server updates.
+    // The ETA itself is intentionally throttled to ~5s so it doesn't flicker
+    // every quarter second on long jobs (a 0.1-second nudge to "32m 17s left"
+    // from "32m 18s left" is just noise).
     let _jobStartedAt = null;          // epoch seconds
     let _jobFinishedAt = null;
     let _jobLastProgress = 0;
     let _jobLastProgressTime = null;
     let _jobTickHandle = null;
+    let _etaLastComputedAt = 0;        // ms (Date.now)
+    let _etaText = "—";
+    const ETA_REFRESH_MS = 5000;
 
     function startJobTicker() {
       stopJobTicker();
@@ -1198,8 +1204,21 @@
       _jobFinishedAt = null;
       _jobLastProgress = 0;
       _jobLastProgressTime = null;
+      _etaLastComputedAt = 0;
+      _etaText = "—";
       $("elapsedTime").textContent = "0s";
       $("etaTime").textContent = "—";
+    }
+
+    function computeEtaText(elapsed) {
+      if (_jobFinishedAt != null) return "done";
+      // Refuse to estimate too early.
+      if (_jobLastProgress > 0.05 && elapsed > 8) {
+        const total = elapsed / _jobLastProgress;
+        const remaining = Math.max(0, total - elapsed);
+        return fmtElapsed(remaining) + " left";
+      }
+      return "calculating…";
     }
 
     function updateTimers() {
@@ -1213,21 +1232,15 @@
       const elapsed = Math.max(0, finishOrNow - _jobStartedAt);
       $("elapsedTime").textContent = fmtElapsed(elapsed);
 
-      if (_jobFinishedAt != null) {
-        $("etaTime").textContent = "done";
-        return;
+      // Recompute the ETA at most every ETA_REFRESH_MS, plus once at finish.
+      const nowMs = Date.now();
+      const stale = nowMs - _etaLastComputedAt >= ETA_REFRESH_MS;
+      const justFinished = _jobFinishedAt != null && _etaText !== "done";
+      if (stale || justFinished || _etaText === "—") {
+        _etaText = computeEtaText(elapsed);
+        _etaLastComputedAt = nowMs;
       }
-
-      // ETA: linear projection from progress over time. Refuse to estimate
-      // until we have at least 8s of runtime AND progress > 5% — too early
-      // and the answer is meaningless.
-      if (_jobLastProgress > 0.05 && elapsed > 8) {
-        const total = elapsed / _jobLastProgress;
-        const remaining = Math.max(0, total - elapsed);
-        $("etaTime").textContent = fmtElapsed(remaining) + " left";
-      } else {
-        $("etaTime").textContent = "calculating…";
-      }
+      $("etaTime").textContent = _etaText;
     }
 
     function streamProgress(jobId) {
@@ -1241,6 +1254,10 @@
         if (typeof d.started_at === "number") _jobStartedAt = d.started_at;
         if (typeof d.finished_at === "number") _jobFinishedAt = d.finished_at;
         if (typeof d.progress === "number" && d.progress > _jobLastProgress) {
+          // A meaningful (>=2pp) jump means we should refresh the ETA now
+          // rather than wait for the 5-second tick — phase boundaries can
+          // shift the projection sharply.
+          if (d.progress - _jobLastProgress >= 0.02) _etaLastComputedAt = 0;
           _jobLastProgress = d.progress;
           _jobLastProgressTime = Date.now() / 1000;
         }
