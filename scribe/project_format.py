@@ -100,6 +100,12 @@ from .source_schema import (
     load_source_schema,
     save_source_schema,
 )
+from .speaker_map import (
+    SPEAKER_MAPS_DIRNAME,
+    SpeakerMap,
+    list_speaker_maps,
+    save_speaker_map,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -135,6 +141,10 @@ COMPONENT_CODES_DIR = "codes_dir"
 # the project root; declares the user-defined columns that source
 # ``custom_attributes`` use.
 COMPONENT_SOURCE_SCHEMA = "source_schema"
+# F3.4: per-source speaker maps directory. One JSON file per source,
+# mapping its raw transcript speaker labels → role + (optional)
+# participant link.
+COMPONENT_SPEAKER_MAPS_DIR = "speaker_maps_dir"
 
 # Default values for the "components" dict in the manifest. These are
 # relative paths inside the project directory.
@@ -145,6 +155,7 @@ DEFAULT_COMPONENT_PATHS: dict[str, str] = {
     COMPONENT_SAMPLING_LOG: "sampling_log.jsonl",
     COMPONENT_CODES_DIR: "codes",
     COMPONENT_SOURCE_SCHEMA: SCHEMA_FILENAME,
+    COMPONENT_SPEAKER_MAPS_DIR: SPEAKER_MAPS_DIRNAME,
 }
 
 
@@ -479,6 +490,12 @@ class ProjectBundle:
     # F3.2: per-project schema declaring user-defined source columns.
     # Optional — projects without explicit columns still work.
     source_schema: SourceAttributeSchema | None = None
+    # F3.4: per-source speaker maps. Each entry maps a source's raw
+    # transcript speaker labels → role + optional participant link.
+    # Empty list is valid (a fresh project has no maps yet); maps for
+    # sources not in ``sources`` are tolerated (e.g. import flow lands
+    # the map first).
+    speaker_maps: list[SpeakerMap] = field(default_factory=list)
     manifest: ProjectManifest | None = None
 
     # ------------------------------------------------------------------ #
@@ -551,6 +568,24 @@ class ProjectBundle:
                     f"bundle project {pid!r}"
                 )
 
+        # F3.4: speaker maps. Each map self-validates; cross-bundle
+        # invariants we add: project_id matches; one map per source id
+        # at most (the on-disk filename is the source id, so duplicates
+        # would be a programming error).
+        smap_sids: list[str] = []
+        for m in self.speaker_maps:
+            m.validate()
+            if m.project_id != pid:
+                raise ProjectFormatError(
+                    f"SpeakerMap for source {m.source_id} project_id "
+                    f"{m.project_id!r} does not match bundle project {pid!r}"
+                )
+            smap_sids.append(m.source_id)
+        if len(set(smap_sids)) != len(smap_sids):
+            raise ProjectFormatError(
+                "Bundle has duplicate speaker maps for the same source"
+            )
+
         if self.manifest is not None:
             self.manifest.validate()
             if self.manifest.project_id != pid:
@@ -589,6 +624,7 @@ def load_project_bundle(
         )
     except FileNotFoundError:
         source_schema = None
+    speaker_maps = list_speaker_maps(projects_root, project_id)
     try:
         manifest = read_or_build_manifest(projects_root, project_id)
     except FileNotFoundError:
@@ -600,6 +636,7 @@ def load_project_bundle(
         sampling_log=log,
         codes=codes,
         source_schema=source_schema,
+        speaker_maps=speaker_maps,
         manifest=manifest,
     )
     bundle.validate()
@@ -653,6 +690,12 @@ def save_project_bundle(
     # ``delete_source_schema``.
     if bundle.source_schema is not None:
         save_source_schema(projects_root, bundle.source_schema)
+
+    # 3d. Speaker maps (F3.4). Persist every map in the bundle. Like
+    # the codebook, maps not in the bundle are left on disk — a partial
+    # bundle save shouldn't erase a researcher's role assignments.
+    for m in bundle.speaker_maps:
+        save_speaker_map(projects_root, m)
 
     # 4. Sampling log.
     if replace_sampling_log:
