@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# Overnight feature-implementation loop.
+#
+# Each iteration spawns a fresh `claude` process with a clean context,
+# instructed to pick the next unimplemented feature from PLANNING.md, ship
+# it (commit + push), and exit. The loop continues until Claude reports
+# NO_FEATURES_REMAINING or until safety rails fire.
+#
+# Usage:
+#   ./scripts/feature-loop.sh                    # full overnight run
+#   ./scripts/feature-loop.sh --dry-run          # one iteration, no push
+#   ./scripts/feature-loop.sh --max-iters 3      # cap the loop
+#   ./scripts/feature-loop.sh --abort            # set the kill-switch flag
+#
+# To stop the loop cleanly mid-run from another terminal:
+#   touch .loop-abort                            # finishes current iter then exits
+#
+# Logs land in logs/loop/iter-NNNN.log + logs/loop/summary.log.
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# --- defaults ---
+MAX_ITERS=200
+PER_ITER_BUDGET_USD=15
+DRY_RUN=0
+MODEL="${SCRIBE_LOOP_MODEL:-claude-opus-4-7}"
+PROMPT_FILE="scripts/feature-implementer-prompt.md"
+LOG_DIR="logs/loop"
+ABORT_FLAG=".loop-abort"
+
+# Failure thresholds — bail when something looks systematically wrong.
+MAX_CONSECUTIVE_FAILURES=3   # 3 ERROR/exit-code-failures in a row
+MAX_TOTAL_FAILURES=10        # any combination
+
+# --- arg parsing ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)        DRY_RUN=1; MAX_ITERS=1; shift ;;
+    --max-iters)      MAX_ITERS="$2"; shift 2 ;;
+    --abort)          touch "$ABORT_FLAG"; echo "[loop] abort flag set ($ABORT_FLAG)"; exit 0 ;;
+    --model)          MODEL="$2"; shift 2 ;;
+    -h|--help)
+      sed -n '/^# Usage:/,/^$/p' "$0"
+      exit 0 ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+# --- preflight ---
+if [ ! -f "$PROMPT_FILE" ]; then
+  echo "[loop] missing $PROMPT_FILE" >&2
+  exit 2
+fi
+if ! command -v claude >/dev/null 2>&1; then
+  echo "[loop] 'claude' binary not on PATH" >&2
+  exit 2
+fi
+if [ ! -d .venv ]; then
+  echo "[loop] no .venv — pre-commit hook will skip Python tests, which is unsafe" >&2
+  exit 2
+fi
+if [ ! -d node_modules ]; then
+  echo "[loop] no node_modules — pre-commit hook will skip JS tests, unsafe" >&2
+  exit 2
+fi
+
+mkdir -p "$LOG_DIR"
+SUMMARY="$LOG_DIR/summary.log"
+
+# Confirm git is clean before starting — we don't want to mix loop work with
+# whatever uncommitted edits happen to be sitting around.
+if [ "$DRY_RUN" -eq 0 ] && ! git diff --quiet; then
+  echo "[loop] working tree is dirty. Commit or stash first, then rerun." >&2
+  git status --short >&2
+  exit 2
+fi
+
+# --- helpers ---
+log()      { echo "[$(date +%H:%M:%S)] $*" | tee -a "$SUMMARY"; }
+log_only() { echo "[$(date +%H:%M:%S)] $*" >> "$SUMMARY"; }
+
+iter=0
+consecutive_failures=0
+total_failures=0
+start_ts="$(date +%s)"
+
+log "==== feature-loop starting (max-iters=$MAX_ITERS, budget=\$$PER_ITER_BUDGET_USD/iter, model=$MODEL, dry-run=$DRY_RUN) ===="
+log "abort with: touch $ABORT_FLAG"
+
+# --- main loop ---
+while [ "$iter" -lt "$MAX_ITERS" ]; do
+  if [ -f "$ABORT_FLAG" ]; then
+    log "abort flag $ABORT_FLAG present — exiting cleanly"
+    rm -f "$ABORT_FLAG"
+    break
+  fi
+
+  iter=$((iter + 1))
+  iter_log="$(printf '%s/iter-%04d.log' "$LOG_DIR" "$iter")"
+  log "---- iteration $iter ($(date +%H:%M:%S)) → $iter_log ----"
+
+  # Read the latest prompt fresh each iteration (allows you to edit it on the fly).
+  prompt_body="$(cat "$PROMPT_FILE")"
+
+  # `claude -p` reads the prompt from the final positional arg; we add some
+  # belt-and-braces flags:
+  #   --bare              skip auto-memory / hooks discovery / CLAUDE.md noise
+  #   --dangerously-skip-permissions    no human approvals during the loop
+  #   --max-budget-usd    per-iteration safety net
+  #   --model             pin so a CLI default flip doesn't surprise us
+  #   --output-format text   plain text we can grep
+  #
+  # We do NOT use --no-session-persistence so each session is recoverable
+  # from `~/.claude/projects/.../sessions/*` if needed for debugging.
+  set +e
+  claude \
+    --print \
+    --bare \
+    --dangerously-skip-permissions \
+    --model "$MODEL" \
+    --max-budget-usd "$PER_ITER_BUDGET_USD" \
+    --output-format text \
+    "$prompt_body" \
+    > "$iter_log" 2>&1
+  exit_code=$?
+  set -e
+
+  # The result line is the last non-empty line. We tolerate trailing
+  # whitespace, ANSI codes (claude --print shouldn't emit them but be safe),
+  # and the occasional trailing newline.
+  result_line="$(tac "$iter_log" | sed -E 's/\x1b\[[0-9;]*m//g' | awk 'NF { print; exit }')"
+
+  if [ "$exit_code" -ne 0 ]; then
+    log "  iter $iter: claude exited $exit_code (last line: '$result_line')"
+    total_failures=$((total_failures + 1))
+    consecutive_failures=$((consecutive_failures + 1))
+  elif echo "$result_line" | grep -q "^NO_FEATURES_REMAINING"; then
+    log "  iter $iter: NO_FEATURES_REMAINING — done"
+    break
+  elif echo "$result_line" | grep -q "^IMPLEMENTED:"; then
+    log "  iter $iter: $result_line"
+    consecutive_failures=0
+  elif echo "$result_line" | grep -q "^BLOCKED:"; then
+    log "  iter $iter: $result_line (loop-note recorded)"
+    consecutive_failures=0
+  elif echo "$result_line" | grep -q "^ERROR:"; then
+    log "  iter $iter: $result_line"
+    total_failures=$((total_failures + 1))
+    consecutive_failures=$((consecutive_failures + 1))
+  else
+    # Claude exited 0 but the result line didn't match our expected vocabulary.
+    # That's a prompt-compliance failure — count as soft failure but keep going.
+    log "  iter $iter: unrecognised result line: '$result_line'"
+    total_failures=$((total_failures + 1))
+    consecutive_failures=$((consecutive_failures + 1))
+  fi
+
+  # Safety rails.
+  if [ "$consecutive_failures" -ge "$MAX_CONSECUTIVE_FAILURES" ]; then
+    log "  STOPPING: $consecutive_failures consecutive failures"
+    exit 3
+  fi
+  if [ "$total_failures" -ge "$MAX_TOTAL_FAILURES" ]; then
+    log "  STOPPING: $total_failures total failures"
+    exit 3
+  fi
+
+  # In dry-run we don't loop further.
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "  dry-run mode: stopping after one iteration"
+    break
+  fi
+
+  # Tiny sleep so log file timestamps differ visibly and any rate-limit
+  # backoff has a moment to settle.
+  sleep 2
+done
+
+end_ts="$(date +%s)"
+dur=$((end_ts - start_ts))
+log "==== feature-loop done (iters=$iter, total_failures=$total_failures, duration=${dur}s) ===="
+log "Run \`git log --oneline\` to see what landed."

@@ -12,3 +12,5 @@ coverage/
 .pytest_cache/
 htmlcov/
 .coverage
+logs/
+.loop-abort
