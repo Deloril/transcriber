@@ -1285,6 +1285,72 @@ async def export_codebook_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# REFI-QDA Codebook XML export (F6.5)
+#
+# F6.1 (the CSV / Markdown / RTF download) intentionally rejects
+# ``format=xml`` / ``format=refi-qda`` so the Codebook XML can grow its
+# own surface here. The surface is a separate URL — same project-id
+# guard, same atomic-attachment plumbing, but always rendered with
+# project-archive metadata (the comment block on the root). REFI-QDA
+# importers ignore comments so the XML stays schema-valid in every
+# downstream tool.
+#
+# Errors: 400 for malformed project id (project-id-format check shared
+# with the rest of the API); 404 for a project id that doesn't resolve
+# under :data:`PROJECTS_DIR`; otherwise 200 with the file body.
+# Empty codebooks return a minimal ``<CodeBook><Codes/></CodeBook>``
+# (still 200 — the schema permits no-codes, and a downstream import
+# would treat that as "merge nothing").
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/api/projects/{project_id}/codebook/refi-qda-xml")
+async def export_codebook_refi_qda_xml_endpoint(project_id: str) -> Response:
+    """Download the project's codebook as REFI-QDA Codebook XML (F6.5).
+
+    The body is the REFI-QDA Codebook 1.0 XML produced by
+    :func:`scribe.codebook_export.render_refi_qda_codebook_xml`,
+    which calls :func:`scribe.codebook_export.to_refi_qda_xml` with
+    ``include_project_metadata=True`` so the file carries an XML
+    comment block summarising the project's research question /
+    methodology / sensitising concepts / codebook stage. Importers
+    ignore comments — the file remains schema-conformant for any
+    REFI-QDA-aware QDA tool.
+
+    Headers:
+
+      * ``Content-Type: application/xml; charset=utf-8``
+      * ``Content-Disposition: attachment; filename="<slug>-codebook.refi-qda.xml"``
+
+    Status codes:
+
+      * ``200`` — codebook XML body (including the empty-codebook case;
+        a bare ``<CodeBook><Codes/></CodeBook>`` is valid output).
+      * ``400`` — malformed project id.
+      * ``404`` — project id not found.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        codes = _codes.list_codes(_projects_root(), project_id)
+    text = _codebook_export.render_refi_qda_codebook_xml(
+        codes, project=project
+    )
+    filename = _codebook_export.slugify_refi_qda_codebook_xml_filename(project)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(
+        content=text,
+        media_type=_codebook_export.REFI_QDA_XML_MEDIA_TYPE,
+        headers=headers,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # REFI-QDA / QDPX project export (F6.4)
 # --------------------------------------------------------------------------- #
 

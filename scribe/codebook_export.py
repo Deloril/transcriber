@@ -622,6 +622,7 @@ def to_refi_qda_xml(
     *,
     project: Project | None = None,
     origin: str = REFI_QDA_ORIGIN_DEFAULT,
+    include_project_metadata: bool = False,
 ) -> str:
     """Serialise a codebook to REFI-QDA Codebook 1.0 XML.
 
@@ -640,6 +641,15 @@ def to_refi_qda_xml(
     Output is UTF-8 with an XML declaration and pretty-printed indent,
     matching what NVivo / Atlas.ti emit. Empty codebooks produce a
     valid ``<CodeBook><Codes/></CodeBook>``.
+
+    ``include_project_metadata`` (F6.5): when True *and* a project is
+    supplied, prepend an XML comment at the top of ``<CodeBook>``
+    carrying the project's research question, methodology, sensitising
+    concepts, codebook stage, and timestamps. Comments are valid XML
+    and ignored by importers, so the file remains schema-compliant
+    while preserving the methodological context the bare codebook
+    schema cannot. F2.6's existing usage left the flag default-False,
+    so the F2.6 surface keeps its lighter output unchanged.
     """
     by_id = _index_by_id(codes)
 
@@ -660,6 +670,15 @@ def to_refi_qda_xml(
     if project is not None and project.name.strip():
         root.set("name", project.name)
 
+    # F6.5: project-archive metadata as an XML comment. Goes in BEFORE
+    # the <Codes> container so it sits at the top of the file body,
+    # the conventional location for documentation comments. Importers
+    # ignore comments, so adding this never breaks schema validation.
+    if include_project_metadata and project is not None:
+        comment_text = _build_project_metadata_comment(project)
+        if comment_text:
+            root.append(ET.Comment(comment_text))
+
     codes_el = ET.SubElement(root, f"{{{REFI_QDA_NS}}}Codes")
 
     # Emit top-level codes (those whose effective parent is None /
@@ -679,6 +698,64 @@ def to_refi_qda_xml(
     _indent(root)
     xml_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
     return xml_bytes.decode("utf-8")
+
+
+def _build_project_metadata_comment(project: Project) -> str:
+    """Render an XML comment body summarising a project's archive metadata.
+
+    Used by :func:`to_refi_qda_xml` when ``include_project_metadata``
+    is True (F6.5). The comment carries fields the REFI-QDA Codebook
+    1.0 schema has no native slot for: research question, methodology,
+    sensitising concepts, codebook stage, and the project's
+    created/modified timestamps. Pure: no I/O, deterministic order.
+
+    Returns the empty string when no fields are populated — the caller
+    then skips the comment entirely (no point emitting an empty doc
+    block).
+
+    The body is wrapped with leading/trailing newlines so the comment
+    pretty-prints as a multi-line block rather than a single line.
+    Each metadata field appears on its own line so the file is
+    grep-friendly. The literal substring ``"--"`` is forbidden inside
+    XML comments by the spec; we replace any double-dash runs in user
+    input with an em-dash so a "longitudinal -- 12 months" methodology
+    string never produces an unparseable file.
+    """
+    lines: list[str] = ["Scribe project archive metadata"]
+    if project.name:
+        lines.append(f"Project: {project.name}")
+    if project.id:
+        lines.append(f"Project ID: {project.id}")
+    if project.research_question:
+        lines.append(f"Research question: {project.research_question}")
+    if project.methodology:
+        lines.append(f"Methodology: {project.methodology}")
+    if project.sensitising_concepts:
+        lines.append(
+            "Sensitising concepts: "
+            + ", ".join(project.sensitising_concepts)
+        )
+    if project.codebook_stage:
+        lines.append(f"Codebook stage: {project.codebook_stage}")
+    if getattr(project, "created_at", ""):
+        lines.append(f"Created: {project.created_at}")
+    if getattr(project, "modified_at", ""):
+        lines.append(f"Modified: {project.modified_at}")
+
+    if len(lines) <= 1:
+        # Only the header line — no point emitting the comment at all.
+        return ""
+
+    # XML comment bodies cannot contain "--". Collapse any double
+    # dashes to a single em-dash so user input never produces invalid
+    # XML; importers see a readable substitution rather than a
+    # cryptic parse error.
+    body = "\n  ".join(lines)
+    while "--" in body:
+        body = body.replace("--", "—")
+    # Wrap with newlines so the pretty-printer renders the comment as
+    # an indented block rather than inlined into a single line.
+    return "\n  " + body + "\n"
 
 
 def _resolve_safe_parents(
@@ -1003,6 +1080,131 @@ def write_codebook(
     # never rewrites the CSV exporter's RFC-4180 ``\r\n`` line endings
     # into ``\n`` (which would break strict CSV re-importers like
     # Microsoft Power Query in legacy mode).
+    tmp.write_bytes(text.encode("utf-8"))
+    tmp.replace(target)
+    return target
+
+
+# --------------------------------------------------------------------------- #
+# REFI-QDA Codebook XML download surface (F6.5)
+#
+# F2.6 shipped the pure ``codes -> str`` REFI-QDA renderer (see
+# :func:`to_refi_qda_xml`). F6.1 surfaced the CSV / Markdown / RTF
+# variants behind ``EXPORT_FORMATS``. F6.5 closes the loop by giving
+# REFI-QDA Codebook XML its own surface — one URL, one CLI script —
+# kept off the F6.1 endpoint so the format set there stays stable.
+#
+# Why a separate surface instead of just adding ``"refi-qda-xml"`` to
+# ``EXPORT_FORMATS``?
+#
+#   * Different filename pattern (``.refi-qda.xml`` so it doesn't
+#     collide with arbitrary ``.xml`` files in the user's downloads).
+#   * Different rendering call (``include_project_metadata=True`` —
+#     F6.5 ships the methodological context the lighter codebook-only
+#     surface doesn't need).
+#   * The existing F6.1 regression test
+#     (``test_xml_format_rejected_at_f6_1_surface``) explicitly asserts
+#     that ``format=xml`` / ``format=refi-qda`` are 400s on
+#     ``/codebook/export``. Adding them to ``EXPORT_FORMATS`` would
+#     either break that guard or require a side-channel exclusion.
+#
+# What this section adds:
+#
+#   * :data:`REFI_QDA_XML_EXTENSION` — ``.refi-qda.xml``. The dotted
+#     prefix marks it as a vendor-specific XML so it sorts next to the
+#     QDPX archive in a Downloads folder.
+#   * :data:`REFI_QDA_XML_MEDIA_TYPE` — ``application/xml; charset=utf-8``.
+#   * :data:`REFI_QDA_XML_LABEL` — ``"REFI-QDA Codebook XML"``.
+#   * :func:`render_refi_qda_codebook_xml` — pure renderer; calls
+#     :func:`to_refi_qda_xml` with ``include_project_metadata=True``.
+#   * :func:`slugify_refi_qda_codebook_xml_filename` —
+#     ``<slug>-codebook.refi-qda.xml`` / ``codebook.refi-qda.xml``,
+#     same NFKD ASCII downgrade rules as :func:`slugify_codebook_filename`.
+#   * :func:`write_refi_qda_codebook_xml` — atomic ``.tmp`` swap disk
+#     write, mirroring :func:`write_codebook`.
+# --------------------------------------------------------------------------- #
+
+
+REFI_QDA_XML_EXTENSION = ".refi-qda.xml"
+REFI_QDA_XML_MEDIA_TYPE = "application/xml; charset=utf-8"
+REFI_QDA_XML_LABEL = "REFI-QDA Codebook XML"
+
+
+def render_refi_qda_codebook_xml(
+    codes: Sequence[Code],
+    *,
+    project: Project | None = None,
+    origin: str = REFI_QDA_ORIGIN_DEFAULT,
+) -> str:
+    """Render the codebook as REFI-QDA Codebook 1.0 XML for the F6.5 surface.
+
+    Thin wrapper over :func:`to_refi_qda_xml` that always asks for
+    project-archive metadata (the comment-block enrichment described
+    on :func:`to_refi_qda_xml`). The wrapper exists so the HTTP
+    endpoint and CLI script can dispatch through one well-named entry
+    point without sprinkling the keyword flag at every call site.
+
+    Empty codebooks are valid input and produce a minimal
+    ``<CodeBook><Codes/></CodeBook>`` document. Never raises on empty
+    input; the schema doesn't require a non-empty ``<Codes>``.
+    """
+    return to_refi_qda_xml(
+        codes,
+        project=project,
+        origin=origin,
+        include_project_metadata=True,
+    )
+
+
+def slugify_refi_qda_codebook_xml_filename(
+    project: Project | None,
+) -> str:
+    """Build a download-friendly filename for a REFI-QDA Codebook XML export.
+
+    Pattern: ``<project-slug>-codebook.refi-qda.xml`` if a project
+    name is available; ``codebook.refi-qda.xml`` otherwise. The slug
+    is ASCII-only, lowercased, dash-separated, and capped at
+    :data:`_FILENAME_SLUG_MAX` characters before the suffix.
+
+    Same rules as :func:`slugify_codebook_filename`, but with the
+    F6.5-specific extension. We deliberately don't reuse the
+    format-aware helper: F6.5's extension isn't in
+    :data:`EXPORT_FORMATS` (kept off the F6.1 surface, as documented).
+    """
+    slug = ""
+    if project is not None and project.name and project.name.strip():
+        ascii_name = (
+            unicodedata.normalize("NFKD", project.name)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
+        slug = _SLUG_RE.sub("-", ascii_name.lower()).strip("-")
+        if len(slug) > _FILENAME_SLUG_MAX:
+            slug = slug[:_FILENAME_SLUG_MAX].rstrip("-")
+    if slug:
+        return f"{slug}-codebook{REFI_QDA_XML_EXTENSION}"
+    return f"codebook{REFI_QDA_XML_EXTENSION}"
+
+
+def write_refi_qda_codebook_xml(
+    path: Path,
+    codes: Sequence[Code],
+    *,
+    project: Project | None = None,
+    origin: str = REFI_QDA_ORIGIN_DEFAULT,
+) -> Path:
+    """Render REFI-QDA Codebook XML and write it to ``path``.
+
+    Writes are atomic: body goes to ``<path>.tmp`` first, then
+    ``replace()``-d into place. Creates ``path.parent`` if missing.
+    Returns ``path`` for chaining convenience. Mirrors
+    :func:`write_codebook`'s contract so the CLI / HTTP wrappers can
+    swap the writer without re-learning a new error contract.
+    """
+    text = render_refi_qda_codebook_xml(codes, project=project, origin=origin)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
     tmp.write_bytes(text.encode("utf-8"))
     tmp.replace(target)
     return target

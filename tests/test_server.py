@@ -2817,3 +2817,205 @@ class TestExportQdpxAPI:
         _, client, _ = server_env
         r = client.get("/api/projects/not-hex/qdpx")
         assert r.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# F6.5 — REFI-QDA Codebook XML download endpoint
+#
+# Sibling to :class:`TestExportCodebookAPI` (F6.1). Where F6.1 covers
+# the CSV / Markdown / RTF formats, F6.5 covers the REFI-QDA Codebook
+# 1.0 XML format kept off the F6.1 surface. Tested:
+#
+#   * Happy path returns ``200`` + the right ``Content-Type`` and
+#     ``Content-Disposition`` (slugged filename, ``.refi-qda.xml`` suffix).
+#   * The body parses as XML and carries the project-metadata
+#     comment block (the F6.5-specific enrichment).
+#   * Empty codebooks return ``200`` with a minimal
+#     ``<CodeBook><Codes/></CodeBook>``.
+#   * Unicode project names downgrade to ASCII in the
+#     ``Content-Disposition`` filename (HTTP-header-safe).
+#   * Failure modes: ``404`` for missing project, ``400`` for
+#     malformed id.
+# --------------------------------------------------------------------------- #
+
+
+class TestExportCodebookRefiQdaXmlAPI:
+    """GET /api/projects/{pid}/codebook/refi-qda-xml (F6.5)."""
+
+    def _make_project(self, client, name: str = "Pilot", **fields) -> str:
+        payload = {"name": name}
+        payload.update(fields)
+        r = client.post("/api/projects", json=payload)
+        assert r.status_code == 201
+        return r.json()["id"]
+
+    def _make_code(
+        self,
+        srv,
+        project_id: str,
+        *,
+        name: str = "Pacing",
+        definition: str = "Adjusting daily activity to manage limited energy.",
+    ) -> str:
+        from scribe.codes import Code
+
+        code = Code.new(
+            project_id=project_id,
+            name=name,
+            definition=definition,
+        )
+        from scribe import codes as _codes
+
+        _codes.save_code(srv.PROJECTS_DIR, code)
+        return code.id
+
+    # -- Happy path ---------------------------------------------------- #
+
+    def test_returns_200_with_xml_body(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        self._make_code(srv, pid, name="Pacing")
+        r = client.get(f"/api/projects/{pid}/codebook/refi-qda-xml")
+        assert r.status_code == 200
+        # Body parses as XML — root in REFI-QDA Codebook namespace.
+        from xml.etree import ElementTree as ET
+
+        root = ET.fromstring(r.text)
+        assert root.tag.endswith("}CodeBook")
+
+    def test_content_type_is_xml(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        self._make_code(srv, pid)
+        r = client.get(f"/api/projects/{pid}/codebook/refi-qda-xml")
+        ct = r.headers["content-type"]
+        assert ct.startswith("application/xml")
+        assert "charset=utf-8" in ct
+
+    def test_content_disposition_attachment(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client, name="Pilot")
+        r = client.get(f"/api/projects/{pid}/codebook/refi-qda-xml")
+        cd = r.headers["content-disposition"]
+        assert "attachment" in cd
+        assert 'filename="pilot-codebook.refi-qda.xml"' in cd
+
+    def test_content_disposition_extension_is_dotted_xml(
+        self, server_env
+    ) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client, name="X")
+        r = client.get(f"/api/projects/{pid}/codebook/refi-qda-xml")
+        cd = r.headers["content-disposition"]
+        assert ".refi-qda.xml" in cd
+
+    def test_content_disposition_diacritics_downgraded(
+        self, server_env
+    ) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client, name="Café études")
+        r = client.get(f"/api/projects/{pid}/codebook/refi-qda-xml")
+        cd = r.headers["content-disposition"]
+        assert 'filename="cafe-etudes-codebook.refi-qda.xml"' in cd
+
+    def test_codes_appear_in_output(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        self._make_code(srv, pid, name="Pacing")
+        self._make_code(srv, pid, name="Resting")
+        r = client.get(f"/api/projects/{pid}/codebook/refi-qda-xml")
+        from xml.etree import ElementTree as ET
+
+        root = ET.fromstring(r.text)
+        # Two top-level <Code> children of <Codes>.
+        from scribe.codebook_export import REFI_QDA_NS
+        codes_el = root.find(f"{{{REFI_QDA_NS}}}Codes")
+        assert codes_el is not None
+        names = sorted(
+            (c.get("name") or "")
+            for c in codes_el.findall(f"{{{REFI_QDA_NS}}}Code")
+        )
+        assert names == ["Pacing", "Resting"]
+
+    # -- Project-metadata comment ------------------------------------- #
+
+    def test_project_metadata_comment_present(self, server_env) -> None:
+        # The F6.5 endpoint always renders with project metadata; the
+        # comment carries methodology / RQ that REFI-QDA Codebook 1.0
+        # has no native slot for.
+        srv, client, _ = server_env
+        pid = self._make_project(
+            client,
+            name="Pilot",
+            methodology="charmaz",
+            research_question="How do people pace energy?",
+        )
+        r = client.get(f"/api/projects/{pid}/codebook/refi-qda-xml")
+        assert "<!--" in r.text
+        assert "Methodology: charmaz" in r.text
+        assert "How do people pace energy?" in r.text
+
+    def test_project_name_in_root_attribute(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client, name="My Living Project")
+        r = client.get(f"/api/projects/{pid}/codebook/refi-qda-xml")
+        from xml.etree import ElementTree as ET
+
+        root = ET.fromstring(r.text)
+        assert root.get("name") == "My Living Project"
+
+    def test_origin_attribute_set(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.get(f"/api/projects/{pid}/codebook/refi-qda-xml")
+        from xml.etree import ElementTree as ET
+
+        root = ET.fromstring(r.text)
+        # "Scribe" is the default origin set in codebook_export.
+        assert root.get("origin") == "Scribe"
+
+    # -- Empty codebook ------------------------------------------------ #
+
+    def test_empty_codebook_returns_minimal_xml(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.get(f"/api/projects/{pid}/codebook/refi-qda-xml")
+        assert r.status_code == 200
+        from xml.etree import ElementTree as ET
+        from scribe.codebook_export import REFI_QDA_NS
+
+        root = ET.fromstring(r.text)
+        codes_el = root.find(f"{{{REFI_QDA_NS}}}Codes")
+        assert codes_el is not None
+        assert len(codes_el) == 0
+
+    # -- Failure modes -------------------------------------------------- #
+
+    def test_404_when_project_missing(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get(
+            f"/api/projects/{'0' * 12}/codebook/refi-qda-xml"
+        )
+        assert r.status_code == 404
+
+    def test_400_on_malformed_project_id(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get("/api/projects/not-hex/codebook/refi-qda-xml")
+        assert r.status_code == 400
+
+    # -- F6.1 isolation guard ----------------------------------------- #
+
+    def test_f6_1_endpoint_still_rejects_xml(self, server_env) -> None:
+        # F6.5's existence must not weaken the F6.1 endpoint's format
+        # validation: ``format=xml`` / ``format=refi-qda`` should still
+        # be 400s on /codebook/export.
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        r1 = client.get(
+            f"/api/projects/{pid}/codebook/export?format=xml"
+        )
+        r2 = client.get(
+            f"/api/projects/{pid}/codebook/export?format=refi-qda"
+        )
+        assert r1.status_code == 400
+        assert r2.status_code == 400

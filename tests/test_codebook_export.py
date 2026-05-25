@@ -951,3 +951,359 @@ class TestWriteCodebook:
         assert out.exists()
         # Body is RTF regardless of what the user named the file.
         assert out.read_text(encoding="utf-8").startswith(r"{\rtf1")
+
+
+# --------------------------------------------------------------------------- #
+# F6.5 — REFI-QDA Codebook XML download surface
+#
+# F2.6 shipped ``to_refi_qda_xml`` itself; F6.5 wraps it into a download
+# surface (project-metadata comment, dedicated filename slug, atomic
+# writer). The tests below cover only the F6.5 additions; the underlying
+# XML shape is covered exhaustively by ``TestToRefiQdaXml`` above.
+# --------------------------------------------------------------------------- #
+
+
+from scribe.codebook_export import (
+    REFI_QDA_XML_EXTENSION,
+    REFI_QDA_XML_LABEL,
+    REFI_QDA_XML_MEDIA_TYPE,
+    _build_project_metadata_comment,
+    render_refi_qda_codebook_xml,
+    slugify_refi_qda_codebook_xml_filename,
+    write_refi_qda_codebook_xml,
+)
+
+
+class TestF65Constants:
+    """The F6.5 constants are public — UI / CLI / HTTP all read them."""
+
+    def test_extension_is_dotted_double_extension(self) -> None:
+        # ``.refi-qda.xml`` so the file sorts next to a sibling QDPX
+        # in the user's downloads and never collides with a plain
+        # ``.xml`` artefact from another tool.
+        assert REFI_QDA_XML_EXTENSION == ".refi-qda.xml"
+
+    def test_media_type_is_xml_with_utf8(self) -> None:
+        assert REFI_QDA_XML_MEDIA_TYPE.startswith("application/xml")
+        assert "charset=utf-8" in REFI_QDA_XML_MEDIA_TYPE
+
+    def test_label_is_human_readable(self) -> None:
+        assert "REFI-QDA" in REFI_QDA_XML_LABEL
+
+
+class TestBuildProjectMetadataComment:
+    """The comment-block builder is pure and deterministic."""
+
+    def test_only_header_returns_empty_string(self) -> None:
+        # A project-shaped object with every metadata field empty
+        # produces a single-line "header only" body, which the helper
+        # collapses to ``""`` so the caller skips emitting the comment
+        # entirely. ``Project.new`` validates ``name`` non-empty, so
+        # we use a ``SimpleNamespace`` carrying the same attribute
+        # surface to exercise the safety net.
+        from types import SimpleNamespace
+
+        stub = SimpleNamespace(
+            id="",
+            name="",
+            research_question="",
+            methodology="",
+            sensitising_concepts=[],
+            codebook_stage="",
+            created_at="",
+            modified_at="",
+        )
+        assert _build_project_metadata_comment(stub) == ""  # type: ignore[arg-type]
+
+    def test_includes_project_name(self) -> None:
+        p = _project(name="Pilot")
+        body = _build_project_metadata_comment(p)
+        assert "Pilot" in body
+        assert "Project: Pilot" in body
+
+    def test_includes_research_question(self) -> None:
+        p = _project(research_question="How do people pace energy?")
+        body = _build_project_metadata_comment(p)
+        assert "How do people pace energy?" in body
+        assert "Research question:" in body
+
+    def test_includes_methodology(self) -> None:
+        p = _project(methodology="charmaz")
+        body = _build_project_metadata_comment(p)
+        assert "Methodology: charmaz" in body
+
+    def test_includes_sensitising_concepts(self) -> None:
+        p = _project(
+            sensitising_concepts=["identity work", "biographical disruption"],
+        )
+        body = _build_project_metadata_comment(p)
+        assert "identity work" in body
+        assert "biographical disruption" in body
+        # Joined with comma, not just the first item.
+        assert "identity work, biographical disruption" in body
+
+    def test_includes_codebook_stage(self) -> None:
+        p = _project(codebook_stage="focused")
+        body = _build_project_metadata_comment(p)
+        assert "Codebook stage: focused" in body
+
+    def test_includes_timestamps(self) -> None:
+        p = _project()
+        body = _build_project_metadata_comment(p)
+        assert "Created: " in body
+        assert "Modified: " in body
+
+    def test_double_dash_collapsed_to_em_dash(self) -> None:
+        # XML comments cannot contain ``"--"`` per spec; the helper
+        # collapses runs to a single em-dash so user input never
+        # produces an unparseable file.
+        p = _project(methodology="longitudinal -- 12 months")
+        body = _build_project_metadata_comment(p)
+        assert "--" not in body
+
+    def test_starts_and_ends_with_newline(self) -> None:
+        # The pretty-printer renders the comment as an indented block
+        # only when the body has surrounding whitespace.
+        p = _project()
+        body = _build_project_metadata_comment(p)
+        assert body.startswith("\n")
+        assert body.endswith("\n")
+
+
+class TestToRefiQdaXmlWithProjectMetadata:
+    """The opt-in flag adds a comment block; default behaviour
+    is unchanged so F2.6's existing tests still pass."""
+
+    def test_default_does_not_include_comment(self) -> None:
+        p = _project(methodology="charmaz")
+        xml = to_refi_qda_xml([], project=p)
+        # No <!--…--> in the body when the flag is off.
+        assert "<!--" not in xml
+
+    def test_flag_adds_comment(self) -> None:
+        p = _project(methodology="charmaz", research_question="RQ")
+        xml = to_refi_qda_xml(
+            [], project=p, include_project_metadata=True
+        )
+        assert "<!--" in xml
+        assert "Methodology: charmaz" in xml
+        assert "Research question: RQ" in xml
+
+    def test_flag_with_no_project_emits_no_comment(self) -> None:
+        # Comment is opt-in *and* requires a project. No project → no
+        # comment, even with the flag set.
+        xml = to_refi_qda_xml([], include_project_metadata=True)
+        assert "<!--" not in xml
+
+    def test_xml_remains_parseable(self) -> None:
+        p = _project(
+            methodology="charmaz",
+            research_question="How do people pace energy?",
+            sensitising_concepts=["identity work"],
+        )
+        c = _code()
+        xml = to_refi_qda_xml(
+            [c], project=p, include_project_metadata=True
+        )
+        # Round-trip through the parser; the comment doesn't break
+        # the XML even though it's the first child of the root.
+        root = ET.fromstring(xml)
+        assert root.tag == f"{{{REFI_QDA_NS}}}CodeBook"
+        # Codes container still present.
+        codes_el = root.find(f"{{{REFI_QDA_NS}}}Codes")
+        assert codes_el is not None
+        assert len(codes_el) == 1
+
+    def test_stub_project_with_empty_metadata_omits_comment(self) -> None:
+        # If every project metadata field is empty the comment body
+        # collapses to nothing and the writer skips emitting
+        # ``<!---->``. ``Project.new`` validates name, so use a
+        # ``SimpleNamespace`` to reach the empty-body branch.
+        from types import SimpleNamespace
+
+        stub = SimpleNamespace(
+            id="",
+            name="",
+            research_question="",
+            methodology="",
+            sensitising_concepts=[],
+            codebook_stage="",
+            created_at="",
+            modified_at="",
+        )
+        xml = to_refi_qda_xml(
+            [], project=stub, include_project_metadata=True  # type: ignore[arg-type]
+        )
+        assert "<!--" not in xml
+
+
+class TestRenderRefiQdaCodebookXml:
+    """The F6.5 entry point always asks for project metadata."""
+
+    def test_includes_metadata_comment_when_project_supplied(self) -> None:
+        p = _project(methodology="charmaz")
+        xml = render_refi_qda_codebook_xml([], project=p)
+        assert "<!--" in xml
+        assert "Methodology: charmaz" in xml
+
+    def test_no_project_still_renders(self) -> None:
+        # Codebook can be rendered without a project context — used by
+        # the CLI when --project's data has been moved.
+        xml = render_refi_qda_codebook_xml([])
+        # No comment, but valid XML.
+        assert "<!--" not in xml
+        root = ET.fromstring(xml)
+        assert root.tag == f"{{{REFI_QDA_NS}}}CodeBook"
+
+    def test_origin_propagated(self) -> None:
+        xml = render_refi_qda_codebook_xml([], origin="Scribe 1.2")
+        root = ET.fromstring(xml)
+        assert root.get("origin") == "Scribe 1.2"
+
+    def test_empty_codebook_is_valid(self) -> None:
+        # Empty <Codes/> is a legal Codebook 1.0 document.
+        xml = render_refi_qda_codebook_xml([])
+        root = ET.fromstring(xml)
+        codes_el = root.find(f"{{{REFI_QDA_NS}}}Codes")
+        assert codes_el is not None
+        assert len(codes_el) == 0
+
+    def test_codes_emit_through(self) -> None:
+        c = _code(name="Pacing")
+        xml = render_refi_qda_codebook_xml([c], project=_project())
+        root = ET.fromstring(xml)
+        code_el = root.find(
+            f"{{{REFI_QDA_NS}}}Codes/{{{REFI_QDA_NS}}}Code"
+        )
+        assert code_el is not None
+        assert code_el.get("name") == "Pacing"
+
+
+class TestSlugifyRefiQdaCodebookXmlFilename:
+    """Same shape as ``slugify_codebook_filename`` but with the
+    F6.5-specific extension."""
+
+    def test_no_project_falls_back_to_codebook(self) -> None:
+        assert (
+            slugify_refi_qda_codebook_xml_filename(None)
+            == "codebook.refi-qda.xml"
+        )
+
+    def test_simple_name(self) -> None:
+        p = _project(name="Pilot")
+        assert (
+            slugify_refi_qda_codebook_xml_filename(p)
+            == "pilot-codebook.refi-qda.xml"
+        )
+
+    def test_spaces_become_dashes(self) -> None:
+        p = _project(name="Living with chronic illness")
+        assert (
+            slugify_refi_qda_codebook_xml_filename(p)
+            == "living-with-chronic-illness-codebook.refi-qda.xml"
+        )
+
+    def test_diacritics_downgraded(self) -> None:
+        p = _project(name="Café études")
+        assert (
+            slugify_refi_qda_codebook_xml_filename(p)
+            == "cafe-etudes-codebook.refi-qda.xml"
+        )
+
+    def test_non_ascii_only_falls_back(self) -> None:
+        p = _project(name="日本語")
+        assert (
+            slugify_refi_qda_codebook_xml_filename(p)
+            == "codebook.refi-qda.xml"
+        )
+
+    def test_blank_name_falls_back(self) -> None:
+        p = _project(name="Pilot")
+        p.name = "   "
+        assert (
+            slugify_refi_qda_codebook_xml_filename(p)
+            == "codebook.refi-qda.xml"
+        )
+
+    def test_long_name_truncated(self) -> None:
+        p = _project(name="x" * 150)
+        out = slugify_refi_qda_codebook_xml_filename(p)
+        assert out.endswith("-codebook.refi-qda.xml")
+        slug = out.removesuffix("-codebook.refi-qda.xml")
+        assert len(slug) <= 80
+
+    def test_punctuation_stripped(self) -> None:
+        p = _project(name="Pilot — Phase 1!")
+        assert (
+            slugify_refi_qda_codebook_xml_filename(p)
+            == "pilot-phase-1-codebook.refi-qda.xml"
+        )
+
+
+class TestWriteRefiQdaCodebookXml:
+    """Atomic disk-write semantics, mirror of ``write_codebook``."""
+
+    def test_writes_xml_to_disk(self, tmp_path: Path) -> None:
+        c = _code()
+        out = tmp_path / "out.refi-qda.xml"
+        result = write_refi_qda_codebook_xml(out, [c])
+        assert result == out
+        assert out.exists()
+        body = out.read_bytes().decode("utf-8")
+        # Round-trip: file body matches what the renderer produces.
+        assert body == render_refi_qda_codebook_xml([c])
+
+    def test_includes_project_metadata_comment(self, tmp_path: Path) -> None:
+        p = _project(methodology="charmaz")
+        out = tmp_path / "out.refi-qda.xml"
+        write_refi_qda_codebook_xml(out, [], project=p)
+        text = out.read_text(encoding="utf-8")
+        assert "<!--" in text
+        assert "Methodology: charmaz" in text
+
+    def test_creates_parent_directories(self, tmp_path: Path) -> None:
+        c = _code()
+        out = tmp_path / "nested" / "deep" / "out.refi-qda.xml"
+        write_refi_qda_codebook_xml(out, [c])
+        assert out.exists()
+
+    def test_atomic_swap_does_not_leak_tmp(self, tmp_path: Path) -> None:
+        out = tmp_path / "out.refi-qda.xml"
+        write_refi_qda_codebook_xml(out, [])
+        leftovers = list(tmp_path.glob("*.tmp"))
+        assert leftovers == []
+
+    def test_overwrite_replaces_existing(self, tmp_path: Path) -> None:
+        out = tmp_path / "out.refi-qda.xml"
+        out.write_text("garbage", encoding="utf-8")
+        c = _code()
+        write_refi_qda_codebook_xml(out, [c])
+        body = out.read_bytes().decode("utf-8")
+        assert body.startswith("<?xml")
+        assert "garbage" not in body
+
+    def test_unicode_round_trip(self, tmp_path: Path) -> None:
+        c = _code(name="Días buenos", definition="Buenos días.")
+        p = _project(name="Estudio piloto")
+        out = tmp_path / "out.refi-qda.xml"
+        write_refi_qda_codebook_xml(out, [c], project=p)
+        text = out.read_text(encoding="utf-8")
+        assert "Días buenos" in text
+        assert "Estudio piloto" in text
+
+    def test_origin_propagates_to_disk(self, tmp_path: Path) -> None:
+        out = tmp_path / "out.refi-qda.xml"
+        write_refi_qda_codebook_xml(out, [], origin="Scribe 1.2")
+        text = out.read_text(encoding="utf-8")
+        root = ET.fromstring(text)
+        assert root.get("origin") == "Scribe 1.2"
+
+    def test_empty_codebook_writes_minimal_xml(self, tmp_path: Path) -> None:
+        out = tmp_path / "out.refi-qda.xml"
+        write_refi_qda_codebook_xml(out, [])
+        assert out.exists()
+        text = out.read_text(encoding="utf-8")
+        root = ET.fromstring(text)
+        codes_el = root.find(f"{{{REFI_QDA_NS}}}Codes")
+        assert codes_el is not None
+        assert len(codes_el) == 0
