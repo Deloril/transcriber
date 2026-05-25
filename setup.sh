@@ -5,6 +5,41 @@ cd "$(dirname "$0")"
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
+# --- --realign: bring an existing venv back in line with requirements.txt ---
+# Use this when `python -m scribe.devices` shows package versions outside the
+# requirements.txt pins (typically because a third-party install upgraded
+# huggingface_hub / transformers / ctranslate2 transitively).
+if [ "${1:-}" = "--realign" ]; then
+  if [ ! -d .venv ]; then
+    echo "No .venv found. Run ./setup.sh (without --realign) first." >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+  echo ">> Realigning drift-prone packages against requirements.txt"
+  # Only force the three packages that actually drift in practice. We skip
+  # the full `pip install -r requirements.txt` because whisperx's stale
+  # metadata (ctranslate2<4.5) makes pip's resolver refuse the wider set —
+  # so we install these three with --no-deps to avoid the resolver chasing
+  # transitive conflicts that don't apply to runtime behaviour.
+  #   - huggingface_hub: gets bumped to 1.x by NeMo / new transformers,
+  #     breaking pyannote 3.4's use_auth_token kwarg
+  #   - transformers 5.x: requires hf_hub>=1.5 (incompatible with pyannote)
+  #   - ctranslate2 4.4: links cuDNN 8 (gone from torch 2.6+ wheels);
+  #     4.7.x ships cuDNN 9 and keeps the Whisper APIs whisperx uses
+  pip install --upgrade --force-reinstall --no-deps \
+    "huggingface_hub>=0.30,<1.0" \
+    "transformers>=4.40,<5.0" \
+    "ctranslate2>=4.6,<4.8"
+  echo
+  echo ">> Verifying device configuration and versions"
+  python -m scribe.devices || true
+  echo
+  echo ">> Realign complete. Run ./run.sh and try the transcription again."
+  echo ">> If something still looks off, paste the version report above."
+  exit 0
+fi
+
 echo ">> Detected: $OS $ARCH"
 
 # --- python check ---

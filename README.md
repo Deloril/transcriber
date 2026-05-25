@@ -315,9 +315,17 @@ After processing, you get several files next to the original recording:
 
 **`python -m scribe.devices` says CUDA is not available but I have an NVIDIA GPU.** Your PyTorch was likely installed as the CPU-only build. Wipe the venv and rerun setup with the CUDA index: `rm -rf .venv && SCRIBE_TORCH=cu124 ./setup.sh` (use `cu121` for CUDA 12.1). Then `nvidia-smi` to confirm the driver is loaded.
 
-**`Could not load library libcudnn_ops_infer.so.8` (Linux + CUDA).** ctranslate2 4.4.x links against cuDNN 8, but modern PyTorch wheels ship cuDNN 9. requirements.txt pins ctranslate2 ≥ 4.6 which uses cuDNN 9 — if you have a stale install, run `pip install -U "ctranslate2>=4.6,<4.8"` inside the venv.
+**`Could not load library libcudnn_ops_infer.so.8` (Linux + CUDA).** ctranslate2 4.4.x links against cuDNN 8, but modern PyTorch wheels ship cuDNN 9. requirements.txt pins ctranslate2 ≥ 4.6 which uses cuDNN 9 — if you have a stale install, run `./setup.sh --realign`.
 
-**`TypeError: hf_hub_download() got an unexpected keyword argument 'use_auth_token'`.** huggingface_hub 1.x dropped the `use_auth_token` kwarg, but pyannote-audio 3.4 still passes it. requirements.txt pins `huggingface_hub<1.0` and `transformers<5` together to keep both happy. If pip resolved different versions, run `pip install -U -r requirements.txt` to realign.
+**`TypeError: hf_hub_download() got an unexpected keyword argument 'use_auth_token'`.** huggingface_hub 1.x dropped the `use_auth_token` kwarg, but pyannote-audio 3.4 still passes it. requirements.txt pins `huggingface_hub<1.0` and `transformers<5` together to keep both happy. If pip resolved different versions (typically after installing NeMo or another package that upgrades transformers), run `./setup.sh --realign` to force-reinstall the pinned versions.
+
+### Realigning a drifted venv
+
+```bash
+./setup.sh --realign
+```
+
+This force-reinstalls the three packages that drift in practice (`huggingface_hub`, `transformers`, `ctranslate2`) at their pinned versions, then runs `pip install -r requirements.txt` to bring everything else in line, then prints the device + version report so you can confirm the fix took. Use this any time `python -m scribe.devices` shows a package outside `requirements.txt`'s constraints.
 
 **`UnpicklingError: Weights only load failed ... Unsupported global: omegaconf.listconfig.ListConfig`.** PyTorch 2.6 flipped the default of `torch.load` to `weights_only=True`, and pyannote / whisperx checkpoints contain config containers that the strict loader rejects. Scribe handles this automatically: it allowlists the known-safe globals via `torch.serialization.add_safe_globals` and falls back to the legacy load path for any remaining cases (the model files come from HuggingFace via verified hashes). To enforce strict mode anyway and surface the failure, set `SCRIBE_STRICT_TORCH_LOAD=1` before launching the server.
 
