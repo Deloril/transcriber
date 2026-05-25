@@ -682,7 +682,11 @@
     </div>
   </div>
 
-  <script>
+  <script type="module">
+    import {
+      fmtBytes, fmtDuration, fmtBitrate, fmtRate, fmtFps, escapeHtml,
+      fmtElapsed, predictFinishTime,
+    } from "/static/js/helpers.mjs";
     const $ = (id) => document.getElementById(id);
     const drop = $("drop"), fileInput = $("file"), fileInfo = $("fileInfo");
     const goBtn = $("go"), statusEl = $("status");
@@ -1020,29 +1024,7 @@
     });
 
     // ---- Stats card + waveform ----
-    function fmtBytes(n) {
-      if (!isFinite(n) || n < 0) return "—";
-      const u = ["B", "KB", "MB", "GB", "TB"];
-      let i = 0;
-      while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-      return `${n.toFixed(n >= 100 || i === 0 ? 0 : (n >= 10 ? 1 : 2))} ${u[i]}`;
-    }
-    function fmtDuration(s) {
-      if (!isFinite(s) || s <= 0) return "—";
-      const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = Math.floor(s%60);
-      return h ? `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`
-              : `${m}:${String(sec).padStart(2,"0")}`;
-    }
-    function fmtBitrate(b) {
-      if (!isFinite(b) || b <= 0) return "—";
-      if (b >= 1_000_000) return `${(b/1_000_000).toFixed(1)} Mbps`;
-      return `${Math.round(b/1000)} kbps`;
-    }
-    function fmtRate(r) {
-      if (!isFinite(r) || r <= 0) return "—";
-      return r >= 1000 ? `${(r/1000).toFixed(1)} kHz` : `${r} Hz`;
-    }
-    function fmtFps(f) { return isFinite(f) && f > 0 ? `${f.toFixed(2)} fps` : "—"; }
+    // Formatters are imported from /static/js/helpers.mjs at the top.
 
     function renderStats(info) {
       if (!info) return;
@@ -1189,16 +1171,7 @@
       host.appendChild(svg);
     }
 
-    function fmtElapsed(seconds) {
-      seconds = Math.max(0, Math.round(seconds));
-      const h = Math.floor(seconds / 3600);
-      const m = Math.floor((seconds % 3600) / 60);
-      const s = seconds % 60;
-      if (h) return `${h}h ${String(m).padStart(2,"0")}m ${String(s).padStart(2,"0")}s`;
-      if (m) return `${m}m ${String(s).padStart(2,"0")}s`;
-      return `${s}s`;
-    }
-
+    // fmtElapsed imported from helpers.mjs.
     // Job-time tracking. The elapsed counter ticks every 250 ms so it stays
     // smooth. The ETA is held as a *predicted finish time* (epoch seconds),
     // not a remaining duration — so between SSE progress updates it counts
@@ -1232,15 +1205,11 @@
     // Recompute the predicted finish time from the latest progress reading.
     // Called when an SSE progress update arrives, not on every tick.
     function refreshEtaFromProgress() {
-      if (_jobStartedAt == null || _jobLastProgressTime == null) return;
-      if (_jobLastProgress <= 0.05) {
-        _predictedFinishAt = null;     // not enough signal yet
-        return;
-      }
-      const elapsedAtUpdate = _jobLastProgressTime - _jobStartedAt;
-      if (elapsedAtUpdate <= 0) return;
-      const totalEstimate = elapsedAtUpdate / _jobLastProgress;
-      _predictedFinishAt = _jobStartedAt + totalEstimate;
+      _predictedFinishAt = predictFinishTime({
+        startedAt: _jobStartedAt,
+        lastProgress: _jobLastProgress,
+        lastProgressTime: _jobLastProgressTime,
+      });
     }
 
     function updateTimers() {
@@ -1356,11 +1325,7 @@
       return wrap;
     }
 
-    function escapeHtml(s) {
-      return String(s).replace(/[&<>"']/g, c => ({
-        "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
-      }[c]));
-    }
+    // escapeHtml imported from helpers.mjs.
 
     function appendErrorTraceback(tb) {
       const pre = document.createElement("pre");

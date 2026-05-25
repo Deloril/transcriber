@@ -504,7 +504,8 @@
   </div>
 </div>
 
-<script>
+<script type="module">
+import { spreadTokensAcrossSpan, escapeHtml } from "/static/js/helpers.mjs";
 (() => {
   const JOB_ID = {{ job_id | tojson }};
   const $ = (id) => document.getElementById(id);
@@ -533,9 +534,7 @@
             : `${m}:${String(sec).padStart(2,"0")}`;
   };
   const fmtBracket = (s) => `[${fmtClock(s)}]`;
-  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({
-    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
-  }[c]));
+  // escapeHtml imported at module top
   const speakerIdx = (sp) => state.speakers.indexOf(sp);
   const speakerLabel = (sp) => (state.speaker_names && state.speaker_names[sp]) || sp;
   const speakerClass = (sp) => `sp-${(Math.max(0, speakerIdx(sp))) % 8}`;
@@ -864,18 +863,7 @@
     markDirty();
   }
 
-  function spreadTokensAcrossSpan(tokens, start, end, speaker) {
-    if (!tokens.length) return [];
-    const span = Math.max(0.05, end - start);
-    const per = span / tokens.length;
-    return tokens.map((tok, i) => ({
-      text: tok,
-      start: start + i * per,
-      end: start + (i + 1) * per,
-      speaker,
-      score: null,
-    }));
-  }
+  // spreadTokensAcrossSpan imported at module top
 
   // ---- Word highlighting on timeupdate ----
   let wordSpans = [];   // [{el, start, end, segIdx}]
