@@ -339,6 +339,66 @@ def gpu_backend() -> str:
     return "cpu"
 
 
+def is_rocm() -> bool:
+    """True iff the active backend is AMD ROCm.
+
+    Convenience boolean for callers that just need a yes/no — saves the
+    repeated ``gpu_backend() == "rocm"`` ceremony and keeps the literal
+    string in one place. See G1.1 in PLANNING.md."""
+    return gpu_backend() == "rocm"
+
+
+def is_cuda() -> bool:
+    """True iff the active backend is NVIDIA CUDA (not ROCm)."""
+    return gpu_backend() == "cuda"
+
+
+def is_mps() -> bool:
+    """True iff the active backend is Apple Metal Performance Shaders."""
+    return gpu_backend() == "mps"
+
+
+def has_gpu() -> bool:
+    """True iff any GPU backend is active (cuda / rocm / mps)."""
+    return gpu_backend() in ("cuda", "rocm", "mps")
+
+
+def gpu_vendor() -> str | None:
+    """Vendor name for vendor-aware UI logic, or None on CPU.
+
+    Maps the four-state backend label to a vendor:
+      cuda → "nvidia"     (Parakeet/NeMo runs here)
+      rocm → "amd"        (Parakeet/NeMo does NOT run here)
+      mps  → "apple"      (Parakeet/NeMo does NOT run here)
+      cpu  → None
+    """
+    backend = gpu_backend()
+    if backend == "cuda":
+        return "nvidia"
+    if backend == "rocm":
+        return "amd"
+    if backend == "mps":
+        return "apple"
+    return None
+
+
+def gpu_runtime_version() -> str | None:
+    """The HIP or CUDA runtime version string for the active backend.
+
+    Returns ``torch.version.hip`` on ROCm, ``torch.version.cuda`` on CUDA,
+    and None elsewhere. Used by ``scribe.devices`` and the support-bundle
+    output so tickets carry the right context. Empty strings are normalised
+    to None."""
+    backend = gpu_backend()
+    if backend == "rocm":
+        v = getattr(torch.version, "hip", None)
+    elif backend == "cuda":
+        v = getattr(torch.version, "cuda", None)
+    else:
+        return None
+    return v or None
+
+
 def _gpu_device_name() -> str:
     """Best-effort GPU model name; safe to call when no GPU."""
     if not torch.cuda.is_available():
@@ -437,7 +497,7 @@ def _apply_rocm_runtime_workarounds() -> None:
       cards with "illegal memory access." Switch to cub_caching as documented
       in CT2 issue #2012.
     """
-    if gpu_backend() != "rocm":
+    if not is_rocm():
         return
     if _is_rdna2() and not os.environ.get("CT2_CUDA_ALLOCATOR"):
         os.environ["CT2_CUDA_ALLOCATOR"] = "cub_caching"
@@ -456,7 +516,7 @@ def _patch_pyannote_lstm_dropout(pipeline: Any) -> None:
 
     Idempotent. No-op on non-ROCm machines.
     """
-    if gpu_backend() != "rocm":
+    if not is_rocm():
         return
     try:
         import torch.nn as nn

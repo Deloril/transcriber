@@ -52,6 +52,123 @@ class TestGpuBackend:
         monkeypatch.setenv("SCRIBE_DEVICE", "tpu")  # not in {cuda, rocm, mps, cpu}
         assert engine.gpu_backend() == "cpu"
 
+    def test_empty_hip_string_is_not_rocm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An empty string is falsy and should be treated as "no ROCm".
+        monkeypatch.setattr(engine.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(engine.torch.version, "hip", "", raising=False)
+        monkeypatch.setattr(engine.torch.version, "cuda", "12.4", raising=False)
+        assert engine.gpu_backend() == "cuda"
+
+
+class TestBackendBooleans:
+    """G1.1: convenience boolean helpers around ``gpu_backend()``."""
+
+    @pytest.mark.parametrize(
+        "backend,expected",
+        [
+            ("cuda", {"cuda": True, "rocm": False, "mps": False, "gpu": True}),
+            ("rocm", {"cuda": False, "rocm": True, "mps": False, "gpu": True}),
+            ("mps",  {"cuda": False, "rocm": False, "mps": True, "gpu": True}),
+            ("cpu",  {"cuda": False, "rocm": False, "mps": False, "gpu": False}),
+        ],
+    )
+    def test_booleans_match_backend(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        backend: str,
+        expected: dict[str, bool],
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: backend)
+        assert engine.is_cuda() is expected["cuda"]
+        assert engine.is_rocm() is expected["rocm"]
+        assert engine.is_mps() is expected["mps"]
+        assert engine.has_gpu() is expected["gpu"]
+
+    def test_is_rocm_honours_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # End-to-end check: SCRIBE_DEVICE flips through gpu_backend() into is_rocm().
+        monkeypatch.setattr(engine.torch.cuda, "is_available", lambda: False)
+        monkeypatch.setenv("SCRIBE_DEVICE", "rocm")
+        assert engine.is_rocm() is True
+        assert engine.is_cuda() is False
+        assert engine.has_gpu() is True
+
+
+class TestGpuVendor:
+    """G1.1: vendor mapping for vendor-aware UI / engine routing."""
+
+    @pytest.mark.parametrize(
+        "backend,vendor",
+        [("cuda", "nvidia"), ("rocm", "amd"), ("mps", "apple"), ("cpu", None)],
+    )
+    def test_maps_backend_to_vendor(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        backend: str,
+        vendor: str | None,
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: backend)
+        assert engine.gpu_vendor() == vendor
+
+
+class TestGpuRuntimeVersion:
+    """G1.1: surface HIP / CUDA runtime version for support tickets."""
+
+    def test_returns_hip_on_rocm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine.torch.version, "hip", "6.3.42131", raising=False)
+        monkeypatch.setattr(engine.torch.version, "cuda", "12.4-compat", raising=False)
+        assert engine.gpu_runtime_version() == "6.3.42131"
+
+    def test_returns_cuda_on_cuda(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")
+        monkeypatch.setattr(engine.torch.version, "hip", None, raising=False)
+        monkeypatch.setattr(engine.torch.version, "cuda", "12.4", raising=False)
+        assert engine.gpu_runtime_version() == "12.4"
+
+    def test_none_on_cpu(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
+        assert engine.gpu_runtime_version() is None
+
+    def test_none_on_mps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # MPS has no equivalent runtime-version string we can surface here.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "mps")
+        assert engine.gpu_runtime_version() is None
+
+    def test_empty_string_normalised_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine.torch.version, "hip", "", raising=False)
+        assert engine.gpu_runtime_version() is None
+
+
+class TestPackageReexports:
+    """G1.1: detection helpers should be importable from the top-level
+    ``scribe`` package, not just ``scribe.engine``. They're API."""
+
+    def test_top_level_imports(self) -> None:
+        import scribe
+
+        assert scribe.gpu_backend is engine.gpu_backend
+        assert scribe.gpu_vendor is engine.gpu_vendor
+        assert scribe.gpu_runtime_version is engine.gpu_runtime_version
+        assert scribe.is_rocm is engine.is_rocm
+        assert scribe.is_cuda is engine.is_cuda
+        assert scribe.is_mps is engine.is_mps
+        assert scribe.has_gpu is engine.has_gpu
+
+    def test_dunder_all_lists_them(self) -> None:
+        import scribe
+
+        for name in (
+            "gpu_backend",
+            "gpu_vendor",
+            "gpu_runtime_version",
+            "is_rocm",
+            "is_cuda",
+            "is_mps",
+            "has_gpu",
+        ):
+            assert name in scribe.__all__
+
 
 class TestTorchDevice:
     def test_rocm_translates_to_cuda(self, monkeypatch: pytest.MonkeyPatch) -> None:
