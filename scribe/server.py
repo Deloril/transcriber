@@ -1594,6 +1594,151 @@ async def export_anonymised_qdpx_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# AI model backend (F8.1)
+#
+# These endpoints expose the pluggable model-backend abstraction. They
+# do *not* run any AI workload — F8.10 still gates that — but they let
+# the UI:
+#
+#   * GET   /ai/backend          — read the saved config + the list of
+#                                  registered providers (so the UI can
+#                                  populate a dropdown without a probe).
+#   * PUT   /ai/backend          — replace the saved config (provider,
+#                                  base_url, default_model, etc.).
+#   * GET   /ai/backend/health   — actively probe the backend daemon.
+#   * GET   /ai/backend/models   — list models installed on the daemon.
+#
+# Tests use a stub transport (see ``tests/test_server_ai_backend.py``)
+# so no real network calls fire.
+# --------------------------------------------------------------------------- #
+
+from . import ai_backend as _ai_backend  # noqa: E402
+
+
+@app.get("/api/projects/{project_id}/ai/backend")
+async def get_project_ai_backend_endpoint(project_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            cfg = _ai_backend.load_backend_config(project)
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+    body: dict[str, Any] = cfg.to_dict()
+    body["extra_headers"] = {k: v for k, v in cfg.extra_headers}
+    body["available_providers"] = _ai_backend.list_backends()
+    return JSONResponse(body)
+
+
+@app.put("/api/projects/{project_id}/ai/backend")
+async def put_project_ai_backend_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    _check_project_id(project_id)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Expected JSON object")
+    headers = payload.pop("extra_headers", None)
+    try:
+        cfg = _ai_backend.BackendConfig.from_dict(
+            payload, extra_headers=headers
+        )
+    except _ai_backend.BackendValidationError as e:
+        raise HTTPException(400, str(e))
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            _ai_backend.store_backend_config(project, cfg)
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _projects.save_project(_projects_root(), project)
+    body: dict[str, Any] = cfg.to_dict()
+    body["extra_headers"] = {k: v for k, v in cfg.extra_headers}
+    return JSONResponse(body)
+
+
+@app.get("/api/projects/{project_id}/ai/backend/health")
+async def get_project_ai_backend_health_endpoint(
+    project_id: str,
+) -> JSONResponse:
+    """Probe the configured backend.
+
+    Always returns 200 with a JSON body whose ``ok`` flag indicates
+    reachability. We deliberately do *not* return 5xx for an
+    unreachable daemon — the frontend wants to render a "backend down"
+    banner, not throw a network error of its own.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            cfg = _ai_backend.load_backend_config(project)
+            backend = _ai_backend.backend_for_config(cfg)
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+    transport = _ai_backend_transport_override or _ai_backend.urllib_transport
+    health = backend.health_check(cfg, transport=transport)
+    return JSONResponse(
+        {
+            "ok": health.ok,
+            "provider": health.provider,
+            "base_url": health.base_url,
+            "detail": health.detail,
+            "error": health.error,
+        }
+    )
+
+
+@app.get("/api/projects/{project_id}/ai/backend/models")
+async def get_project_ai_backend_models_endpoint(
+    project_id: str,
+) -> JSONResponse:
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            cfg = _ai_backend.load_backend_config(project)
+            backend = _ai_backend.backend_for_config(cfg)
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+    transport = _ai_backend_transport_override or _ai_backend.urllib_transport
+    try:
+        models = backend.list_models(cfg, transport=transport)
+    except _ai_backend.BackendUnavailable as e:
+        # 502: upstream daemon unreachable. The UI surfaces this as
+        # "Ollama not running"; doesn't indicate a bug in Scribe.
+        raise HTTPException(502, f"Backend unavailable: {e}")
+    except _ai_backend.BackendValidationError as e:
+        raise HTTPException(400, str(e))
+    except _ai_backend.BackendError as e:
+        raise HTTPException(500, str(e))
+    return JSONResponse({"models": [m.to_dict() for m in models]})
+
+
+# Test hook: when set, the AI backend endpoints use this transport
+# instead of ``urllib_transport``. Tests assign a stub here; production
+# leaves it ``None``.
+_ai_backend_transport_override: _ai_backend.Transport | None = None
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 
