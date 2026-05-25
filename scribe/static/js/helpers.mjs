@@ -1010,3 +1010,153 @@ export function buildMemoContextPayload({
   }
   return out;
 }
+
+// ---------- F5.3 — memo-sorting canvas ----------
+//
+// Mirrors scribe/memo_canvas.py: pure helpers for laying memo cards
+// out on a 2D surface. Constants must match Python so the same drag
+// operation produces the same canvas state regardless of which side
+// computes the snap / clamp.
+//
+// What's here:
+//
+// * Bounds + grid helpers — clampToBounds, snapToGrid. Shared by the
+//   drag handler and the keyboard-nudge accelerator.
+// * hitTestCard — which memo card is under a (x, y) point.
+// * buildAssignCardPayload / buildMoveCardPayload / buildAddCategoryPayload
+//   — the JSON request bodies for the canvas endpoints. Each accepts
+//   the editor's camelCase shape and emits the snake_case wire format
+//   the server expects.
+
+export const CANVAS_MAX_COORD = 1_000_000;
+export const CANVAS_MAX_LABEL_LEN = 120;
+const _CATEGORY_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
+
+function _coerceCanvasCoord(value, name) {
+  if (typeof value === "boolean") {
+    throw new Error(`${name} must be a number, not bool`);
+  }
+  if (typeof value !== "number") {
+    throw new Error(`${name} must be a number`);
+  }
+  if (!Number.isFinite(value)) {
+    throw new Error(`${name} must be finite`);
+  }
+  if (Math.abs(value) > CANVAS_MAX_COORD) {
+    throw new Error(`${name} out of range`);
+  }
+  return value;
+}
+
+/**
+ * Clamp a coordinate pair to the given inclusive bounds. Returns
+ * `[x, y]`. Defaults match the Python ±MAX_COORD bounds so unbound
+ * usage still rejects NaN / inf without artificially restricting the
+ * researcher's logical space.
+ */
+export function clampToBounds(
+  x,
+  y,
+  {
+    minX = -CANVAS_MAX_COORD,
+    minY = -CANVAS_MAX_COORD,
+    maxX = CANVAS_MAX_COORD,
+    maxY = CANVAS_MAX_COORD,
+  } = {},
+) {
+  const cx = _coerceCanvasCoord(x, "x");
+  const cy = _coerceCanvasCoord(y, "y");
+  if (minX > maxX || minY > maxY) {
+    throw new Error("min bounds must be ≤ max bounds");
+  }
+  return [
+    Math.max(minX, Math.min(maxX, cx)),
+    Math.max(minY, Math.min(maxY, cy)),
+  ];
+}
+
+/**
+ * Snap a coordinate to the nearest multiple of `grid`. Default 1
+ * is a no-op rounding; on-screen drag handlers typically pass 16.
+ */
+export function snapToGrid(x, y, { grid = 1 } = {}) {
+  if (!(grid > 0)) {
+    throw new Error("grid must be positive");
+  }
+  const cx = _coerceCanvasCoord(x, "x");
+  const cy = _coerceCanvasCoord(y, "y");
+  return [Math.round(cx / grid) * grid, Math.round(cy / grid) * grid];
+}
+
+/**
+ * Return the memo_id of the topmost card under (x, y), or null.
+ *
+ * Cards is an iterable of `{ memo_id, x, y }` objects. "Topmost" =
+ * later in iteration order, matching DOM stacking + the Python
+ * implementation.
+ */
+export function hitTestCard(
+  cards,
+  x,
+  y,
+  { halfWidth = 80, halfHeight = 50 } = {},
+) {
+  const cx = _coerceCanvasCoord(x, "x");
+  const cy = _coerceCanvasCoord(y, "y");
+  if (!(halfWidth > 0) || !(halfHeight > 0)) {
+    throw new Error("halfWidth and halfHeight must be positive");
+  }
+  let hit = null;
+  for (const card of cards || []) {
+    if (!card) continue;
+    const card_x = card.x;
+    const card_y = card.y;
+    const memo_id = card.memo_id ?? card.memoId;
+    if (typeof card_x !== "number" || typeof card_y !== "number") continue;
+    if (Math.abs(card_x - cx) <= halfWidth && Math.abs(card_y - cy) <= halfHeight) {
+      hit = memo_id;
+    }
+  }
+  return hit;
+}
+
+/** Build the wire body for `PUT /api/projects/<pid>/canvas/cards/<memo_id>`. */
+export function buildMoveCardPayload({ x, y } = {}) {
+  const cx = _coerceCanvasCoord(x, "x");
+  const cy = _coerceCanvasCoord(y, "y");
+  return { x: cx, y: cy };
+}
+
+/** Build the wire body for `POST /api/projects/<pid>/canvas/categories`. */
+export function buildAddCategoryPayload({
+  label,
+  color = "",
+  x = 0,
+  y = 0,
+} = {}) {
+  if (typeof label !== "string" || !label.trim()) {
+    throw new Error("label must be a non-empty string");
+  }
+  const cleanLabel = label.trim();
+  if (cleanLabel.length > CANVAS_MAX_LABEL_LEN) {
+    throw new Error(`label must be ≤ ${CANVAS_MAX_LABEL_LEN} chars`);
+  }
+  const cx = _coerceCanvasCoord(x, "x");
+  const cy = _coerceCanvasCoord(y, "y");
+  const out = { label: cleanLabel, x: cx, y: cy };
+  if (color) {
+    if (typeof color !== "string" || !_CATEGORY_COLOR_RE.test(color)) {
+      throw new Error(`color must be #rrggbb (got ${color})`);
+    }
+    out.color = color.toLowerCase();
+  }
+  return out;
+}
+
+/** Build the wire body for `PUT /api/projects/<pid>/canvas/categories/<cid>/members/<memo_id>`. */
+export function buildAssignCardPayload() {
+  // The endpoint takes path params for the ids; the body is empty.
+  // Returning an explicit `{}` keeps caller code uniform across the
+  // canvas API surface.
+  return {};
+}

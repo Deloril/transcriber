@@ -833,6 +833,270 @@ async def create_memo_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Memo-sorting canvas (F5.3)
+#
+# One canvas per project: cards (memo→x,y), categories (named clusters),
+# and category memberships. Memo→memo links continue to live on the
+# Memo entity (F5.1's MemoLink); the link helper here is a thin wrapper
+# around scribe.memo_canvas.link_memos_on_canvas, kept on the canvas
+# URL surface so the editor can wire memo→memo edges as drag-drop.
+#
+# Endpoints follow the same locking + project-must-exist contract as
+# the other Phase A surfaces.
+# --------------------------------------------------------------------------- #
+
+from . import memo_canvas as _memo_canvas  # noqa: E402  (after module-level state)
+
+
+def _check_category_id(category_id: str) -> None:
+    if not _memo_canvas.CATEGORY_ID_RE.match(category_id):
+        raise HTTPException(400, "Invalid category id")
+
+
+def _check_memo_id(memo_id: str) -> None:
+    if not _memos.MEMO_ID_RE.match(memo_id):
+        raise HTTPException(400, "Invalid memo id")
+
+
+@app.get("/api/projects/{project_id}/canvas")
+async def get_canvas_endpoint(project_id: str) -> JSONResponse:
+    """Return the project's memo-sorting canvas.
+
+    Lazy: a project that has never used the canvas returns an empty
+    one ({"cards": [], "categories": [], "category_members": {}}).
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        canvas = _memo_canvas.load_canvas(_projects_root(), project_id)
+    return JSONResponse(canvas.to_dict())
+
+
+@app.put("/api/projects/{project_id}/canvas/cards/{memo_id}")
+async def put_canvas_card_endpoint(
+    project_id: str, memo_id: str, request: Request
+) -> JSONResponse:
+    """Place / move a card on the canvas at (x, y).
+
+    Idempotent: same coords twice is a no-op apart from the
+    ``modified_at`` bump.
+    """
+    _check_project_id(project_id)
+    _check_memo_id(memo_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    if "x" not in body or "y" not in body:
+        raise HTTPException(400, "Body must include x and y")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        canvas = _memo_canvas.load_canvas(_projects_root(), project_id)
+        try:
+            canvas.move_card(memo_id, body["x"], body["y"])
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _memo_canvas.save_canvas(_projects_root(), canvas)
+    return JSONResponse(canvas.to_dict())
+
+
+@app.delete("/api/projects/{project_id}/canvas/cards/{memo_id}")
+async def delete_canvas_card_endpoint(
+    project_id: str, memo_id: str
+) -> JSONResponse:
+    """Remove a memo's card from the canvas (and any memberships).
+
+    The memo entity itself is untouched. Returns 404 if the memo
+    wasn't on the canvas — the operation is meaningless otherwise.
+    """
+    _check_project_id(project_id)
+    _check_memo_id(memo_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        canvas = _memo_canvas.load_canvas(_projects_root(), project_id)
+        try:
+            removed = canvas.remove_card(memo_id)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        if not removed:
+            raise HTTPException(404, "Card not on canvas")
+        _memo_canvas.save_canvas(_projects_root(), canvas)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/projects/{project_id}/canvas/categories")
+async def add_canvas_category_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    """Create a new category on the canvas.
+
+    Body: ``{"label": "...", "color": "#rrggbb"?, "x": float?, "y": float?}``.
+    Labels must be unique within the canvas.
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        canvas = _memo_canvas.load_canvas(_projects_root(), project_id)
+        try:
+            cat = canvas.add_category(
+                label=str(body.get("label", "") or ""),
+                color=str(body.get("color", "") or ""),
+                x=body.get("x", 0),
+                y=body.get("y", 0),
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid category payload: {e}")
+        _memo_canvas.save_canvas(_projects_root(), canvas)
+    return JSONResponse(cat.to_dict(), status_code=201)
+
+
+@app.patch("/api/projects/{project_id}/canvas/categories/{category_id}")
+async def patch_canvas_category_endpoint(
+    project_id: str, category_id: str, request: Request
+) -> JSONResponse:
+    """Update one or more fields on a category."""
+    _check_project_id(project_id)
+    _check_category_id(category_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    fields: dict[str, Any] = {}
+    if "label" in body:
+        fields["label"] = str(body["label"] or "")
+    if "color" in body:
+        fields["color"] = str(body["color"] or "")
+    if "x" in body:
+        fields["x"] = body["x"]
+    if "y" in body:
+        fields["y"] = body["y"]
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        canvas = _memo_canvas.load_canvas(_projects_root(), project_id)
+        try:
+            cat = canvas.update_category(category_id, **fields)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _memo_canvas.save_canvas(_projects_root(), canvas)
+    return JSONResponse(cat.to_dict())
+
+
+@app.delete("/api/projects/{project_id}/canvas/categories/{category_id}")
+async def delete_canvas_category_endpoint(
+    project_id: str, category_id: str
+) -> JSONResponse:
+    """Remove a category. Cards in it remain on the canvas."""
+    _check_project_id(project_id)
+    _check_category_id(category_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        canvas = _memo_canvas.load_canvas(_projects_root(), project_id)
+        ok = canvas.remove_category(category_id)
+        if not ok:
+            raise HTTPException(404, "Category not found")
+        _memo_canvas.save_canvas(_projects_root(), canvas)
+    return JSONResponse({"ok": True})
+
+
+@app.put(
+    "/api/projects/{project_id}/canvas/categories/{category_id}/members/{memo_id}"
+)
+async def assign_canvas_member_endpoint(
+    project_id: str, category_id: str, memo_id: str
+) -> JSONResponse:
+    """Make ``memo_id`` a member of ``category_id``.
+
+    The memo must already have a card on the canvas (place it via PUT
+    /canvas/cards/<memo_id> first). Idempotent.
+    """
+    _check_project_id(project_id)
+    _check_category_id(category_id)
+    _check_memo_id(memo_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        canvas = _memo_canvas.load_canvas(_projects_root(), project_id)
+        try:
+            canvas.assign_card_to_category(memo_id, category_id)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _memo_canvas.save_canvas(_projects_root(), canvas)
+    return JSONResponse({"ok": True})
+
+
+@app.delete(
+    "/api/projects/{project_id}/canvas/categories/{category_id}/members/{memo_id}"
+)
+async def unassign_canvas_member_endpoint(
+    project_id: str, category_id: str, memo_id: str
+) -> JSONResponse:
+    """Remove ``memo_id`` from ``category_id``."""
+    _check_project_id(project_id)
+    _check_category_id(category_id)
+    _check_memo_id(memo_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        canvas = _memo_canvas.load_canvas(_projects_root(), project_id)
+        try:
+            removed = canvas.unassign_card_from_category(memo_id, category_id)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        if removed:
+            _memo_canvas.save_canvas(_projects_root(), canvas)
+    return JSONResponse({"ok": True, "removed": bool(removed)})
+
+
+@app.post("/api/projects/{project_id}/canvas/links")
+async def link_memos_on_canvas_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    """Add a memo→memo link from the canvas surface.
+
+    Body: ``{"from_memo_id": "...", "to_memo_id": "...", "role": "..."?}``.
+    Wraps :func:`scribe.memo_canvas.link_memos_on_canvas` so the editor
+    can record memo↔memo edges from the drag-drop surface without
+    issuing a memo PATCH itself. Idempotent on the (from, to, role)
+    triple; raises 400 if the source memo doesn't exist.
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    from_id = str(body.get("from_memo_id", "") or "")
+    to_id = str(body.get("to_memo_id", "") or "")
+    role = str(body.get("role", "") or "")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            memo = _memo_canvas.link_memos_on_canvas(
+                _projects_root(),
+                project_id,
+                from_memo_id=from_id,
+                to_memo_id=to_id,
+                role=role,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+    return JSONResponse(memo.to_dict())
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 

@@ -1790,3 +1790,344 @@ class TestMemosCreateAPI:
         r = client.delete(f"/api/projects/{pid}")
         assert r.status_code == 200
         assert not (srv.PROJECTS_DIR / pid).exists()
+
+
+# --------------------------------------------------------------------------- #
+# Memo-sorting canvas (F5.3)
+# --------------------------------------------------------------------------- #
+
+
+class TestCanvasAPI:
+    """Endpoints for the project's memo-sorting canvas:
+
+    * GET /api/projects/{pid}/canvas
+    * PUT /api/projects/{pid}/canvas/cards/{memo_id}
+    * DELETE /api/projects/{pid}/canvas/cards/{memo_id}
+    * POST /api/projects/{pid}/canvas/categories
+    * PATCH /api/projects/{pid}/canvas/categories/{cid}
+    * DELETE /api/projects/{pid}/canvas/categories/{cid}
+    * PUT /api/projects/{pid}/canvas/categories/{cid}/members/{memo_id}
+    * DELETE /api/projects/{pid}/canvas/categories/{cid}/members/{memo_id}
+    * POST /api/projects/{pid}/canvas/links
+
+    The canvas is project-level singleton state. Lazy: a fresh project
+    returns an empty canvas.
+    """
+
+    MEMO_A = "a" * 12
+    MEMO_B = "b" * 12
+
+    def _make_project(self, client) -> str:
+        r = client.post("/api/projects", json={"name": "P"})
+        assert r.status_code == 201
+        return r.json()["id"]
+
+    def _make_memo(self, client, pid: str) -> str:
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={"type": "theoretical", "body": "x"},
+        )
+        assert r.status_code == 201
+        return r.json()["id"]
+
+    # -- GET ---------------------------------------------------------- #
+
+    def test_get_empty_canvas(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.get(f"/api/projects/{pid}/canvas")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["project_id"] == pid
+        assert body["cards"] == []
+        assert body["categories"] == []
+        assert body["category_members"] == {}
+
+    def test_get_unknown_project_404(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get("/api/projects/aaaaaaaaaaaa/canvas")
+        assert r.status_code == 404
+
+    def test_get_invalid_project_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get("/api/projects/BAD/canvas")
+        assert r.status_code == 400
+
+    # -- PUT cards ---------------------------------------------------- #
+
+    def test_put_card_creates_card(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.put(
+            f"/api/projects/{pid}/canvas/cards/{self.MEMO_A}",
+            json={"x": 12, "y": 34},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body["cards"]) == 1
+        assert body["cards"][0]["memo_id"] == self.MEMO_A
+        assert body["cards"][0]["x"] == 12
+        assert body["cards"][0]["y"] == 34
+
+    def test_put_card_updates_existing(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        client.put(
+            f"/api/projects/{pid}/canvas/cards/{self.MEMO_A}", json={"x": 10, "y": 10}
+        )
+        r = client.put(
+            f"/api/projects/{pid}/canvas/cards/{self.MEMO_A}",
+            json={"x": 99, "y": 99},
+        )
+        assert r.status_code == 200
+        cards = r.json()["cards"]
+        assert len(cards) == 1
+        assert cards[0]["x"] == 99 and cards[0]["y"] == 99
+
+    def test_put_card_missing_xy_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.put(
+            f"/api/projects/{pid}/canvas/cards/{self.MEMO_A}", json={"x": 0}
+        )
+        assert r.status_code == 400
+
+    def test_put_card_invalid_memo_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.put(
+            f"/api/projects/{pid}/canvas/cards/BAD", json={"x": 0, "y": 0}
+        )
+        assert r.status_code == 400
+
+    def test_put_card_nan_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        # JSON doesn't have NaN; but a string-as-number does fail.
+        r = client.put(
+            f"/api/projects/{pid}/canvas/cards/{self.MEMO_A}",
+            json={"x": "not-a-number", "y": 0},
+        )
+        assert r.status_code == 400
+
+    # -- DELETE cards ------------------------------------------------- #
+
+    def test_delete_card(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        client.put(
+            f"/api/projects/{pid}/canvas/cards/{self.MEMO_A}", json={"x": 0, "y": 0}
+        )
+        r = client.delete(f"/api/projects/{pid}/canvas/cards/{self.MEMO_A}")
+        assert r.status_code == 200
+        # Subsequent GET shows the card gone.
+        body = client.get(f"/api/projects/{pid}/canvas").json()
+        assert body["cards"] == []
+
+    def test_delete_missing_card_404(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.delete(f"/api/projects/{pid}/canvas/cards/{self.MEMO_A}")
+        assert r.status_code == 404
+
+    # -- Categories --------------------------------------------------- #
+
+    def test_add_category(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/canvas/categories",
+            json={"label": "Care", "color": "#aabbcc"},
+        )
+        assert r.status_code == 201
+        body = r.json()
+        assert body["label"] == "Care"
+        assert body["color"] == "#aabbcc"
+        assert re.match(r"^[a-f0-9]{12}$", body["id"])
+
+    def test_add_category_dupe_label_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        client.post(
+            f"/api/projects/{pid}/canvas/categories", json={"label": "Care"}
+        )
+        r = client.post(
+            f"/api/projects/{pid}/canvas/categories", json={"label": "Care"}
+        )
+        assert r.status_code == 400
+
+    def test_add_category_empty_label_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/canvas/categories", json={"label": ""}
+        )
+        assert r.status_code == 400
+
+    def test_patch_category_rename(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        cat_id = client.post(
+            f"/api/projects/{pid}/canvas/categories", json={"label": "Care"}
+        ).json()["id"]
+        r = client.patch(
+            f"/api/projects/{pid}/canvas/categories/{cat_id}",
+            json={"label": "Caring"},
+        )
+        assert r.status_code == 200
+        assert r.json()["label"] == "Caring"
+
+    def test_patch_unknown_category_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.patch(
+            f"/api/projects/{pid}/canvas/categories/{'9' * 12}",
+            json={"label": "X"},
+        )
+        # Unknown category id is a validation error from update_category.
+        assert r.status_code == 400
+
+    def test_delete_category(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        cat_id = client.post(
+            f"/api/projects/{pid}/canvas/categories", json={"label": "Care"}
+        ).json()["id"]
+        r = client.delete(f"/api/projects/{pid}/canvas/categories/{cat_id}")
+        assert r.status_code == 200
+
+    def test_delete_unknown_category_404(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.delete(
+            f"/api/projects/{pid}/canvas/categories/{'9' * 12}"
+        )
+        assert r.status_code == 404
+
+    # -- Membership --------------------------------------------------- #
+
+    def test_assign_member(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        client.put(
+            f"/api/projects/{pid}/canvas/cards/{self.MEMO_A}",
+            json={"x": 0, "y": 0},
+        )
+        cat_id = client.post(
+            f"/api/projects/{pid}/canvas/categories", json={"label": "Care"}
+        ).json()["id"]
+        r = client.put(
+            f"/api/projects/{pid}/canvas/categories/{cat_id}/members/{self.MEMO_A}"
+        )
+        assert r.status_code == 200
+        canvas = client.get(f"/api/projects/{pid}/canvas").json()
+        assert canvas["category_members"][cat_id] == [self.MEMO_A]
+
+    def test_assign_member_card_missing_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        cat_id = client.post(
+            f"/api/projects/{pid}/canvas/categories", json={"label": "Care"}
+        ).json()["id"]
+        r = client.put(
+            f"/api/projects/{pid}/canvas/categories/{cat_id}/members/{self.MEMO_A}"
+        )
+        assert r.status_code == 400
+
+    def test_unassign_member(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        client.put(
+            f"/api/projects/{pid}/canvas/cards/{self.MEMO_A}",
+            json={"x": 0, "y": 0},
+        )
+        cat_id = client.post(
+            f"/api/projects/{pid}/canvas/categories", json={"label": "Care"}
+        ).json()["id"]
+        client.put(
+            f"/api/projects/{pid}/canvas/categories/{cat_id}/members/{self.MEMO_A}"
+        )
+        r = client.delete(
+            f"/api/projects/{pid}/canvas/categories/{cat_id}/members/{self.MEMO_A}"
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["removed"] is True
+        canvas = client.get(f"/api/projects/{pid}/canvas").json()
+        assert canvas["category_members"][cat_id] == []
+
+    def test_unassign_member_idempotent(self, server_env) -> None:
+        # Removing a non-member returns 200 with removed=False.
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        cat_id = client.post(
+            f"/api/projects/{pid}/canvas/categories", json={"label": "Care"}
+        ).json()["id"]
+        r = client.delete(
+            f"/api/projects/{pid}/canvas/categories/{cat_id}/members/{self.MEMO_A}"
+        )
+        assert r.status_code == 200
+        assert r.json()["removed"] is False
+
+    # -- Memo→memo links --------------------------------------------- #
+
+    def test_link_memos(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        a = self._make_memo(client, pid)
+        b = self._make_memo(client, pid)
+        r = client.post(
+            f"/api/projects/{pid}/canvas/links",
+            json={"from_memo_id": a, "to_memo_id": b, "role": "elaborates"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["id"] == a
+        memo_links = [l for l in body["links"] if l["target_type"] == "memo"]
+        assert any(
+            l["target_id"] == b and l.get("role") == "elaborates"
+            for l in memo_links
+        )
+
+    def test_link_memos_self_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        a = self._make_memo(client, pid)
+        r = client.post(
+            f"/api/projects/{pid}/canvas/links",
+            json={"from_memo_id": a, "to_memo_id": a},
+        )
+        assert r.status_code == 400
+
+    def test_link_memos_missing_source_404(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/canvas/links",
+            json={"from_memo_id": self.MEMO_A, "to_memo_id": self.MEMO_B},
+        )
+        assert r.status_code == 404
+
+    def test_link_memos_invalid_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/canvas/links",
+            json={"from_memo_id": "BAD", "to_memo_id": self.MEMO_B},
+        )
+        assert r.status_code == 400
+
+    # -- Cleanup contract --------------------------------------------- #
+
+    def test_delete_project_cascades_canvas(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        client.put(
+            f"/api/projects/{pid}/canvas/cards/{self.MEMO_A}",
+            json={"x": 0, "y": 0},
+        )
+        canvas_path = srv.PROJECTS_DIR / pid / "memo_canvas.json"
+        assert canvas_path.exists()
+        r = client.delete(f"/api/projects/{pid}")
+        assert r.status_code == 200
+        assert not canvas_path.exists()
