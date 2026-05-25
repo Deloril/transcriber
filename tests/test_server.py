@@ -1509,3 +1509,284 @@ class TestParticipantsAPI:
         r = client.delete(f"/api/projects/{pid}")
         assert r.status_code == 200
         assert not (srv.PROJECTS_DIR / pid).exists()
+
+
+# --------------------------------------------------------------------------- #
+# Memos (F5.1) + right-click memo creation (F5.2)
+# --------------------------------------------------------------------------- #
+
+
+class TestMemosCreateAPI:
+    """POST /api/projects/{pid}/memos — both flat and ``context`` shapes.
+
+    F5.1 added the on-disk Memo entity. F5.2 wired the right-click
+    flow: the editor sends a payload that *may* include a top-level
+    ``context`` block; the endpoint routes through
+    :func:`scribe.memo_context.build_memo_draft_from_context` and
+    persists. These tests cover both shapes.
+    """
+
+    CODE_ID = "a" * 12
+    SOURCE_ID = "b" * 12
+    APP_ID = "d" * 12
+    CODER_ID = "c" * 12
+
+    def _make_project(self, client) -> str:
+        r = client.post("/api/projects", json={"name": "P"})
+        assert r.status_code == 201
+        return r.json()["id"]
+
+    # -- Right-click context flow ------------------------------------- #
+
+    def test_context_payload_creates_memo_with_default_type(
+        self, server_env
+    ) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={
+                "context": {"target_type": "code", "target_id": self.CODE_ID},
+                "title": "About this code",
+                "body": "This code captures the gerund 'managing'.",
+            },
+        )
+        assert r.status_code == 201
+        body = r.json()
+        assert body["project_id"] == pid
+        assert body["type"] == "code"  # default for code target
+        assert body["title"] == "About this code"
+        assert body["body"].startswith("This code")
+        assert len(body["links"]) == 1
+        assert body["links"][0] == {
+            "target_type": "code",
+            "target_id": self.CODE_ID,
+        }
+
+    def test_context_payload_for_application_defaults_to_quote(
+        self, server_env
+    ) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={
+                "context": {
+                    "target_type": "application",
+                    "target_id": self.APP_ID,
+                    "role": "exemplifies",
+                },
+            },
+        )
+        assert r.status_code == 201
+        body = r.json()
+        assert body["type"] == "quote"
+        assert body["links"][0]["role"] == "exemplifies"
+
+    def test_context_payload_explicit_type_override(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={
+                "context": {
+                    "target_type": "code",
+                    "target_id": self.CODE_ID,
+                },
+                "type": "theoretical",
+            },
+        )
+        assert r.status_code == 201
+        assert r.json()["type"] == "theoretical"
+
+    def test_context_payload_extra_links_appended(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={
+                "context": {
+                    "target_type": "application",
+                    "target_id": self.APP_ID,
+                },
+                "extra_links": [
+                    {"target_type": "code", "target_id": self.CODE_ID},
+                ],
+            },
+        )
+        assert r.status_code == 201
+        links = r.json()["links"]
+        assert len(links) == 2
+        assert links[0]["target_type"] == "application"
+        assert links[1]["target_type"] == "code"
+
+    def test_context_persists_to_disk(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={
+                "context": {"target_type": "code", "target_id": self.CODE_ID},
+                "body": "Edge cases for this code.",
+            },
+        )
+        memo_id = r.json()["id"]
+        on_disk = json.loads(
+            (srv.PROJECTS_DIR / pid / "memos" / f"{memo_id}.json").read_text()
+        )
+        assert on_disk["body"] == "Edge cases for this code."
+        assert on_disk["type"] == "code"
+        assert on_disk["links"][0]["target_id"] == self.CODE_ID
+
+    def test_context_bad_target_type_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={
+                "context": {"target_type": "planet", "target_id": self.CODE_ID},
+            },
+        )
+        assert r.status_code == 400
+
+    def test_context_bad_target_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={
+                "context": {"target_type": "code", "target_id": "nope"},
+            },
+        )
+        assert r.status_code == 400
+
+    def test_context_missing_target_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={"context": {"target_type": "code"}},
+        )
+        assert r.status_code == 400
+
+    def test_context_bad_role_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={
+                "context": {
+                    "target_type": "code",
+                    "target_id": self.CODE_ID,
+                    "role": "!!bad",
+                },
+            },
+        )
+        assert r.status_code == 400
+
+    def test_context_unknown_explicit_type_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={
+                "context": {"target_type": "code", "target_id": self.CODE_ID},
+                "type": "wrong-type",
+            },
+        )
+        assert r.status_code == 400
+
+    # -- Flat (non-context) shape ------------------------------------- #
+
+    def test_flat_create_minimal(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={"type": "free", "body": "free-floating memo"},
+        )
+        assert r.status_code == 201
+        body = r.json()
+        assert body["project_id"] == pid
+        assert body["type"] == "free"
+        assert body["body"] == "free-floating memo"
+        assert body["links"] == []
+
+    def test_flat_create_with_links(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={
+                "type": "theoretical",
+                "title": "Two codes are converging",
+                "links": [
+                    {"target_type": "code", "target_id": self.CODE_ID},
+                    {"target_type": "source", "target_id": self.SOURCE_ID},
+                ],
+            },
+        )
+        assert r.status_code == 201
+        body = r.json()
+        assert len(body["links"]) == 2
+
+    def test_flat_create_invalid_type_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={"type": "not-a-type"},
+        )
+        assert r.status_code == 400
+
+    # -- Endpoint-level guards ---------------------------------------- #
+
+    def test_invalid_project_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            "/api/projects/BAD/memos",
+            json={"type": "free"},
+        )
+        assert r.status_code == 400
+
+    def test_unknown_project_404(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            "/api/projects/aaaaaaaaaaaa/memos",
+            json={"type": "free"},
+        )
+        assert r.status_code == 404
+
+    def test_invalid_json_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            content=b"not json",
+            headers={"content-type": "application/json"},
+        )
+        assert r.status_code == 400
+
+    def test_non_object_body_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json=["not", "an", "object"],
+        )
+        assert r.status_code == 400
+
+    def test_delete_project_cascades_memos(self, server_env) -> None:
+        # Cleanup contract: deleting a project removes its memos.
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        client.post(
+            f"/api/projects/{pid}/memos",
+            json={
+                "context": {"target_type": "code", "target_id": self.CODE_ID},
+            },
+        )
+        assert (srv.PROJECTS_DIR / pid / "memos").exists()
+        r = client.delete(f"/api/projects/{pid}")
+        assert r.status_code == 200
+        assert not (srv.PROJECTS_DIR / pid).exists()

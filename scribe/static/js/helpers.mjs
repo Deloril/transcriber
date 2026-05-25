@@ -779,3 +779,234 @@ export function playbackRangesForApplications(apps, segmentsBySource) {
   }
   return out;
 }
+
+// ---------- F5.2 — right-click memo creation ----------
+//
+// Mirrors scribe/memo_context.py. The editor uses these to build a
+// draft memo payload from any right-click context (a code chip, a
+// quote highlight, a participant card, …) and POST it to
+// /api/projects/<pid>/memos. The default-type mapping must match
+// DEFAULT_MEMO_TYPE_BY_TARGET in Python so the same right-click on
+// the same entity produces the same default regardless of who built
+// the payload.
+//
+// Validation here is shape-only: full validation runs server-side via
+// Memo.validate. We keep the JS strict enough to catch obvious
+// caller bugs (typoed target type, missing fields) without
+// duplicating MemoLink's regex library.
+
+export const MEMO_LINK_TARGET_TYPES = Object.freeze([
+  "code",
+  "source",
+  "application",
+  "participant",
+  "coder",
+  "project",
+  "memo",
+]);
+
+export const MEMO_TYPES = Object.freeze([
+  "code",
+  "theoretical",
+  "methodological",
+  "reflexive",
+  "quote",
+  "source",
+  "project",
+  "free",
+]);
+
+export const DEFAULT_MEMO_TYPE_BY_TARGET = Object.freeze({
+  code: "code",
+  application: "quote",
+  source: "source",
+  project: "project",
+  coder: "methodological",
+  memo: "theoretical",
+  participant: "free",
+});
+
+const _TARGET_ID_RE = /^[a-f0-9]{12}$/;
+const _ROLE_RE = /^[A-Za-z][\w \-]{0,63}$/;
+
+export function defaultMemoTypeForTarget(targetType) {
+  if (typeof targetType !== "string") {
+    throw new Error("target_type must be a string");
+  }
+  return Object.prototype.hasOwnProperty.call(
+    DEFAULT_MEMO_TYPE_BY_TARGET,
+    targetType,
+  )
+    ? DEFAULT_MEMO_TYPE_BY_TARGET[targetType]
+    : "free";
+}
+
+function _coerceLinkInput(raw) {
+  // Accept the JS-camelCase shape that the editor uses internally
+  // (`{ targetType, targetId, role }`) AND the Python-snake_case
+  // shape that comes back from the server. Normalise to snake_case
+  // since that's what the server endpoint expects on the wire.
+  if (!raw || typeof raw !== "object") {
+    throw new Error("link entries must be objects");
+  }
+  const targetType = raw.target_type ?? raw.targetType;
+  const targetId = raw.target_id ?? raw.targetId;
+  const role = raw.role ?? "";
+  if (typeof targetType !== "string" || typeof targetId !== "string") {
+    throw new Error("link entries need target_type and target_id strings");
+  }
+  if (!MEMO_LINK_TARGET_TYPES.includes(targetType)) {
+    throw new Error(`unknown target_type: ${targetType}`);
+  }
+  if (!_TARGET_ID_RE.test(targetId)) {
+    throw new Error(`target_id must be 12-char hex: ${targetId}`);
+  }
+  const out = { target_type: targetType, target_id: targetId };
+  const r = String(role || "").trim();
+  if (r) {
+    if (!_ROLE_RE.test(r)) throw new Error(`invalid link role: ${r}`);
+    out.role = r;
+  }
+  return out;
+}
+
+/**
+ * Build the JSON body for `POST /api/projects/<pid>/memos` from a
+ * right-click context. Returns a plain object — no fetch is made.
+ *
+ * @param {object} args
+ * @param {string} args.targetType   one of MEMO_LINK_TARGET_TYPES
+ * @param {string} args.targetId     12-char hex id
+ * @param {string} [args.role]       optional link role
+ * @param {string} [args.type]       memo type override (default = defaultMemoTypeForTarget)
+ * @param {string} [args.title]
+ * @param {string} [args.body]
+ * @param {string} [args.bodyFormat] markdown / plain / html
+ * @param {string} [args.authorCoderId]
+ * @param {Array<object>} [args.extraLinks] additional links (de-duped against primary)
+ * @param {Array<string>} [args.tags]
+ * @param {object} [args.provenance] string→string
+ *
+ * The shape always includes `links: [primary, ...extras]`. The server
+ * runs full validation; this is the editor's "what would I send" pure
+ * helper.
+ */
+export function buildMemoDraftPayload({
+  targetType,
+  targetId,
+  role = "",
+  type = null,
+  title = "",
+  body = "",
+  bodyFormat = "markdown",
+  authorCoderId = null,
+  extraLinks = null,
+  tags = null,
+  provenance = null,
+} = {}) {
+  if (typeof targetType !== "string" || !MEMO_LINK_TARGET_TYPES.includes(targetType)) {
+    throw new Error(`unknown target_type: ${targetType}`);
+  }
+  if (typeof targetId !== "string" || !_TARGET_ID_RE.test(targetId)) {
+    throw new Error(`target_id must be 12-char hex: ${targetId}`);
+  }
+  let chosenType;
+  if (type == null) {
+    chosenType = defaultMemoTypeForTarget(targetType);
+  } else {
+    if (!MEMO_TYPES.includes(type)) {
+      throw new Error(`unknown memo type: ${type}`);
+    }
+    chosenType = type;
+  }
+
+  const primary = _coerceLinkInput({ target_type: targetType, target_id: targetId, role });
+
+  const extras = [];
+  for (const raw of extraLinks || []) {
+    const link = _coerceLinkInput(raw);
+    // Dedupe against primary by (type, id, role)
+    if (
+      link.target_type === primary.target_type &&
+      link.target_id === primary.target_id &&
+      (link.role || "") === (primary.role || "")
+    ) {
+      continue;
+    }
+    extras.push(link);
+  }
+
+  const payload = {
+    type: chosenType,
+    title: String(title || ""),
+    body: String(body || ""),
+    body_format: String(bodyFormat || "markdown"),
+    links: [primary, ...extras],
+  };
+  if (authorCoderId) payload.author_coder_id = String(authorCoderId);
+  if (Array.isArray(tags) && tags.length) {
+    payload.tags = tags.map((t) => String(t));
+  }
+  if (provenance && typeof provenance === "object") {
+    const p = {};
+    for (const [k, v] of Object.entries(provenance)) p[String(k)] = String(v);
+    if (Object.keys(p).length) payload.provenance = p;
+  }
+  return payload;
+}
+
+/**
+ * Convenience: build the same payload but wrap the right-click
+ * context inside a top-level `context` block. The server endpoint
+ * accepts either form; this is the shape the right-click composer
+ * sends when it doesn't yet know what extra fields the user wants.
+ */
+export function buildMemoContextPayload({
+  targetType,
+  targetId,
+  role = "",
+  type = null,
+  title = "",
+  body = "",
+  bodyFormat = "markdown",
+  authorCoderId = null,
+  extraLinks = null,
+  tags = null,
+  provenance = null,
+} = {}) {
+  if (typeof targetType !== "string" || !MEMO_LINK_TARGET_TYPES.includes(targetType)) {
+    throw new Error(`unknown target_type: ${targetType}`);
+  }
+  if (typeof targetId !== "string" || !_TARGET_ID_RE.test(targetId)) {
+    throw new Error(`target_id must be 12-char hex: ${targetId}`);
+  }
+  const ctx = { target_type: targetType, target_id: targetId };
+  const r = String(role || "").trim();
+  if (r) {
+    if (!_ROLE_RE.test(r)) throw new Error(`invalid link role: ${r}`);
+    ctx.role = r;
+  }
+  const out = { context: ctx };
+  if (type != null) {
+    if (!MEMO_TYPES.includes(type)) {
+      throw new Error(`unknown memo type: ${type}`);
+    }
+    out.type = type;
+  }
+  if (title) out.title = String(title);
+  if (body) out.body = String(body);
+  if (bodyFormat && bodyFormat !== "markdown") out.body_format = String(bodyFormat);
+  if (authorCoderId) out.author_coder_id = String(authorCoderId);
+  if (Array.isArray(extraLinks) && extraLinks.length) {
+    out.extra_links = extraLinks.map(_coerceLinkInput);
+  }
+  if (Array.isArray(tags) && tags.length) {
+    out.tags = tags.map((t) => String(t));
+  }
+  if (provenance && typeof provenance === "object") {
+    const p = {};
+    for (const [k, v] of Object.entries(provenance)) p[String(k)] = String(v);
+    if (Object.keys(p).length) out.provenance = p;
+  }
+  return out;
+}

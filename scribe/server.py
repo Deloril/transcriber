@@ -729,6 +729,110 @@ async def delete_participant_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Memos (F5.1) + right-click memo creation (F5.2)
+#
+# F5.1 added the on-disk Memo entity. F5.2 closes the loop with the
+# right-click flow: the editor sends either
+#
+#   1. a flat memo body — same shape as Memo.to_dict, used when the
+#      caller has already built the link list itself; or
+#   2. a body containing a top-level ``"context": {target_type,
+#      target_id, role?}`` block — the right-click composer's "I just
+#      clicked on this thing, populate the link for me" payload.
+#
+# Both routes converge on the same persisted Memo. Type-defaulting
+# and primary-link prepopulation live in scribe.memo_context so the
+# JS helpers can mirror them exactly.
+# --------------------------------------------------------------------------- #
+
+from . import memos as _memos  # noqa: E402  (after module-level state)
+from . import memo_context as _memo_context  # noqa: E402
+
+
+@app.post("/api/projects/{project_id}/memos")
+async def create_memo_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    """Create a memo, optionally from a right-click context block.
+
+    Accepts either:
+
+    * ``{"context": {"target_type": ..., "target_id": ..., "role": ...},
+       "title": "...", "body": "...", ...}`` — F5.2 right-click flow.
+       The primary link to the target is prepopulated; ``type``
+       defaults to :data:`scribe.memo_context.DEFAULT_MEMO_TYPE_BY_TARGET`
+       unless overridden. Additional links may be passed under
+       ``extra_links``.
+    * A flat memo body (``{"type": ..., "title": ..., "links": [...],
+      ...}``) — direct Memo.new shape. Used for non-right-click
+      creation paths and tests.
+
+    Returns 201 with the persisted memo on success; 400 on validation;
+    404 if the project is missing.
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            if "context" in body and body.get("context") is not None:
+                # Right-click flow: build via memo_context helper so
+                # the type-defaulting and primary-link prepopulation
+                # rules match the JS helper one-for-one.
+                ctx = body["context"]
+                fields: dict[str, Any] = {}
+                if "type" in body and body["type"] is not None:
+                    fields["type"] = str(body["type"])
+                if "title" in body:
+                    fields["title"] = str(body.get("title", "") or "")
+                if "body" in body:
+                    fields["body"] = str(body.get("body", "") or "")
+                if "body_format" in body:
+                    fields["body_format"] = str(
+                        body.get("body_format", "markdown") or "markdown"
+                    )
+                if "author_coder_id" in body and body["author_coder_id"]:
+                    fields["author_coder_id"] = str(body["author_coder_id"])
+                if "extra_links" in body:
+                    fields["extra_links"] = body.get("extra_links") or []
+                if "tags" in body:
+                    fields["tags"] = body.get("tags") or []
+                if "provenance" in body:
+                    fields["provenance"] = body.get("provenance") or {}
+                memo = _memo_context.build_memo_draft_from_context(
+                    project_id=project_id,
+                    context=ctx,
+                    **fields,
+                )
+            else:
+                memo = _memos.Memo.new(
+                    project_id=project_id,
+                    type=str(body.get("type", "free") or "free"),
+                    title=str(body.get("title", "") or ""),
+                    body=str(body.get("body", "") or ""),
+                    body_format=str(
+                        body.get("body_format", "markdown") or "markdown"
+                    ),
+                    author_coder_id=body.get("author_coder_id") or None,
+                    links=body.get("links") or [],
+                    tags=body.get("tags") or [],
+                    provenance=body.get("provenance") or {},
+                )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid memo payload: {e}")
+        _memos.save_memo(_projects_root(), memo)
+    return JSONResponse(memo.to_dict(), status_code=201)
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 
