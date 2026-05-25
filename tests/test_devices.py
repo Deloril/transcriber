@@ -139,3 +139,133 @@ class TestDevicesMain:
         monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
         out = _run(capsys)
         assert "Parakeet engine:" in out
+
+    # G1.3: ROCm support-ticket details — gfx target + Linux distro.
+
+    def test_reports_gfx_target_on_rocm(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.cuda, "get_device_name", lambda i: "AMD Radeon RX 7900 XTX")
+        monkeypatch.setattr(devices, "_cuda_vram_gb", lambda: 24.0)
+        monkeypatch.setattr(devices, "_is_rdna2", lambda: False)
+        monkeypatch.setattr(devices.torch.version, "hip", "6.3", raising=False)
+        monkeypatch.setattr(devices, "gpu_arch_name", lambda: "gfx1100")
+        out = _run(capsys)
+        assert "GFX target:" in out
+        assert "gfx1100" in out
+
+    def test_omits_gfx_target_on_cuda(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # CUDA cards typically leave gcnArchName empty so gpu_arch_name()
+        # returns None and the line should not appear.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.cuda, "get_device_name", lambda i: "FakeGPU 1000")
+        monkeypatch.setattr(devices, "_cuda_vram_gb", lambda: 24.0)
+        monkeypatch.setattr(devices.torch.version, "cuda", "12.4", raising=False)
+        monkeypatch.setattr(devices.torch.version, "hip", None, raising=False)
+        monkeypatch.setattr(devices, "gpu_arch_name", lambda: None)
+        out = _run(capsys)
+        assert "GFX target:" not in out
+
+    def test_omits_gfx_target_on_rocm_when_unavailable(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # If the gcnArchName probe fails, devices.main() must still finish
+        # cleanly and just skip the GFX target line.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.cuda, "get_device_name", lambda i: "AMD Radeon RX 7900 XTX")
+        monkeypatch.setattr(devices, "_cuda_vram_gb", lambda: 24.0)
+        monkeypatch.setattr(devices, "_is_rdna2", lambda: False)
+        monkeypatch.setattr(devices.torch.version, "hip", "6.3", raising=False)
+        monkeypatch.setattr(devices, "gpu_arch_name", lambda: None)
+        out = _run(capsys)
+        assert "GFX target:" not in out
+        # And the rest of the report still rendered.
+        assert "Selected backends:" in out
+
+    def test_reports_linux_distro_when_available(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(devices, "_linux_distro", lambda: "Ubuntu 24.04.4 LTS")
+        out = _run(capsys)
+        assert "Distro:" in out
+        assert "Ubuntu 24.04.4 LTS" in out
+
+    def test_omits_distro_on_non_linux(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(devices, "_linux_distro", lambda: None)
+        out = _run(capsys)
+        assert "Distro:" not in out
+
+
+class TestLinuxDistro:
+    """G1.3: ``_linux_distro()`` is the helper feeding the ``Distro:`` line."""
+
+    def test_returns_none_on_non_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(devices.platform, "system", lambda: "Darwin")
+        assert devices._linux_distro() is None
+
+    def test_returns_none_when_helper_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Python < 3.10 paths simulated by deleting the platform attribute.
+        monkeypatch.setattr(devices.platform, "system", lambda: "Linux")
+        monkeypatch.delattr(devices.platform, "freedesktop_os_release", raising=False)
+        assert devices._linux_distro() is None
+
+    def test_returns_pretty_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(devices.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(
+            devices.platform,
+            "freedesktop_os_release",
+            lambda: {"PRETTY_NAME": "Ubuntu 24.04.4 LTS", "NAME": "Ubuntu"},
+            raising=False,
+        )
+        assert devices._linux_distro() == "Ubuntu 24.04.4 LTS"
+
+    def test_falls_back_to_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # No PRETTY_NAME field — fall back to NAME.
+        monkeypatch.setattr(devices.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(
+            devices.platform,
+            "freedesktop_os_release",
+            lambda: {"NAME": "Fedora Linux"},
+            raising=False,
+        )
+        assert devices._linux_distro() == "Fedora Linux"
+
+    def test_returns_none_on_oserror(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # /etc/os-release missing → freedesktop_os_release raises OSError.
+        monkeypatch.setattr(devices.platform, "system", lambda: "Linux")
+
+        def _missing() -> dict:
+            raise OSError("os-release not found")
+
+        monkeypatch.setattr(
+            devices.platform, "freedesktop_os_release", _missing, raising=False
+        )
+        assert devices._linux_distro() is None
+
+    def test_returns_none_when_pretty_name_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Both PRETTY_NAME and NAME absent → None.
+        monkeypatch.setattr(devices.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(
+            devices.platform,
+            "freedesktop_os_release",
+            lambda: {"VERSION_ID": "24.04"},
+            raising=False,
+        )
+        assert devices._linux_distro() is None

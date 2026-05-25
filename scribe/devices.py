@@ -13,13 +13,41 @@ from .engine import (
     _is_rdna2,
     _torch_device,
     _whisper_device_and_compute,
+    gpu_arch_name,
     gpu_backend,
 )
+
+
+def _linux_distro() -> str | None:
+    """Linux distribution pretty-name (e.g. ``Ubuntu 24.04.4 LTS``) or None.
+
+    Used in the device report so AMD/ROCm support tickets show the distro
+    — ROCm support varies meaningfully across Ubuntu / RHEL / Fedora /
+    Arch (G1.3); also useful on CUDA when reporting kernel-driver issues.
+
+    Returns None on non-Linux systems, when ``platform.freedesktop_os_release``
+    is unavailable (Python < 3.10), or when ``/etc/os-release`` can't be
+    read. Empty pretty-names normalise to None.
+    """
+    if platform.system() != "Linux":
+        return None
+    fn = getattr(platform, "freedesktop_os_release", None)
+    if fn is None:
+        return None
+    try:
+        info = fn()
+    except (OSError, FileNotFoundError):
+        return None
+    pretty = info.get("PRETTY_NAME") or info.get("NAME")
+    return pretty or None
 
 
 def main() -> int:
     backend = gpu_backend()
     print(f"OS:                 {platform.system()} {platform.release()} ({platform.machine()})")
+    distro = _linux_distro()
+    if distro:
+        print(f"  Distro:           {distro}")
     print(f"Python:             {sys.version.split()[0]}")
     print(f"PyTorch:            {torch.__version__}")
     print(f"GPU backend:        {backend}")
@@ -37,6 +65,12 @@ def main() -> int:
             print(f"  Device 0:         {name} ({_cuda_vram_gb():.1f} GB)")
         except Exception as e:  # noqa: BLE001
             print(f"  (could not query device 0: {e})")
+        # G1.3: surface the gfx target on AMD/ROCm — it's the one identifier
+        # CTranslate2 / ROCm upstream maintainers ask for first when triaging.
+        if backend == "rocm":
+            arch = gpu_arch_name()
+            if arch:
+                print(f"  GFX target:       {arch}")
         if backend == "rocm" and _is_rdna2():
             print("  Note: RDNA 2 detected — auto-applying CT2_CUDA_ALLOCATOR=cub_caching")
     print(f"MPS available:      {torch.backends.mps.is_available()}")

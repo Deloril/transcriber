@@ -322,6 +322,69 @@ class TestIsRdna2:
         assert engine._is_rdna2() is False
 
 
+class TestGpuArchName:
+    """G1.3: gfx target reporting for ROCm support tickets."""
+
+    def _props(self, **kw: Any) -> Any:
+        m = MagicMock()
+        for k, v in kw.items():
+            setattr(m, k, v)
+        return m
+
+    def test_returns_none_on_cpu(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine.torch.cuda, "is_available", lambda: False)
+        assert engine.gpu_arch_name() is None
+
+    def test_returns_gfx_target_on_rocm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(
+            engine.torch.cuda,
+            "get_device_properties",
+            lambda i: self._props(gcnArchName="gfx1100"),
+        )
+        assert engine.gpu_arch_name() == "gfx1100"
+
+    def test_strips_feature_suffix(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # ROCm sometimes returns the gfx target with a feature-flag suffix:
+        # "gfx1100:sramecc+:xnack-". Triage only cares about the bare target.
+        monkeypatch.setattr(engine.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(
+            engine.torch.cuda,
+            "get_device_properties",
+            lambda i: self._props(gcnArchName="gfx1100:sramecc+:xnack-"),
+        )
+        assert engine.gpu_arch_name() == "gfx1100"
+
+    def test_returns_none_when_property_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # CUDA cards leave gcnArchName empty / absent.
+        monkeypatch.setattr(engine.torch.cuda, "is_available", lambda: True)
+        # Build a props object without a gcnArchName attribute.
+        class _Props:
+            pass
+        monkeypatch.setattr(
+            engine.torch.cuda, "get_device_properties", lambda i: _Props()
+        )
+        assert engine.gpu_arch_name() is None
+
+    def test_returns_none_when_property_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(
+            engine.torch.cuda,
+            "get_device_properties",
+            lambda i: self._props(gcnArchName=""),
+        )
+        assert engine.gpu_arch_name() is None
+
+    def test_returns_none_on_query_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine.torch.cuda, "is_available", lambda: True)
+
+        def _boom(i: int) -> Any:
+            raise RuntimeError("driver fell over")
+
+        monkeypatch.setattr(engine.torch.cuda, "get_device_properties", _boom)
+        assert engine.gpu_arch_name() is None
+
+
 class TestApplyRocmRuntimeWorkarounds:
     def test_noop_on_non_rocm(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")

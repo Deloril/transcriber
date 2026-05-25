@@ -409,6 +409,37 @@ def _gpu_device_name() -> str:
         return ""
 
 
+def gpu_arch_name() -> str | None:
+    """The GPU architecture / GCN target string, or None when unavailable.
+
+    On AMD ROCm this is the gfx target — ``gfx1100`` (RDNA 3 Navi 31),
+    ``gfx1030`` (RDNA 2 Navi 21), ``gfx1201`` (RDNA 4 Navi 48) etc — which
+    is the canonical identifier in CTranslate2 / ROCm bug reports and the
+    one piece of context that's hardest to recover after the fact. Used
+    by ``scribe.devices`` so support tickets carry the right backend
+    fingerprint (G1.3).
+
+    Returns None on CPU / MPS or when the underlying torch property is
+    missing; CUDA cards normally have ``gcnArchName`` empty so they also
+    fall through to None — CUDA support tickets look at ``compute_capability``
+    instead, which we don't surface here.
+
+    Empty strings are normalised to None.
+    """
+    if not torch.cuda.is_available():
+        return None
+    try:
+        props = torch.cuda.get_device_properties(0)
+    except Exception:
+        return None
+    arch = getattr(props, "gcnArchName", None)
+    if not arch:
+        return None
+    # gcnArchName can come back with a feature-suffix (e.g. "gfx1100:sramecc+:xnack-").
+    # The bare gfx target is the part everyone wants for triage.
+    return str(arch).split(":", 1)[0] or None
+
+
 def _is_rdna2() -> bool:
     """Detect AMD RDNA 2 (RX 6000-series) via device name. Used to apply the
     CT2_CUDA_ALLOCATOR=cub_caching workaround (CT2 issue #2012)."""
