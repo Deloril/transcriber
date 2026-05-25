@@ -681,6 +681,26 @@ class TestPersistence:
         assert rebuilt.started_at == 1.0
         assert rebuilt.finished_at == 2.0
 
+    def test_round_trip_preserves_media_discarded(self, server_env) -> None:
+        # F10.2 — the media_discarded flag must survive persistence
+        # so the editor still degrades to no-playback after a server
+        # restart.
+        srv, _, _ = server_env
+        job = _new_job(srv)
+        job.media_discarded = True
+        rebuilt = srv.Job.from_state(job.to_state())
+        assert rebuilt.media_discarded is True
+
+    def test_from_state_defaults_media_discarded_to_false(self, server_env) -> None:
+        # Legacy job.json files written before F10.2 don't have the
+        # field; load_jobs_from_disk must treat absence as False.
+        srv, _, _ = server_env
+        job = _new_job(srv)
+        d = job.to_state()
+        d.pop("media_discarded", None)
+        rebuilt = srv.Job.from_state(d)
+        assert rebuilt.media_discarded is False
+
     def test_load_jobs_skips_invalid_paths(
         self, server_env, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -977,6 +997,203 @@ class TestDeleteJobAPI:
         body = client.get("/api/jobs").json()
         ids = [r["id"] for r in body["jobs"]]
         assert ids == ["bbbbbbbbbbbb"]
+
+
+# --------------------------------------------------------------------------- #
+# F10.2 — discard source media (keep transcript)
+# --------------------------------------------------------------------------- #
+
+
+class TestDiscardMediaAPI:
+    """``POST /api/job/{id}/discard-media`` removes ``uploads/<id>/``
+    and rewrites ``job.json`` with ``media_discarded: true``. The
+    transcript output sidecars are kept untouched.
+    """
+
+    def test_discards_known_job(self, server_env) -> None:
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        # Sanity: the source recording exists, an output sidecar exists.
+        out_file = job.output_dir / "transcript.json"
+        out_file.write_text("{}")
+        assert job.input_path.exists()
+        assert out_file.exists()
+
+        r = client.post(f"/api/job/{job.id}/discard-media")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body == {"ok": True, "id": job.id, "already": False}
+
+        # The flag is set on the live Job and persisted to job.json.
+        assert srv.JOBS[job.id].media_discarded is True
+        persisted = srv._job_state_path(job.output_dir)
+        assert persisted.exists()
+        import json as _json
+        data = _json.loads(persisted.read_text())
+        assert data["media_discarded"] is True
+
+        # The upload directory is gone …
+        assert not job.input_path.parent.exists()
+        # … but the output sidecar (and the rest of outputs/) is still there.
+        assert out_file.exists()
+
+    def test_returns_404_for_unknown_job(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post("/api/job/abcdef012345/discard-media")
+        assert r.status_code == 404
+
+    def test_rejects_invalid_job_id(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post("/api/job/not-a-job/discard-media")
+        assert r.status_code == 400
+
+    def test_idempotent_on_second_call(self, server_env) -> None:
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        r1 = client.post(f"/api/job/{job.id}/discard-media")
+        assert r1.status_code == 200
+        assert r1.json()["already"] is False
+
+        r2 = client.post(f"/api/job/{job.id}/discard-media")
+        assert r2.status_code == 200
+        assert r2.json()["already"] is True
+        assert srv.JOBS[job.id].media_discarded is True
+
+    def test_refuses_while_job_in_progress(self, server_env) -> None:
+        # The worker still needs the source recording on disk while
+        # transcription is running. Refuse to discard until the job
+        # has reached a terminal state.
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456", status="running",
+                       progress=0.5, message="Transcribing…")
+        r = client.post(f"/api/job/{job.id}/discard-media")
+        assert r.status_code == 409
+        # The flag is unchanged.
+        assert srv.JOBS[job.id].media_discarded is False
+        # And the upload directory is still there.
+        assert job.input_path.exists()
+
+    def test_allows_discard_for_errored_job(self, server_env) -> None:
+        # A job that errored mid-run is in a terminal state, so the
+        # user can reclaim its upload dir.
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456", status="error",
+                       error="boom", message="Error")
+        r = client.post(f"/api/job/{job.id}/discard-media")
+        assert r.status_code == 200
+        assert srv.JOBS[job.id].media_discarded is True
+
+    def test_does_not_touch_other_jobs(self, server_env) -> None:
+        srv, client, _ = server_env
+        # Build two jobs each in their own per-id upload dir.
+        job_a = _new_job(srv, id="aaaaaaaaaaaa", out_dir=srv.OUTPUT_DIR / "aaaaaaaaaaaa")
+        job_a_in_dir = srv.UPLOAD_DIR / "aaaaaaaaaaaa"
+        job_a_in_dir.mkdir(parents=True, exist_ok=True)
+        job_a_in = job_a_in_dir / "in.wav"
+        job_a_in.write_bytes(b"\x00" * 32)
+        job_a.input_path = job_a_in
+
+        job_b_in_dir = srv.UPLOAD_DIR / "bbbbbbbbbbbb"
+        job_b_in_dir.mkdir(parents=True, exist_ok=True)
+        job_b_in = job_b_in_dir / "in.wav"
+        job_b_in.write_bytes(b"\x00" * 32)
+        job_b_out = srv.OUTPUT_DIR / "bbbbbbbbbbbb"
+        job_b_out.mkdir(parents=True, exist_ok=True)
+        job_b = srv.Job(
+            id="bbbbbbbbbbbb",
+            input_path=job_b_in,
+            output_dir=job_b_out,
+            mode="diarize", speakers=None, num_speakers=None,
+            language="en", model="large-v3",
+            created_at="2026-05-25T00:00:00Z",
+            status="done", input_filename="in.wav",
+        )
+        srv.JOBS[job_b.id] = job_b
+
+        r = client.post(f"/api/job/{job_a.id}/discard-media")
+        assert r.status_code == 200
+        # Job A's source is gone.
+        assert not job_a.input_path.exists()
+        # Job B's source survives untouched.
+        assert job_b.input_path.exists()
+        assert job_b.media_discarded is False
+
+    def test_media_endpoint_returns_410_after_discard(self, server_env) -> None:
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        client.post(f"/api/job/{job.id}/discard-media")
+        # /media → 410 Gone (keep-transcript-but-not-source semantic).
+        r = client.get(f"/api/job/{job.id}/media")
+        assert r.status_code == 410
+
+    def test_info_endpoint_returns_410_after_discard(self, server_env) -> None:
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        client.post(f"/api/job/{job.id}/discard-media")
+        r = client.get(f"/api/job/{job.id}/info")
+        assert r.status_code == 410
+
+    def test_waveform_endpoint_returns_410_after_discard(self, server_env) -> None:
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        client.post(f"/api/job/{job.id}/discard-media")
+        r = client.get(f"/api/job/{job.id}/waveform?bins=100")
+        assert r.status_code == 410
+
+    def test_transcript_endpoint_still_works_after_discard(self, server_env) -> None:
+        # The whole point of discard is to keep the transcript usable.
+        srv, client, _ = server_env
+        job = _new_job(
+            srv, id="abc123def456",
+            result={"language": "en", "speakers": [], "segments": []},
+        )
+        client.post(f"/api/job/{job.id}/discard-media")
+        r = client.get(f"/api/job/{job.id}/transcript")
+        assert r.status_code == 200
+        assert r.json() == {"language": "en", "speakers": [], "segments": []}
+
+    def test_status_endpoint_exposes_media_discarded_flag(self, server_env) -> None:
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        # Before discard, the flag is False.
+        body = client.get(f"/api/job/{job.id}").json()
+        assert body["media_discarded"] is False
+        client.post(f"/api/job/{job.id}/discard-media")
+        body2 = client.get(f"/api/job/{job.id}").json()
+        assert body2["media_discarded"] is True
+
+    def test_library_listing_carries_media_discarded(self, server_env) -> None:
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        # Before discard.
+        body = client.get("/api/jobs").json()
+        assert body["jobs"][0]["media_discarded"] is False
+        client.post(f"/api/job/{job.id}/discard-media")
+        body2 = client.get("/api/jobs").json()
+        assert body2["jobs"][0]["media_discarded"] is True
+
+    def test_editor_page_still_loads_after_discard(self, server_env) -> None:
+        # Once the source media is gone, the editor route must still
+        # serve the page so the user can see, read, and export the
+        # transcript even though playback is unavailable.
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        client.post(f"/api/job/{job.id}/discard-media")
+        r = client.get(f"/edit/{job.id}")
+        assert r.status_code == 200
+
+    def test_discard_persists_across_simulated_reload(self, server_env) -> None:
+        # Simulate a server restart by writing the persistent state,
+        # then re-loading it via Job.from_state.
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        client.post(f"/api/job/{job.id}/discard-media")
+        # Now reload from disk.
+        persisted = srv._job_state_path(job.output_dir)
+        import json as _json
+        data = _json.loads(persisted.read_text())
+        reloaded = srv.Job.from_state(data)
+        assert reloaded.media_discarded is True
 
 
 # --------------------------------------------------------------------------- #

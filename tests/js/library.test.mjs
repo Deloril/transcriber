@@ -207,3 +207,51 @@ describe("formatLibrarySpeakers", () => {
     expect(formatLibrarySpeakers(["A", "B", "C", "D", "E"])).toBe("A, B +3 more");
   });
 });
+
+// F10.2 — the row carries a ``media_discarded`` flag that the page
+// uses to render a small icon and hide the per-row "Discard media"
+// action. The flag must NOT leak into the search haystack (it isn't
+// a user-meaningful keyword) and must NOT affect the sort comparator
+// (sorting by media_discarded is meaningless and there's no header
+// for it).
+describe("library media_discarded passthrough (F10.2)", () => {
+  it("media_discarded does not affect the search filter", () => {
+    const rows = [
+      ROW({ id: "aaaaaaaaaaaa", media_discarded: true }),
+      ROW({ id: "bbbbbbbbbbbb", media_discarded: false }),
+    ];
+    // Searching for the literal "discarded" matches neither row, even
+    // though one carries the flag — the flag isn't part of the
+    // searchable text.
+    expect(searchLibraryRows(rows, "discarded").length).toBe(0);
+    // Empty query still returns both rows regardless of flag.
+    expect(searchLibraryRows(rows, "").length).toBe(2);
+  });
+
+  it("matchesLibraryQuery ignores the media_discarded flag entirely", () => {
+    const a = ROW({ media_discarded: true });
+    const b = ROW({ media_discarded: false });
+    // Both rows have the same searchable text, so any non-empty query
+    // either matches both or neither.
+    expect(matchesLibraryQuery(a, "interview")).toBe(true);
+    expect(matchesLibraryQuery(b, "interview")).toBe(true);
+    expect(matchesLibraryQuery(a, "true")).toBe(false);
+    expect(matchesLibraryQuery(b, "false")).toBe(false);
+  });
+
+  it("compareLibraryRows is stable when media_discarded is the only difference", () => {
+    // Two rows that are otherwise identical — the comparator's
+    // tie-breaker on id keeps them in id-ascending order regardless
+    // of which one had its media discarded.
+    const a = ROW({ id: "aaaaaaaaaaaa", media_discarded: true });
+    const b = ROW({ id: "bbbbbbbbbbbb", media_discarded: false });
+    const sortedA = [a, b].slice().sort((x, y) =>
+      compareLibraryRows(x, y, "input_filename", "asc"),
+    );
+    const sortedB = [b, a].slice().sort((x, y) =>
+      compareLibraryRows(x, y, "input_filename", "asc"),
+    );
+    expect(sortedA.map(r => r.id)).toEqual(["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
+    expect(sortedB.map(r => r.id)).toEqual(["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
+  });
+});

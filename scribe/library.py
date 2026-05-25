@@ -147,11 +147,16 @@ def summarise_job(job: Any) -> dict[str, Any]:
     ``speaker_count``     — ``len(speakers)``; convenience for sorting.
     ``duration_seconds``  — derived from segments; None if not done.
     ``has_outputs``       — True when at least one sidecar was written.
+    ``media_discarded``   — True when the user reclaimed disk space by
+                            dropping the source recording (F10.2). The
+                            transcript is still readable; the library
+                            row renders a small "media discarded" icon
+                            and the editor degrades to a no-playback
+                            mode.
     ``error``             — short error message; None on a healthy row.
 
-    The shape is stable: subsequent F10.x features (e.g. F10.2's
-    ``media_discarded`` flag) layer on by adding *new* keys, never
-    by mutating these.
+    The shape is stable: subsequent F10.x features layer on by adding
+    *new* keys, never by mutating these.
     """
     d = _job_state(job)
     result = d.get("result") or None
@@ -173,6 +178,7 @@ def summarise_job(job: Any) -> dict[str, Any]:
         "speaker_count": len(speakers),
         "duration_seconds": _duration_from_result(result),
         "has_outputs": bool(d.get("output_paths")),
+        "media_discarded": bool(d.get("media_discarded", False)),
         "error": d.get("error"),
     }
 

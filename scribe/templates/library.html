@@ -141,6 +141,18 @@
     .speakers { color: var(--muted); }
     .speakers .more { color: var(--accent); }
 
+    /* F10.2 — small icon shown next to the filename when source media
+       has been reclaimed via "Discard source media". Hover reveals
+       the explainer; the row otherwise behaves identically. */
+    .media-flag {
+      display: inline-block;
+      margin-left: 6px;
+      color: var(--warn);
+      font-size: 11px;
+      cursor: help;
+      vertical-align: middle;
+    }
+
     .empty {
       padding: 60px 20px; text-align: center; color: var(--muted);
     }
@@ -284,9 +296,24 @@
           `<a href="/api/job/${encodeURIComponent(row.id)}/download/srt" title="Download SRT subtitles">SRT</a>`
         : "";
 
+      // F10.2 — small icon next to the filename when source media has
+      // been discarded so the user can see at a glance which rows
+      // can no longer play back.
+      const mediaFlag = row.media_discarded
+        ? `<span class="media-flag" title="Source media discarded — playback is unavailable for this row." aria-label="Source media discarded">📼</span>`
+        : "";
+
+      // F10.2 — only offer the discard action while the source still
+      // exists. Disabled rows (in-progress / errored) keep their
+      // upload directory because the worker may still need it.
+      const canDiscard = canEdit && !row.media_discarded;
+      const discardBtn = canDiscard
+        ? `<button data-action="discard-media" data-id="${escapeHtml(row.id)}" title="Remove the source media file but keep the transcript (reclaim disk space)">Discard media</button>`
+        : "";
+
       tr.innerHTML = `
         <td class="filename" title="${filename}">
-          <strong>${filename}</strong>
+          <strong>${filename}</strong>${mediaFlag}
         </td>
         <td class="numeric">${duration}</td>
         <td><span class="pill mode">${mode || "—"}</span></td>
@@ -297,6 +324,7 @@
         <td class="actions">
           ${editLink}
           ${downloads}
+          ${discardBtn}
           <button class="danger" data-action="delete" data-id="${escapeHtml(row.id)}">Delete</button>
         </td>
       `;
@@ -304,25 +332,60 @@
     }
 
     tbody.addEventListener("click", async (e) => {
-      const btn = e.target.closest("button[data-action='delete']");
-      if (!btn) return;
-      const jobId = btn.dataset.id;
-      if (!confirm(`Delete this transcription? This removes the source media and all transcript files. This cannot be undone.`)) return;
-      btn.disabled = true;
-      btn.textContent = "Deleting…";
-      try {
-        const r = await fetch(`/api/job/${encodeURIComponent(jobId)}`, { method: "DELETE" });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        // Drop the row locally for instant feedback; refresh in the background
-        // to confirm the server-side state.
-        allRows = allRows.filter(x => x.id !== jobId);
-        render();
-        loadLibrary();
-      } catch (e2) {
-        btn.disabled = false;
-        btn.textContent = "Delete";
-        errBanner.textContent = "Delete failed: " + (e2.message || e2);
-        errBanner.classList.remove("hidden");
+      const delBtn = e.target.closest("button[data-action='delete']");
+      const discardBtn = e.target.closest("button[data-action='discard-media']");
+      if (delBtn) {
+        const jobId = delBtn.dataset.id;
+        if (!confirm(`Delete this transcription? This removes the source media and all transcript files. This cannot be undone.`)) return;
+        delBtn.disabled = true;
+        delBtn.textContent = "Deleting…";
+        try {
+          const r = await fetch(`/api/job/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          // Drop the row locally for instant feedback; refresh in the background
+          // to confirm the server-side state.
+          allRows = allRows.filter(x => x.id !== jobId);
+          render();
+          loadLibrary();
+        } catch (e2) {
+          delBtn.disabled = false;
+          delBtn.textContent = "Delete";
+          errBanner.textContent = "Delete failed: " + (e2.message || e2);
+          errBanner.classList.remove("hidden");
+        }
+        return;
+      }
+      if (discardBtn) {
+        // F10.2 — drop the source recording but keep the transcript.
+        const jobId = discardBtn.dataset.id;
+        if (!confirm(
+          "Discard the source media file?\n\n" +
+          "Playback will no longer work for this transcription. " +
+          "Your transcript text, edits, search, and exports are kept.\n\n" +
+          "This cannot be undone."
+        )) return;
+        discardBtn.disabled = true;
+        discardBtn.textContent = "Discarding…";
+        try {
+          const r = await fetch(
+            `/api/job/${encodeURIComponent(jobId)}/discard-media`,
+            { method: "POST" },
+          );
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          // Update the local row to reflect discard for instant feedback,
+          // then refresh from server to confirm.
+          allRows = allRows.map(x =>
+            x.id === jobId ? { ...x, media_discarded: true } : x
+          );
+          render();
+          loadLibrary();
+        } catch (e2) {
+          discardBtn.disabled = false;
+          discardBtn.textContent = "Discard media";
+          errBanner.textContent = "Discard media failed: " + (e2.message || e2);
+          errBanner.classList.remove("hidden");
+        }
+        return;
       }
     });
 

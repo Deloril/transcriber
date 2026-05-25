@@ -65,6 +65,12 @@ class Job:
     # parsing ISO strings.
     started_at: float | None = None
     finished_at: float | None = None
+    # F10.2 — when the user clicks "Discard source media" the
+    # `uploads/<id>/` directory is removed but the transcript +
+    # output sidecars are kept; this flag tells the editor to
+    # gracefully degrade (hide the player, disable seek/play) and
+    # tells the library row to render a small "media discarded" icon.
+    media_discarded: bool = False
 
     def to_state(self) -> dict[str, Any]:
         d = asdict(self)
@@ -96,6 +102,7 @@ class Job:
             batch_size=int(d.get("batch_size", 8) or 8),
             started_at=d.get("started_at"),
             finished_at=d.get("finished_at"),
+            media_discarded=bool(d.get("media_discarded", False)),
         )
 
 
@@ -2122,6 +2129,7 @@ def _job_dict(job: Job) -> dict[str, Any]:
         "output_paths": job.output_paths,
         "result": job.result,
         "input_filename": job.input_filename,
+        "media_discarded": bool(job.media_discarded),
     }
 
 
@@ -2156,6 +2164,64 @@ async def list_jobs_endpoint(q: str = "") -> JSONResponse:
     if q:
         rows = _library.filter_rows(rows, q)
     return JSONResponse({"jobs": rows, "total": len(rows)})
+
+
+@app.post("/api/job/{job_id}/discard-media")
+async def discard_media_endpoint(job_id: str) -> JSONResponse:
+    """F10.2 — drop the source media for a job, keep the transcript.
+
+    Removes the per-job ``uploads/<id>/`` directory (which holds the
+    original recording) and rewrites ``job.json`` with
+    ``media_discarded: true``. The output sidecars
+    (``.json/.txt/.srt/.vtt/edited.json/waveform_*.json``) are
+    untouched so the editor can still load and edit the transcript.
+
+    Idempotent: a second call on an already-discarded job is a 200 with
+    ``already=true`` and no filesystem work, so a duplicate click from
+    the UI doesn't error.
+
+    Refuses (403) when the upload path escapes the configured
+    ``UPLOAD_DIR``, matching the same containment guard as the delete
+    endpoint.
+    """
+    _check_job_id(job_id)
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(404, "Job not found")
+        # In-progress jobs still need their source on disk for the
+        # worker; refuse to discard until the engine has finished.
+        if job.status not in ("done", "error"):
+            raise HTTPException(
+                409,
+                f"Cannot discard media while job is {job.status}",
+            )
+        in_path = job.input_path.resolve()
+        already = bool(job.media_discarded)
+    upload_dir = in_path.parent
+    if upload_dir != UPLOAD_DIR.resolve() and not _is_under(upload_dir, UPLOAD_DIR.resolve()):
+        raise HTTPException(403, "input_path escapes UPLOAD_DIR")
+    if already:
+        # Defensive cleanup in case a partial earlier discard left
+        # stragglers — best-effort, no error surfaced.
+        if upload_dir.exists():
+            shutil.rmtree(upload_dir, ignore_errors=True)
+        return JSONResponse({"ok": True, "id": job_id, "already": True})
+    # Remove the upload directory (source media + anything else the
+    # uploader cached there). Errors deleting individual files are
+    # *not* surfaced because the user-facing semantic is "best-effort
+    # reclaim disk space"; the persistent flag below is what the rest
+    # of the system reads.
+    shutil.rmtree(upload_dir, ignore_errors=True)
+    with JOBS_LOCK:
+        # Re-check — the job could have been deleted out from under
+        # us between unlock and re-lock.
+        j = JOBS.get(job_id)
+        if j is None:
+            raise HTTPException(404, "Job not found")
+        j.media_discarded = True
+    _persist_job(j)
+    return JSONResponse({"ok": True, "id": job_id, "already": False})
 
 
 @app.delete("/api/job/{job_id}")
@@ -2370,6 +2436,8 @@ async def job_info(job_id: str) -> JSONResponse:
         job = JOBS.get(job_id)
         if not job:
             raise HTTPException(404, "Job not found")
+        if job.media_discarded:
+            raise HTTPException(410, "Source media discarded for this job")
         path = job.input_path.resolve()
     if not _is_under(path, UPLOAD_DIR):
         raise HTTPException(403, "Forbidden")
@@ -2393,6 +2461,8 @@ async def job_waveform(job_id: str, bins: int = 1000) -> JSONResponse:
         job = JOBS.get(job_id)
         if not job:
             raise HTTPException(404, "Job not found")
+        if job.media_discarded:
+            raise HTTPException(410, "Source media discarded for this job")
         path = job.input_path.resolve()
         out_dir = job.output_dir.resolve()
     if not _is_under(path, UPLOAD_DIR) or not _is_under(out_dir, OUTPUT_DIR):
@@ -2429,6 +2499,8 @@ async def media(job_id: str, request: Request) -> Response:
         job = JOBS.get(job_id)
         if not job:
             raise HTTPException(404, "Job not found")
+        if job.media_discarded:
+            raise HTTPException(410, "Source media discarded for this job")
         path = job.input_path.resolve()
     if not _is_under(path, UPLOAD_DIR):
         raise HTTPException(403, "Forbidden")

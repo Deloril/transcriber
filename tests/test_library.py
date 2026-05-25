@@ -47,6 +47,7 @@ def _job_state(**fields: Any) -> dict[str, Any]:
         "batch_size": 8,
         "started_at": None,
         "finished_at": None,
+        "media_discarded": False,
     }
     base.update(fields)
     return base
@@ -84,7 +85,7 @@ class TestSummariseJobShape:
         "status", "progress", "message",
         "created_at", "started_at", "finished_at",
         "audio_streams", "speakers", "speaker_count",
-        "duration_seconds", "has_outputs", "error",
+        "duration_seconds", "has_outputs", "media_discarded", "error",
     }
 
     def test_returns_all_expected_keys(self) -> None:
@@ -206,6 +207,38 @@ class TestSummariseJobOutputs:
     def test_has_outputs_false_when_empty(self) -> None:
         row = library.summarise_job(_job_state(output_paths={}))
         assert row["has_outputs"] is False
+
+
+class TestSummariseJobMediaDiscarded:
+    """F10.2 — the row carries a ``media_discarded`` boolean so the
+    library page can render the small "📼 discarded" icon and hide
+    the per-row "Discard media" action."""
+
+    def test_defaults_to_false(self) -> None:
+        row = library.summarise_job(_job_state())
+        assert row["media_discarded"] is False
+
+    def test_passes_true_through(self) -> None:
+        row = library.summarise_job(_job_state(media_discarded=True))
+        assert row["media_discarded"] is True
+
+    def test_truthy_non_bool_coerces_to_bool(self) -> None:
+        # Hand-edited job.json with an int / string truthy value still
+        # resolves to True; we never trust the raw value.
+        for raw in (1, "yes", [1, 2]):
+            row = library.summarise_job(_job_state(media_discarded=raw))
+            assert row["media_discarded"] is True
+
+    def test_falsy_non_bool_coerces_to_false(self) -> None:
+        for raw in (0, "", [], None):
+            row = library.summarise_job(_job_state(media_discarded=raw))
+            assert row["media_discarded"] is False
+
+    def test_missing_key_is_false(self) -> None:
+        d = _job_state()
+        d.pop("media_discarded", None)
+        row = library.summarise_job(d)
+        assert row["media_discarded"] is False
 
 
 class TestSummariseJobAcceptsLiveJob:

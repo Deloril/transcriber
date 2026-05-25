@@ -76,6 +76,22 @@
       outline: none;
     }
     .media-wrap.audio-only video { display: none; }
+    /* F10.2 — when source media is discarded, the whole player wrap is
+       removed and the notice card replaces it. */
+    .media-wrap.discarded { display: none; }
+    .media-discarded-notice {
+      position: sticky; top: 51px; z-index: 25;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 18px;
+      color: var(--muted);
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .media-discarded-notice .icon { font-size: 16px; }
+    .media-discarded-notice strong { color: var(--text); }
     .controls {
       display: flex;
       flex-direction: column;
@@ -355,7 +371,15 @@
     <button id="undoBtn" title="Undo (⌘Z)">↶</button>
     <button id="redoBtn" title="Redo (⇧⌘Z)">↷</button>
     <button id="exportBtn" title="Export">Export ▾</button>
+    <button id="discardMediaBtn" title="Discard the source media file (keeps the transcript)">🗑 Source</button>
     <button id="helpBtn" title="Keyboard shortcuts (?)">?</button>
+  </div>
+
+  <div id="mediaDiscardedNotice" class="media-discarded-notice" hidden>
+    <span class="icon" aria-hidden="true">📼</span>
+    <span><strong>Source media discarded.</strong>
+      Playback is no longer available for this transcription.
+      All edits, search, and export still work.</span>
   </div>
 
   <div id="mediaWrap" class="media-wrap">
@@ -642,6 +666,10 @@ import { spreadTokensAcrossSpan, escapeHtml } from "/static/js/helpers.mjs";
     toastTimer = setTimeout(() => t.classList.remove("show"), 1600);
   }
 
+  // F10.2 — flips to true when the editor learns the source media has
+  // been discarded; seekTo / play handlers become no-ops.
+  let mediaDiscarded = false;
+
   // ---- Init / load ----
   async function bootstrap() {
     const r = await fetch(`/api/job/${JOB_ID}/transcript`);
@@ -658,6 +686,27 @@ import { spreadTokensAcrossSpan, escapeHtml } from "/static/js/helpers.mjs";
     if (!state.speaker_names) state.speaker_names = {};
     lastSavedSnapshot = snapshot();
     render();
+
+    // F10.2 — peek at the job-status endpoint to learn whether the
+    // source media was discarded. We do this *before* attaching the
+    // <video src=…> so we never trigger a 410 fetch when the user
+    // already reclaimed disk space.
+    let discarded = false;
+    try {
+      const sr = await fetch(`/api/job/${JOB_ID}`);
+      if (sr.ok) {
+        const sj = await sr.json();
+        discarded = !!(sj && sj.media_discarded);
+      }
+    } catch (_) {
+      // Best-effort — if the status fetch fails, fall through to
+      // attaching the media as usual; the player will fail loudly
+      // for the user.
+    }
+    if (discarded) {
+      applyMediaDiscardedUI();
+      return;
+    }
 
     // Attach media
     const player = $("player");
@@ -955,9 +1004,53 @@ import { spreadTokensAcrossSpan, escapeHtml } from "/static/js/helpers.mjs";
     return document.getElementById("audioFallback") || $("player");
   }
   function seekTo(t, andPlay) {
+    if (mediaDiscarded) {
+      // Source media was reclaimed — nothing to seek into. We swallow
+      // the click rather than throw, because seekTo is wired to many
+      // surfaces (segment-time button, word click, …) and a thrown
+      // error would derail the editor.
+      return;
+    }
     const m = mediaEl();
     m.currentTime = Math.max(0, t);
     if (andPlay) m.play().catch(()=>{});
+  }
+
+  // F10.2 — flip the UI into "no playback" mode. Called from
+  // bootstrap() when the job is already discarded, and from the
+  // discard-media button after a successful POST.
+  function applyMediaDiscardedUI() {
+    mediaDiscarded = true;
+    const wrap = $("mediaWrap");
+    const notice = $("mediaDiscardedNotice");
+    if (wrap) wrap.classList.add("discarded");
+    if (notice) notice.hidden = false;
+    // Realign sticky offsets — without the player the search bar's
+    // sticky top should hug the topbar.
+    const noticeH = notice ? notice.offsetHeight : 0;
+    document.documentElement.style.setProperty("--media-h", noticeH + "px");
+    // Clear the source on the <video> so the browser doesn't keep
+    // any partial buffer around. Also detach the audio fallback if
+    // the user discarded mid-session.
+    const player = $("player");
+    if (player) {
+      try { player.pause(); } catch (_) {}
+      player.removeAttribute("src");
+      try { player.load(); } catch (_) {}
+    }
+    const af = document.getElementById("audioFallback");
+    if (af) {
+      try { af.pause(); } catch (_) {}
+      af.removeAttribute("src");
+      af.remove();
+    }
+    // The topbar button no longer makes sense once media is gone.
+    const btn = $("discardMediaBtn");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "📼 Discarded";
+      btn.title = "Source media has been discarded";
+    }
   }
   let autoScroll = true;
   $("player").addEventListener("timeupdate", onTimeUpdate);
@@ -967,12 +1060,23 @@ import { spreadTokensAcrossSpan, escapeHtml } from "/static/js/helpers.mjs";
     $("durTime").textContent = fmtClock($("player").duration);
   });
   $("playPause").addEventListener("click", () => {
+    if (mediaDiscarded) return;
     const m = mediaEl();
     if (m.paused) m.play(); else m.pause();
   });
-  $("rew5").addEventListener("click", () => { const m = mediaEl(); m.currentTime = Math.max(0, m.currentTime - 5); });
-  $("fwd5").addEventListener("click", () => { const m = mediaEl(); m.currentTime = m.currentTime + 5; });
-  $("speedSel").addEventListener("change", (e) => { mediaEl().playbackRate = parseFloat(e.target.value); $("player").playbackRate = parseFloat(e.target.value); });
+  $("rew5").addEventListener("click", () => {
+    if (mediaDiscarded) return;
+    const m = mediaEl(); m.currentTime = Math.max(0, m.currentTime - 5);
+  });
+  $("fwd5").addEventListener("click", () => {
+    if (mediaDiscarded) return;
+    const m = mediaEl(); m.currentTime = m.currentTime + 5;
+  });
+  $("speedSel").addEventListener("change", (e) => {
+    if (mediaDiscarded) return;
+    mediaEl().playbackRate = parseFloat(e.target.value);
+    $("player").playbackRate = parseFloat(e.target.value);
+  });
   $("autoScroll").addEventListener("click", () => {
     autoScroll = !autoScroll;
     $("autoScroll").classList.toggle("active", autoScroll);
@@ -1390,6 +1494,34 @@ import { spreadTokensAcrossSpan, escapeHtml } from "/static/js/helpers.mjs";
   $("redoBtn").addEventListener("click", redo);
   $("helpBtn").addEventListener("click", () => $("helpModal").classList.add("open"));
   $("helpClose").addEventListener("click", () => $("helpModal").classList.remove("open"));
+
+  // F10.2 — "Discard source media" button. Confirms once with the
+  // playback-warning copy from the spec, POSTs to the discard
+  // endpoint, then flips the UI into no-playback mode without a
+  // page reload.
+  $("discardMediaBtn").addEventListener("click", async () => {
+    if (mediaDiscarded) return;
+    const ok = window.confirm(
+      "Discard the source media file?\n\n" +
+      "Playback will no longer work for this transcription. " +
+      "Your transcript text, edits, search, and exports are kept.\n\n" +
+      "This cannot be undone."
+    );
+    if (!ok) return;
+    const btn = $("discardMediaBtn");
+    btn.disabled = true;
+    btn.textContent = "Discarding…";
+    try {
+      const r = await fetch(`/api/job/${JOB_ID}/discard-media`, { method: "POST" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      applyMediaDiscardedUI();
+      toast("Source media discarded.");
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "🗑 Source";
+      toast("Could not discard media: " + (e.message || e));
+    }
+  });
   $("exportBtn").addEventListener("click", async () => {
     if (dirty) await save();
     $("dlTxt").href = `/api/job/${JOB_ID}/download/txt`;
