@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .audio import probe_audio_streams
-from .engine import Segment, TranscriptionResult, Word, transcribe
+from .engine import AdvancedOptions, Segment, TranscriptionResult, Word, transcribe
 from .writers import write_all, write_json, write_srt, write_txt, write_vtt
 
 load_dotenv()
@@ -58,6 +58,8 @@ class Job:
     output_paths: dict[str, str] = field(default_factory=dict)
     audio_streams: int = 0
     input_filename: str = ""
+    options: dict[str, Any] = field(default_factory=dict)
+    batch_size: int = 8
 
     def to_state(self) -> dict[str, Any]:
         d = asdict(self)
@@ -85,6 +87,8 @@ class Job:
             output_paths=d.get("output_paths", {}),
             audio_streams=d.get("audio_streams", 0),
             input_filename=d.get("input_filename", ""),
+            options=d.get("options", {}) or {},
+            batch_size=int(d.get("batch_size", 8) or 8),
         )
 
 
@@ -249,6 +253,102 @@ async def readme_fragment() -> HTMLResponse:
 
 
 # --------------------------------------------------------------------------- #
+# Profiles — server-side defaults you can apply per recording
+# --------------------------------------------------------------------------- #
+
+PROFILES_PATH = ROOT / "profiles.json"
+PROFILES_LOCK = threading.Lock()
+_PROFILE_NAME_RE = re.compile(r"^[\w \-.()]{1,64}$")
+
+
+def _load_profiles() -> list[dict[str, Any]]:
+    if not PROFILES_PATH.exists():
+        return []
+    try:
+        data = json.loads(PROFILES_PATH.read_text())
+        if isinstance(data, list):
+            return data
+    except Exception as e:  # noqa: BLE001
+        print(f"[scribe] could not load profiles.json: {e}")
+    return []
+
+
+def _save_profiles(profiles: list[dict[str, Any]]) -> None:
+    tmp = PROFILES_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(profiles, indent=2, ensure_ascii=False))
+    tmp.replace(PROFILES_PATH)
+
+
+def _normalise_profile(p: dict[str, Any]) -> dict[str, Any]:
+    """Pick out only the fields we recognise so users can't smuggle junk in."""
+    name = str(p.get("name", "")).strip()
+    if not _PROFILE_NAME_RE.match(name):
+        raise HTTPException(400, "Profile name must be 1–64 chars (letters, digits, space, -._())")
+    settings = p.get("settings") or {}
+    if not isinstance(settings, dict):
+        raise HTTPException(400, "settings must be an object")
+    allowed = {
+        "mode", "language", "model", "batch_size",
+        "speakers", "num_speakers",
+        # advanced options
+        "beam_size", "best_of", "temperature",
+        "no_speech_threshold", "compression_ratio_threshold", "condition_on_previous_text",
+        "chunk_size", "vad_onset", "vad_offset",
+        "initial_prompt", "hotwords",
+    }
+    cleaned = {k: v for k, v in settings.items() if k in allowed}
+    return {
+        "name": name,
+        "description": str(p.get("description", "")).strip()[:300],
+        "settings": cleaned,
+    }
+
+
+@app.get("/api/profiles")
+async def list_profiles() -> JSONResponse:
+    with PROFILES_LOCK:
+        return JSONResponse({"profiles": _load_profiles()})
+
+
+@app.put("/api/profiles/{name}")
+async def upsert_profile(name: str, request: Request) -> JSONResponse:
+    if not _PROFILE_NAME_RE.match(name):
+        raise HTTPException(400, "Invalid profile name")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    body["name"] = name
+    profile = _normalise_profile(body)
+    with PROFILES_LOCK:
+        profiles = _load_profiles()
+        # replace if exists, else append
+        for i, p in enumerate(profiles):
+            if p.get("name") == name:
+                profiles[i] = profile
+                break
+        else:
+            profiles.append(profile)
+        _save_profiles(profiles)
+    return JSONResponse(profile)
+
+
+@app.delete("/api/profiles/{name}")
+async def delete_profile(name: str) -> JSONResponse:
+    if not _PROFILE_NAME_RE.match(name):
+        raise HTTPException(400, "Invalid profile name")
+    with PROFILES_LOCK:
+        profiles = _load_profiles()
+        new_profiles = [p for p in profiles if p.get("name") != name]
+        if len(new_profiles) == len(profiles):
+            raise HTTPException(404, "Profile not found")
+        _save_profiles(new_profiles)
+    return JSONResponse({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 
@@ -261,6 +361,8 @@ async def upload(
     num_speakers: str = Form(""),
     language: str = Form("en"),
     model: str = Form("large-v3"),
+    batch_size: str = Form("8"),
+    options: str = Form("{}"),
 ) -> JSONResponse:
     job_id = uuid.uuid4().hex[:12]
     safe_name = Path(file.filename or "upload.bin").name
@@ -277,6 +379,18 @@ async def upload(
 
     speakers_list = [s.strip() for s in speakers.split(",") if s.strip()] or None
     nspk = int(num_speakers) if num_speakers.strip().isdigit() else None
+
+    try:
+        opts_dict = json.loads(options) if options else {}
+        if not isinstance(opts_dict, dict):
+            raise ValueError("options must be a JSON object")
+    except Exception as e:
+        raise HTTPException(400, f"Invalid options JSON: {e}")
+
+    try:
+        bs = max(1, min(64, int(batch_size)))
+    except ValueError:
+        bs = 8
 
     try:
         streams = probe_audio_streams(input_path)
@@ -298,6 +412,8 @@ async def upload(
         created_at=datetime.utcnow().isoformat() + "Z",
         audio_streams=len(streams),
         input_filename=safe_name,
+        options=opts_dict,
+        batch_size=bs,
     )
     with JOBS_LOCK:
         JOBS[job_id] = job
@@ -337,8 +453,9 @@ def _run_job(job_id: str) -> None:
             num_speakers=job.num_speakers,
             model_name=job.model,
             language=job.language,
-            batch_size=8,
+            batch_size=job.batch_size,
             hf_token=os.environ.get("HF_TOKEN"),
+            options=AdvancedOptions.from_dict(job.options),
             progress=lambda m, f: _set_progress(job_id, m, f),
         )
         base = job.output_dir / job.input_path.stem

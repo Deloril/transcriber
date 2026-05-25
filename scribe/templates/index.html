@@ -184,6 +184,80 @@
     #hfTokenMsg.ok { color: var(--ok); }
     #hfTokenMsg.err { color: var(--err); }
 
+    /* Advanced settings */
+    .adv-wrap { margin-top: 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+    .adv-head {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .adv-head .caret { color: var(--muted); transition: transform .15s; }
+    .adv-wrap.open .adv-head .caret { transform: rotate(90deg); }
+    .adv-head .title { font-size: 13px; font-weight: 600; }
+    .adv-head .summary { color: var(--muted); font-size: 12px; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+    .adv-body { display: none; padding: 6px 14px 16px; border-top: 1px solid var(--border); }
+    .adv-wrap.open .adv-body { display: block; }
+    .adv-section { margin-top: 14px; }
+    .adv-section h4 {
+      font-size: 12px; color: var(--muted); margin: 0 0 8px;
+      text-transform: uppercase; letter-spacing: .04em; font-weight: 600;
+    }
+    .adv-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    .adv-row.two { grid-template-columns: 1fr 1fr; }
+    .adv-row.one { grid-template-columns: 1fr; }
+    .adv-field { display: flex; flex-direction: column; gap: 4px; }
+    .adv-field label { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+    .adv-field .help {
+      cursor: help;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      width: 14px; height: 14px;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 9px;
+    }
+    .adv-field input[type="number"], .adv-field input[type="text"], .adv-field textarea, .adv-field select {
+      width: 100%;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 6px 8px;
+      font: inherit;
+      font-size: 13px;
+    }
+    .adv-field textarea { resize: vertical; min-height: 60px; font-family: inherit; }
+    .adv-field.checkbox { flex-direction: row; align-items: center; gap: 8px; }
+    .adv-field.checkbox input { width: auto; }
+    .adv-field.checkbox label { font-size: 13px; }
+    .adv-actions {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding-top: 12px; margin-top: 14px; border-top: 1px solid var(--border);
+    }
+    .adv-actions .reset {
+      background: var(--panel); color: var(--muted);
+      border: 1px solid var(--border); border-radius: 7px;
+      padding: 6px 10px; font-size: 12px;
+      cursor: pointer; font-weight: 500;
+    }
+    .adv-actions .reset:hover { color: var(--text); border-color: var(--accent); }
+
+    /* Profiles */
+    .profile-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0 14px 12px; }
+    .profile-bar select { flex: 1; min-width: 160px; max-width: 320px; padding: 6px 8px; font-size: 13px; background: var(--panel); border: 1px solid var(--border); border-radius: 7px; color: var(--text); }
+    .profile-btn {
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 7px;
+      padding: 6px 10px; font-size: 12px; font-weight: 500;
+      cursor: pointer;
+    }
+    .profile-btn:hover { border-color: var(--accent); }
+    .profile-btn.danger:hover { border-color: var(--err); color: var(--err); }
+    .profile-msg { font-size: 12px; color: var(--muted); margin-left: 4px; }
+    .profile-msg.ok { color: var(--ok); }
+    .profile-msg.err { color: var(--err); }
+
     /* Header docs button */
     .doc-btn {
       margin-left: auto;
@@ -311,6 +385,105 @@
         </div>
       </div>
 
+      <div id="advWrap" class="adv-wrap">
+        <div class="adv-head" id="advHead">
+          <span class="caret">▶</span>
+          <span class="title">Advanced settings</span>
+          <span class="summary" id="advSummary">defaults</span>
+        </div>
+        <div class="profile-bar">
+          <select id="profileSelect" title="Apply a saved profile">
+            <option value="">— Profile —</option>
+          </select>
+          <button type="button" id="profileApply" class="profile-btn">Apply</button>
+          <button type="button" id="profileSave" class="profile-btn">Save as profile…</button>
+          <button type="button" id="profileDelete" class="profile-btn danger">Delete</button>
+          <span id="profileMsg" class="profile-msg"></span>
+        </div>
+        <div class="adv-body">
+          <div class="adv-section">
+            <h4>Decoding</h4>
+            <div class="adv-row">
+              <div class="adv-field">
+                <label>Beam size <span class="help" title="Number of search beams. 1 disables beam search; default 5. Higher = slower but more accurate.">?</span></label>
+                <input type="number" id="optBeamSize" min="1" max="20" step="1">
+              </div>
+              <div class="adv-field">
+                <label>Best of <span class="help" title="Sampling candidates considered when temperature > 0. Default 5.">?</span></label>
+                <input type="number" id="optBestOf" min="1" max="20" step="1">
+              </div>
+              <div class="adv-field">
+                <label>Temperature <span class="help" title="0 = deterministic. Higher values let Whisper sample alternative decodings (used as a fallback when the result looks broken).">?</span></label>
+                <input type="number" id="optTemperature" min="0" max="1" step="0.1">
+              </div>
+            </div>
+          </div>
+
+          <div class="adv-section">
+            <h4>Hallucination guards</h4>
+            <div class="adv-row">
+              <div class="adv-field">
+                <label>No-speech threshold <span class="help" title="If the model's no-speech probability is above this, the segment is dropped. Higher = more aggressive about silence. Default 0.45.">?</span></label>
+                <input type="number" id="optNoSpeech" min="0" max="1" step="0.05">
+              </div>
+              <div class="adv-field">
+                <label>Compression ratio cap <span class="help" title="Decoded text whose gzip ratio exceeds this is dropped — main guard against repeat-loop hallucinations. Default 2.4.">?</span></label>
+                <input type="number" id="optCompression" min="1" max="10" step="0.1">
+              </div>
+              <div class="adv-field checkbox" style="align-self:end;">
+                <input type="checkbox" id="optCondPrev">
+                <label for="optCondPrev">Condition on previous text <span class="help" title="If on, the model sees prior text as context. Source of repeat-loop hallucinations on long speech — usually leave OFF.">?</span></label>
+              </div>
+            </div>
+          </div>
+
+          <div class="adv-section">
+            <h4>VAD &amp; chunking <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:11px;margin-left:6px;">(the long-monologue knobs)</span></h4>
+            <div class="adv-row">
+              <div class="adv-field">
+                <label>Chunk size (s) <span class="help" title="Maximum seconds per chunk before VAD forces a hard cut. Default 30 (Whisper's window). Lower for very fast speakers; rarely useful to raise.">?</span></label>
+                <input type="number" id="optChunkSize" min="5" max="60" step="1">
+              </div>
+              <div class="adv-field">
+                <label>VAD onset <span class="help" title="Higher = stricter speech-start detection (skips quieter starts). Default 0.500.">?</span></label>
+                <input type="number" id="optVadOnset" min="0" max="1" step="0.05">
+              </div>
+              <div class="adv-field">
+                <label>VAD offset <span class="help" title="Higher = stricter speech-end detection. Default 0.363.">?</span></label>
+                <input type="number" id="optVadOffset" min="0" max="1" step="0.05">
+              </div>
+            </div>
+          </div>
+
+          <div class="adv-section">
+            <h4>Domain biasing</h4>
+            <div class="adv-row one">
+              <div class="adv-field">
+                <label>Initial prompt <span class="help" title="Free-text prompt prepended to the model's context. Highest-leverage knob for domain accuracy — list speakers, technical terms, product names, etc.">?</span></label>
+                <textarea id="optInitialPrompt" placeholder="e.g. Interview between Luke and Maria, discussing FDA inspections, OSHA citations, and 21 CFR Part 11 compliance."></textarea>
+              </div>
+            </div>
+            <div class="adv-row one">
+              <div class="adv-field">
+                <label>Hotwords <span class="help" title="Comma- or space-separated bias words. Useful for proper nouns the model keeps mishearing.">?</span></label>
+                <input type="text" id="optHotwords" placeholder="e.g. Salesforce, Agentforce, Einstein, GPT-4o">
+              </div>
+            </div>
+            <div class="adv-row two">
+              <div class="adv-field">
+                <label>Batch size <span class="help" title="How many chunks faster-whisper processes in parallel. Lower if you hit OOM. Default 8.">?</span></label>
+                <input type="number" id="optBatchSize" min="1" max="64" step="1">
+              </div>
+            </div>
+          </div>
+
+          <div class="adv-actions">
+            <button type="button" class="reset" id="advReset">Reset to defaults</button>
+            <span id="advMsg" class="profile-msg"></span>
+          </div>
+        </div>
+      </div>
+
       <div id="hfTokenBox" class="hf-token-box">
         <div class="hf-token-row">
           <div class="hf-token-summary">
@@ -417,6 +590,224 @@
               : `${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
     }
 
+    // -------- Advanced settings + profiles --------
+    const ADV_DEFAULTS = {
+      beam_size: 5,
+      best_of: 5,
+      temperature: 0.0,
+      no_speech_threshold: 0.45,
+      compression_ratio_threshold: 2.4,
+      condition_on_previous_text: false,
+      chunk_size: 30,
+      vad_onset: 0.5,
+      vad_offset: 0.363,
+      initial_prompt: "",
+      hotwords: "",
+      batch_size: 8,
+    };
+    const TOP_DEFAULTS = {
+      mode: "auto", language: "en", model: "large-v3",
+      speakers: "", num_speakers: "",
+    };
+    const ADV_FIELDS = {
+      beam_size: ["optBeamSize", "int"],
+      best_of: ["optBestOf", "int"],
+      temperature: ["optTemperature", "float"],
+      no_speech_threshold: ["optNoSpeech", "float"],
+      compression_ratio_threshold: ["optCompression", "float"],
+      condition_on_previous_text: ["optCondPrev", "bool"],
+      chunk_size: ["optChunkSize", "int"],
+      vad_onset: ["optVadOnset", "float"],
+      vad_offset: ["optVadOffset", "float"],
+      initial_prompt: ["optInitialPrompt", "str"],
+      hotwords: ["optHotwords", "str"],
+      batch_size: ["optBatchSize", "int"],
+    };
+    const TOP_FIELDS = {
+      mode: ["mode", "str"],
+      language: ["language", "str"],
+      model: ["model", "str"],
+      speakers: ["speakers", "str"],
+      num_speakers: ["numSpeakers", "str"],
+    };
+    const LS_KEY = "scribe.advancedSettings.v1";
+
+    function readField(elId, type) {
+      const el = $(elId); if (!el) return undefined;
+      if (type === "bool") return el.checked;
+      const v = el.value;
+      if (type === "int") return v === "" ? undefined : parseInt(v, 10);
+      if (type === "float") return v === "" ? undefined : parseFloat(v);
+      return v;
+    }
+    function writeField(elId, type, val) {
+      const el = $(elId); if (!el) return;
+      if (val === undefined || val === null) val = "";
+      if (type === "bool") el.checked = !!val;
+      else el.value = String(val);
+    }
+
+    function readSettings() {
+      const out = {};
+      for (const [k, [id, type]] of Object.entries(ADV_FIELDS)) {
+        const v = readField(id, type);
+        if (v !== undefined) out[k] = v;
+      }
+      for (const [k, [id, type]] of Object.entries(TOP_FIELDS)) {
+        const v = readField(id, type);
+        if (v !== undefined && v !== "") out[k] = v;
+      }
+      return out;
+    }
+    function writeSettings(s) {
+      const merged = { ...ADV_DEFAULTS, ...TOP_DEFAULTS, ...(s || {}) };
+      for (const [k, [id, type]] of Object.entries(ADV_FIELDS)) writeField(id, type, merged[k]);
+      for (const [k, [id, type]] of Object.entries(TOP_FIELDS)) writeField(id, type, merged[k]);
+      updateAdvSummary();
+    }
+    function resetSettings() {
+      writeSettings({});
+      persistSettings();
+      $("advMsg").textContent = "Reset to defaults";
+      $("advMsg").className = "profile-msg ok";
+      setTimeout(() => { $("advMsg").textContent = ""; }, 1600);
+    }
+    function persistSettings() {
+      try { localStorage.setItem(LS_KEY, JSON.stringify(readSettings())); } catch {}
+    }
+    function loadPersistedSettings() {
+      let saved = null;
+      try {
+        const raw = localStorage.getItem(LS_KEY);
+        if (raw) saved = JSON.parse(raw);
+      } catch {}
+      writeSettings(saved || {});
+    }
+    function updateAdvSummary() {
+      // Summarise non-default values for the collapsed-panel hint
+      const cur = readSettings();
+      const diffs = [];
+      for (const [k, def] of Object.entries({ ...ADV_DEFAULTS, ...TOP_DEFAULTS })) {
+        const v = cur[k];
+        if (v === undefined || v === "" || v === def) continue;
+        const short = String(v).length > 18 ? String(v).slice(0, 16) + "…" : v;
+        diffs.push(`${k}=${short}`);
+      }
+      $("advSummary").textContent = diffs.length ? diffs.join(" · ") : "defaults";
+    }
+
+    // Split readSettings: top-level fields (mode/model/etc) vs advanced opts
+    function getAdvancedOptionsOnly() {
+      const all = readSettings();
+      const out = {};
+      for (const k of Object.keys(ADV_FIELDS)) {
+        if (k === "batch_size") continue;       // sent separately as form field
+        if (all[k] !== undefined && all[k] !== "") out[k] = all[k];
+      }
+      return out;
+    }
+    function getBatchSize() {
+      const v = readField("optBatchSize", "int");
+      return (v === undefined || isNaN(v)) ? ADV_DEFAULTS.batch_size : v;
+    }
+
+    // Wire panel collapse + change persistence
+    $("advHead").addEventListener("click", () => {
+      $("advWrap").classList.toggle("open");
+    });
+    document.querySelectorAll(
+      [...Object.values(ADV_FIELDS), ...Object.values(TOP_FIELDS)]
+        .map(([id]) => `#${id}`).join(",")
+    ).forEach(el => {
+      el.addEventListener("change", () => { persistSettings(); updateAdvSummary(); });
+      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+        el.addEventListener("input", () => { persistSettings(); updateAdvSummary(); });
+      }
+    });
+    $("advReset").addEventListener("click", resetSettings);
+
+    // -------- Profiles --------
+    let profilesCache = [];
+    async function fetchProfiles() {
+      try {
+        const r = await fetch("/api/profiles");
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        profilesCache = j.profiles || [];
+        renderProfileList();
+      } catch (e) {
+        setProfileMsg("Could not load profiles: " + e, "err");
+      }
+    }
+    function renderProfileList() {
+      const sel = $("profileSelect");
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">— Profile —</option>';
+      profilesCache.forEach(p => {
+        const opt = document.createElement("option");
+        opt.value = p.name;
+        opt.textContent = p.name;
+        sel.appendChild(opt);
+      });
+      sel.value = profilesCache.find(p => p.name === cur) ? cur : "";
+    }
+    function setProfileMsg(msg, cls) {
+      const el = $("profileMsg");
+      el.textContent = msg;
+      el.className = "profile-msg" + (cls ? " " + cls : "");
+      if (msg) setTimeout(() => { if (el.textContent === msg) el.textContent = ""; }, 2500);
+    }
+    $("profileApply").addEventListener("click", () => {
+      const name = $("profileSelect").value;
+      if (!name) { setProfileMsg("Pick a profile first", "err"); return; }
+      const p = profilesCache.find(x => x.name === name);
+      if (!p) return;
+      writeSettings(p.settings || {});
+      persistSettings();
+      setProfileMsg(`Applied "${name}"`, "ok");
+    });
+    $("profileSave").addEventListener("click", async () => {
+      const existing = $("profileSelect").value;
+      const name = (prompt("Profile name", existing || "") || "").trim();
+      if (!name) return;
+      try {
+        const r = await fetch(`/api/profiles/${encodeURIComponent(name)}`, {
+          method: "PUT",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ name, settings: readSettings(), description: "" }),
+        });
+        if (!r.ok) {
+          const t = await r.text();
+          throw new Error(`HTTP ${r.status}: ${t}`);
+        }
+        await fetchProfiles();
+        $("profileSelect").value = name;
+        setProfileMsg(`Saved "${name}"`, "ok");
+      } catch (e) {
+        setProfileMsg("Save failed: " + e.message, "err");
+      }
+    });
+    $("profileDelete").addEventListener("click", async () => {
+      const name = $("profileSelect").value;
+      if (!name) { setProfileMsg("Pick a profile first", "err"); return; }
+      if (!confirm(`Delete profile "${name}"?`)) return;
+      try {
+        const r = await fetch(`/api/profiles/${encodeURIComponent(name)}`, { method: "DELETE" });
+        if (!r.ok) {
+          const t = await r.text();
+          throw new Error(`HTTP ${r.status}: ${t}`);
+        }
+        await fetchProfiles();
+        setProfileMsg(`Deleted "${name}"`, "ok");
+      } catch (e) {
+        setProfileMsg("Delete failed: " + e.message, "err");
+      }
+    });
+
+    // Initial load
+    loadPersistedSettings();
+    fetchProfiles();
+
     goBtn.addEventListener("click", async () => {
       if (!chosenFile) return;
       goBtn.disabled = true;
@@ -433,6 +824,8 @@
       fd.append("num_speakers", $("numSpeakers").value);
       fd.append("language", $("language").value);
       fd.append("model", $("model").value);
+      fd.append("batch_size", String(getBatchSize()));
+      fd.append("options", JSON.stringify(getAdvancedOptionsOnly()));
 
       let resp;
       try {

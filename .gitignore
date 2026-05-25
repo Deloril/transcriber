@@ -6,3 +6,4 @@ uploads/
 outputs/
 models/
 .DS_Store
+profiles.json

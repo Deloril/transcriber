@@ -46,6 +46,69 @@ def _noop_progress(_msg: str, _f: float) -> None:
 
 
 @dataclass
+class AdvancedOptions:
+    """User-tunable knobs that map onto faster-whisper / WhisperX VAD parameters."""
+
+    # Decoding
+    beam_size: int = 5                  # 1 disables beam search; higher = slower, more accurate
+    best_of: int = 5                    # candidates considered when temperature > 0
+    temperature: float = 0.0            # 0 = deterministic; tuple-like fallback handled in caller
+
+    # Hallucination guards
+    no_speech_threshold: float = 0.45   # higher = more aggressive about skipping silence
+    compression_ratio_threshold: float = 2.4  # gzip ratio above this → segment dropped (loop guard)
+    condition_on_previous_text: bool = False  # leave off; main source of repeat-loop hallucinations
+
+    # VAD / chunking — these are the long-monologue knobs
+    chunk_size: int = 30                # max seconds per chunk before hard cut
+    vad_onset: float = 0.500            # speech start threshold
+    vad_offset: float = 0.363           # speech end threshold
+
+    # Domain biasing
+    initial_prompt: str = ""            # free text prepended to model context
+    hotwords: str = ""                  # comma- or space-separated bias words
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "AdvancedOptions":
+        if not d:
+            return cls()
+        kwargs: dict[str, Any] = {}
+        for f in (
+            "beam_size", "best_of", "temperature",
+            "no_speech_threshold", "compression_ratio_threshold", "condition_on_previous_text",
+            "chunk_size", "vad_onset", "vad_offset",
+            "initial_prompt", "hotwords",
+        ):
+            if f in d and d[f] is not None and d[f] != "":
+                kwargs[f] = d[f]
+        return cls(**kwargs)
+
+    def asr_options(self) -> dict[str, Any]:
+        """Subset to pass to faster-whisper's load_model asr_options."""
+        # faster-whisper expects "temperatures" as a tuple. The default fallback
+        # ladder it ships with is (0.0, 0.2, 0.4, 0.6, 0.8, 1.0) — we replace it
+        # with a single value so the user sees the exact temperature they asked
+        # for, no surprise fallback decoding.
+        return {
+            "beam_size": int(self.beam_size),
+            "best_of": int(self.best_of),
+            "temperatures": (float(self.temperature),),
+            "no_speech_threshold": float(self.no_speech_threshold),
+            "compression_ratio_threshold": float(self.compression_ratio_threshold),
+            "condition_on_previous_text": bool(self.condition_on_previous_text),
+            "initial_prompt": (self.initial_prompt or None),
+            "hotwords": (self.hotwords or None),
+        }
+
+    def vad_options(self) -> dict[str, Any]:
+        return {
+            "chunk_size": int(self.chunk_size),
+            "vad_onset": float(self.vad_onset),
+            "vad_offset": float(self.vad_offset),
+        }
+
+
+@dataclass
 class Word:
     text: str
     start: float
@@ -166,12 +229,41 @@ def _load_whisperx():
     return whisperx
 
 
+def _safe_load_model(whisperx, *, model_name, device, compute_type, language, asr_options, vad_options):
+    """
+    Call whisperx.load_model defensively — older/newer versions accept different
+    keyword arguments and silently complaining beats crashing the whole job.
+    """
+    import inspect
+    sig = inspect.signature(whisperx.load_model)
+    kw: dict[str, Any] = {
+        "device": device,
+        "compute_type": compute_type,
+        "language": language if language != "auto" else None,
+    }
+    if "asr_options" in sig.parameters:
+        kw["asr_options"] = asr_options
+    if "vad_options" in sig.parameters:
+        kw["vad_options"] = vad_options
+    elif "vad_method" in sig.parameters:
+        # newer signature; pass-through anyway, vad_options separately if accepted
+        pass
+    try:
+        return whisperx.load_model(model_name, **kw)
+    except TypeError:
+        # Strip any keys CTranslate2 / faster-whisper rejected and retry once.
+        clean_asr = {k: v for k, v in asr_options.items() if v is not None and k != "hotwords"}
+        kw["asr_options"] = clean_asr
+        return whisperx.load_model(model_name, **kw)
+
+
 def _transcribe_with_alignment(
     audio_path: Path,
     *,
     model_name: str,
     language: str,
     batch_size: int,
+    options: "AdvancedOptions",
     progress: ProgressFn,
     progress_base: float,
     progress_span: float,
@@ -185,25 +277,25 @@ def _transcribe_with_alignment(
     device, compute_type = _whisper_device_and_compute()
 
     progress("Loading Whisper model", progress_base + 0.0 * progress_span)
-    asr = whisperx.load_model(
-        model_name,
+    asr = _safe_load_model(
+        whisperx,
+        model_name=model_name,
         device=device,
         compute_type=compute_type,
-        language=language if language != "auto" else None,
-        asr_options={
-            # These are what unblocks long monologues: VAD chunks on silences
-            # rather than fixed 30s windows, and we don't condition on prior
-            # text (which is the main source of repeat-loop hallucinations).
-            "condition_on_previous_text": False,
-            "no_speech_threshold": 0.45,
-            "compression_ratio_threshold": 2.4,
-        },
+        language=language,
+        asr_options=options.asr_options(),
+        vad_options=options.vad_options(),
     )
 
     audio = whisperx.load_audio(str(audio_path))
 
     progress("Transcribing audio", progress_base + 0.1 * progress_span)
-    asr_result = asr.transcribe(audio, batch_size=batch_size, language=None if language == "auto" else language)
+    asr_result = asr.transcribe(
+        audio,
+        batch_size=batch_size,
+        language=None if language == "auto" else language,
+        chunk_size=int(options.chunk_size),
+    )
     detected_lang = asr_result.get("language") or language or "en"
 
     # Free Whisper before loading alignment model — keeps memory low.
@@ -257,6 +349,7 @@ def transcribe_multi_track(
     model_name: str = "large-v3",
     language: str = "en",
     batch_size: int = 8,
+    options: AdvancedOptions | None = None,
     progress: ProgressFn = _noop_progress,
 ) -> TranscriptionResult:
     """
@@ -265,6 +358,7 @@ def transcribe_multi_track(
     `speaker_labels`, if given, must have one entry per audio stream and is
     used as the spoken name for that track (e.g. ["Luke", "Guest"]).
     """
+    opts = options or AdvancedOptions()
     streams = probe_audio_streams(input_path)
     if len(streams) < 2:
         raise ValueError(
@@ -298,6 +392,7 @@ def transcribe_multi_track(
             model_name=model_name,
             language=language,
             batch_size=batch_size,
+            options=opts,
             progress=progress,
             progress_base=i / n,
             progress_span=1.0 / n,
@@ -357,6 +452,7 @@ def transcribe_diarize(
     model_name: str = "large-v3",
     language: str = "en",
     batch_size: int = 8,
+    options: AdvancedOptions | None = None,
     progress: ProgressFn = _noop_progress,
 ) -> TranscriptionResult:
     """Single-track transcription with pyannote AI diarization."""
@@ -366,6 +462,7 @@ def transcribe_diarize(
             "after accepting the licenses on the pyannote model pages. See README."
         )
 
+    opts = options or AdvancedOptions()
     work_dir.mkdir(parents=True, exist_ok=True)
     wav_path = work_dir / "input.wav"
 
@@ -377,6 +474,7 @@ def transcribe_diarize(
         model_name=model_name,
         language=language,
         batch_size=batch_size,
+        options=opts,
         progress=progress,
         progress_base=0.05,
         progress_span=0.7,
@@ -484,6 +582,7 @@ def transcribe(
     language: str = "en",
     batch_size: int = 8,
     hf_token: str | None = None,
+    options: AdvancedOptions | None = None,
     progress: ProgressFn = _noop_progress,
 ) -> TranscriptionResult:
     """
@@ -492,6 +591,7 @@ def transcribe(
     mode='auto' picks multi-track if the input has ≥2 audio streams,
     otherwise diarize.
     """
+    opts = options or AdvancedOptions()
     if mode == "auto":
         streams = probe_audio_streams(input_path)
         mode = "multi-track" if len(streams) >= 2 else "diarize"
@@ -504,6 +604,7 @@ def transcribe(
             model_name=model_name,
             language=language,
             batch_size=batch_size,
+            options=opts,
             progress=progress,
         )
     return transcribe_diarize(
@@ -516,5 +617,6 @@ def transcribe(
         model_name=model_name,
         language=language,
         batch_size=batch_size,
+        options=opts,
         progress=progress,
     )

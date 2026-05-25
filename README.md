@@ -186,6 +186,42 @@ You should see two `audio` streams. If you only see one, OBS isn't routing corre
 
 ---
 
+## Advanced settings & profiles
+
+The upload card has an **Advanced settings** panel (collapsed by default). Every knob has an inline tooltip; here's a deeper guide.
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Beam size** | 5 | Beam-search width. 1 disables beam search (greedy decode, fastest). Higher = slower but more accurate. Diminishing returns past 8. |
+| **Best of** | 5 | Sampling candidates considered when temperature > 0. Used by Whisper's fallback path when a chunk fails the hallucination guards. |
+| **Temperature** | 0.0 | 0 = deterministic. Whisper auto-falls-back to higher temperatures internally if a chunk trips the guards; setting it > 0 just nudges the starting point. |
+| **No-speech threshold** | 0.45 | If the model's no-speech probability exceeds this, the chunk is dropped. Raise toward 0.6 if you're getting hallucinated text in silent stretches; lower if real speech is being skipped. |
+| **Compression ratio cap** | 2.4 | gzip ratio of decoded text. Above this, the chunk is treated as broken. Lower (e.g. 2.0) is stricter — useful if you see the same phrase repeated in a loop. |
+| **Condition on previous text** | off | When on, prior text feeds into the next chunk's context. Off by default — it's the main source of repeat-loop hallucinations on long speech. Turn on only if you see context-loss across boundaries. |
+| **Chunk size (s)** | 30 | Hard cap on chunk length. Whisper's training window is 30s; below that has no upside. Lowering (e.g. 20) can help with very fast speakers. |
+| **VAD onset** | 0.500 | Speech-start detection threshold. Higher = stricter (skips quieter starts). |
+| **VAD offset** | 0.363 | Speech-end detection threshold. Higher = stricter. |
+| **Initial prompt** | empty | Free text prepended to the model's context. **The single highest-leverage knob for domain accuracy.** Drop in speaker names, technical terms, product names — Whisper will bias toward them. |
+| **Hotwords** | empty | Comma- or space-separated bias words. A lighter version of `initial_prompt` for proper-noun nudges. |
+| **Batch size** | 8 | How many chunks faster-whisper processes in parallel. Lower if you hit OOM on a small GPU; raise to 16/32 on big GPUs. |
+
+### Tips for accuracy on tough recordings
+
+- **Domain jargon (legal/medical/technical):** put the most-misheard terms in `Initial prompt`, e.g. *"This interview discusses 21 CFR Part 11, GxP, validation lifecycles, and OQ/PQ documentation."*
+- **Whisper repeating the same phrase in a loop:** lower `Compression ratio cap` to 2.0–2.2 and ensure `Condition on previous text` is OFF.
+- **Whisper fabricating sentences in long silences:** raise `No-speech threshold` to 0.55–0.65.
+- **Ultra-fast speaker getting truncated:** lower `Chunk size` to 20 and beam size 8.
+
+### Profiles
+
+Above the advanced fields is a profile dropdown. Save the current settings as a named profile (stored on disk in `profiles.json` next to the project), then apply it on future recordings — useful for "Customer interview", "Legal deposition", "Internal meeting" presets.
+
+- **Apply** loads the selected profile's settings into the form (and into your browser's persisted state).
+- **Save as profile…** prompts for a name and writes the current form state to disk.
+- **Delete** removes the profile from disk.
+
+The form also remembers your last-used values per browser (localStorage) — profiles are the cross-browser layer on top of that.
+
 ## Editor & playback review
 
 After a transcription finishes, click **Open in editor →** on the result card (or visit `/edit/<job_id>`). The editor lets you review and correct the transcription with the recording in sync:
