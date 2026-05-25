@@ -720,7 +720,7 @@
   <script type="module">
     import {
       fmtBytes, fmtDuration, fmtBitrate, fmtRate, fmtFps, escapeHtml,
-      fmtElapsed, predictFinishTime,
+      fmtElapsed, predictFinishTime, backendStatTile, formatBackendLabel,
     } from "/static/js/helpers.mjs";
     const $ = (id) => document.getElementById(id);
     const drop = $("drop"), fileInput = $("file"), fileInfo = $("fileInfo");
@@ -993,7 +993,7 @@
         hint.style.color = "var(--warn)";
         hint.innerHTML =
           "⚠ Parakeet (NVIDIA NeMo) doesn't run on the active <strong>" +
-          backend.toUpperCase() + "</strong> backend. Pick a Whisper model.";
+          escapeHtml(formatBackendLabel(backend)) + "</strong> backend. Pick a Whisper model.";
       } else if (isParakeet && !parakeet.available && !parakeet.installed) {
         hint.classList.remove("hidden");
         hint.style.color = "var(--warn)";
@@ -1182,15 +1182,11 @@
           sub: [a.codec, fmtRate(a.sample_rate), fmtBitrate(a.bit_rate)].filter(s => s && s !== "—").join(" · "),
         });
       }
-      // Backend tile — shows whether transcription will run on cuda/rocm/mps/cpu.
-      if (_caps && _caps.gpu) {
-        const g = _caps.gpu;
-        stats.push({
-          label: "Backend",
-          value: (g.backend || "cpu").toUpperCase(),
-          sub: [g.device_name, g.vram_gb ? `${g.vram_gb} GB VRAM` : null].filter(Boolean).join(" · "),
-        });
-      }
+      // Backend tile — shows whether transcription will run on
+      // CUDA / ROCm / MPS / CPU. Helper lives in helpers.mjs so it
+      // can be unit-tested (G1.4).
+      const backendTile = backendStatTile(_caps && _caps.gpu);
+      if (backendTile) stats.push(backendTile);
       stats.forEach(s => {
         const el = document.createElement("div");
         el.className = "stat";

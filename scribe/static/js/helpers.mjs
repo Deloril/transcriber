@@ -55,6 +55,72 @@ export function escapeHtml(s) {
   }[c]));
 }
 
+// ---------- Active GPU backend label (G1.4) ----------
+//
+// The upload page shows a "Backend" tile on the Recording details card so
+// users can see at a glance whether the next transcription will run on
+// CUDA / ROCm / MPS / CPU. The data comes from ``GET /api/capabilities``
+// (server side: ``scribe.engine.gpu_backend()``); the helpers below turn
+// the raw payload into the tile shape the renderer consumes.
+//
+// Two-step: ``formatBackendLabel`` is the pure naming policy (so the
+// editor can reuse it later if we surface the backend there too), and
+// ``backendStatTile`` builds the full tile dict.
+
+const _BACKEND_DISPLAY = {
+  cuda: "CUDA",
+  rocm: "ROCm",
+  mps: "MPS",
+  cpu: "CPU",
+};
+
+/**
+ * Pretty-cased label for a 4-state backend identifier. Unknown or
+ * empty inputs fall back to ``"CPU"`` — the safe default that matches
+ * what the engine does when no GPU is detected.
+ *
+ * @param {string|null|undefined} backend — one of ``cuda``, ``rocm``,
+ *   ``mps``, ``cpu`` (case-insensitive).
+ * @returns {string}
+ */
+export function formatBackendLabel(backend) {
+  const key = String(backend ?? "").trim().toLowerCase();
+  return _BACKEND_DISPLAY[key] || "CPU";
+}
+
+/**
+ * Build the {label, value, sub} stat-tile dict for the active GPU
+ * backend. ``gpu`` is the ``capabilities.gpu`` object returned by the
+ * server: ``{ backend, device_name, vram_gb }``. Returns ``null`` when
+ * ``gpu`` is missing — the renderer should then skip the tile entirely
+ * rather than show a placeholder.
+ *
+ * Sub-line composition:
+ *   - device name (when present)
+ *   - VRAM in GB (when reported; only CUDA / ROCm carry this)
+ *
+ * The sub line collapses to ``null`` when both components are missing
+ * (e.g. CPU backend on a machine with no discrete GPU), so the
+ * renderer doesn't print an empty " · ".
+ *
+ * @param {object|null|undefined} gpu
+ * @returns {{label: string, value: string, sub: string|null}|null}
+ */
+export function backendStatTile(gpu) {
+  if (!gpu || typeof gpu !== "object") return null;
+  const value = formatBackendLabel(gpu.backend);
+  const parts = [];
+  if (gpu.device_name) parts.push(String(gpu.device_name));
+  if (typeof gpu.vram_gb === "number" && isFinite(gpu.vram_gb) && gpu.vram_gb > 0) {
+    parts.push(`${gpu.vram_gb} GB VRAM`);
+  }
+  return {
+    label: "Backend",
+    value,
+    sub: parts.length ? parts.join(" · ") : null,
+  };
+}
+
 // ---------- Library view (F10.1) ----------
 
 /**

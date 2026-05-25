@@ -285,6 +285,56 @@ class TestCapabilities:
         assert body["parakeet"]["available"] is False
         assert body["parakeet"]["blocked_by_backend"] is True
 
+    def test_capabilities_reports_rocm_gpu_fields(
+        self, server_env, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """G1.4: the Recording details card depends on gpu.backend +
+        gpu.device_name + gpu.vram_gb being populated for ROCm exactly
+        the same way they are for CUDA, so the UI tile shows ROCm
+        cards honestly."""
+        from scribe import engine
+        srv, client, _ = server_env
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_gpu_device_name", lambda: "AMD Radeon RX 7900 XTX")
+        monkeypatch.setattr(engine, "_cuda_vram_gb", lambda: 24.0)
+        body = client.get("/api/capabilities").json()
+        assert body["gpu"]["backend"] == "rocm"
+        assert body["gpu"]["device_name"] == "AMD Radeon RX 7900 XTX"
+        assert body["gpu"]["vram_gb"] == 24.0
+
+    def test_capabilities_omits_vram_on_mps(
+        self, server_env, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """G1.4: Apple Silicon doesn't expose a discrete VRAM number;
+        the gpu.vram_gb field is None so the UI tile drops the VRAM
+        sub-line cleanly."""
+        from scribe import engine
+        srv, client, _ = server_env
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "mps")
+        monkeypatch.setattr(engine, "_gpu_device_name", lambda: "Apple M2 Max")
+        monkeypatch.setattr(engine, "_cuda_vram_gb", lambda: 0.0)
+        body = client.get("/api/capabilities").json()
+        assert body["gpu"]["backend"] == "mps"
+        assert body["gpu"]["device_name"] == "Apple M2 Max"
+        assert body["gpu"]["vram_gb"] is None
+
+    def test_capabilities_cpu_fallback(
+        self, server_env, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """G1.4: CPU-only machines still report a backend tile — the
+        UI shouldn't disappear just because there's no GPU."""
+        from scribe import engine
+        srv, client, _ = server_env
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
+        monkeypatch.setattr(engine, "_gpu_device_name", lambda: "")
+        monkeypatch.setattr(engine, "_cuda_vram_gb", lambda: 0.0)
+        body = client.get("/api/capabilities").json()
+        assert body["gpu"]["backend"] == "cpu"
+        # device_name normalises empty string → None so the UI doesn't
+        # render a stray " · ".
+        assert body["gpu"]["device_name"] is None
+        assert body["gpu"]["vram_gb"] is None
+
 
 # --------------------------------------------------------------------------- #
 # Profiles CRUD
