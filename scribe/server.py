@@ -60,6 +60,11 @@ class Job:
     input_filename: str = ""
     options: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 8
+    # Wall-clock timestamps used for the UI's elapsed/ETA counters.
+    # Stored as epoch seconds so the client can compute differences without
+    # parsing ISO strings.
+    started_at: float | None = None
+    finished_at: float | None = None
 
     def to_state(self) -> dict[str, Any]:
         d = asdict(self)
@@ -89,6 +94,8 @@ class Job:
             input_filename=d.get("input_filename", ""),
             options=d.get("options", {}) or {},
             batch_size=int(d.get("batch_size", 8) or 8),
+            started_at=d.get("started_at"),
+            finished_at=d.get("finished_at"),
         )
 
 
@@ -437,6 +444,7 @@ async def upload(
 
 
 def _set_progress(job_id: str, msg: str, frac: float) -> None:
+    import time as _time
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if not job:
@@ -445,11 +453,16 @@ def _set_progress(job_id: str, msg: str, frac: float) -> None:
         job.progress = max(0.0, min(1.0, frac))
         if job.status == "queued":
             job.status = "running"
+        if job.started_at is None:
+            job.started_at = _time.time()
 
 
 def _run_job(job_id: str) -> None:
+    import time as _time
     with JOBS_LOCK:
         job = JOBS[job_id]
+        if job.started_at is None:
+            job.started_at = _time.time()
     try:
         result = transcribe(
             job.input_path,
@@ -474,12 +487,14 @@ def _run_job(job_id: str) -> None:
             job.message = "Done"
             job.result = result.to_dict()
             job.output_paths = {k: str(v.relative_to(ROOT)) for k, v in paths.items()}
+            job.finished_at = _time.time()
         _persist_job(job)
     except Exception as e:  # noqa: BLE001
         with JOBS_LOCK:
             job.status = "error"
             job.error = f"{type(e).__name__}: {e}"
             job.message = "Error"
+            job.finished_at = _time.time()
         _persist_job(job)
 
 
@@ -502,6 +517,8 @@ def _job_dict(job: Job) -> dict[str, Any]:
         "mode": job.mode,
         "audio_streams": job.audio_streams,
         "created_at": job.created_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
         "error": job.error,
         "output_paths": job.output_paths,
         "result": job.result,
@@ -525,6 +542,8 @@ async def job_events(job_id: str) -> StreamingResponse:
                     "progress": job.progress,
                     "message": job.message,
                     "error": job.error,
+                    "started_at": job.started_at,
+                    "finished_at": job.finished_at,
                 }
             if payload != last:
                 yield f"data: {json.dumps(payload)}\n\n"

@@ -620,6 +620,10 @@
       <div id="progressWrap" class="progress-wrap hidden">
         <div class="progress"><div id="bar"></div></div>
         <div id="progressMsg" class="progress-msg">Starting…</div>
+        <div id="progressTimes" class="progress-msg" style="display:flex;gap:14px;font-variant-numeric:tabular-nums;">
+          <span><span class="hint" style="margin:0;">Elapsed</span> <span id="elapsedTime">0s</span></span>
+          <span><span class="hint" style="margin:0;">ETA</span> <span id="etaTime">—</span></span>
+        </div>
       </div>
       <div id="errBox" class="err hidden"></div>
     </div>
@@ -1124,23 +1128,99 @@
       host.appendChild(svg);
     }
 
+    function fmtElapsed(seconds) {
+      seconds = Math.max(0, Math.round(seconds));
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = seconds % 60;
+      if (h) return `${h}h ${String(m).padStart(2,"0")}m ${String(s).padStart(2,"0")}s`;
+      if (m) return `${m}m ${String(s).padStart(2,"0")}s`;
+      return `${s}s`;
+    }
+
+    // Job-time tracking. SSE delivers started_at/finished_at; we tick locally
+    // every 250 ms so the counter stays smooth between server updates.
+    let _jobStartedAt = null;          // epoch seconds
+    let _jobFinishedAt = null;
+    let _jobLastProgress = 0;
+    let _jobLastProgressTime = null;
+    let _jobTickHandle = null;
+
+    function startJobTicker() {
+      stopJobTicker();
+      _jobTickHandle = setInterval(updateTimers, 250);
+      updateTimers();
+    }
+    function stopJobTicker() {
+      if (_jobTickHandle) { clearInterval(_jobTickHandle); _jobTickHandle = null; }
+    }
+    function resetJobTimers() {
+      _jobStartedAt = null;
+      _jobFinishedAt = null;
+      _jobLastProgress = 0;
+      _jobLastProgressTime = null;
+      $("elapsedTime").textContent = "0s";
+      $("etaTime").textContent = "—";
+    }
+
+    function updateTimers() {
+      if (_jobStartedAt == null) {
+        $("elapsedTime").textContent = "0s";
+        $("etaTime").textContent = "starting…";
+        return;
+      }
+      const now = Date.now() / 1000;
+      const finishOrNow = _jobFinishedAt != null ? _jobFinishedAt : now;
+      const elapsed = Math.max(0, finishOrNow - _jobStartedAt);
+      $("elapsedTime").textContent = fmtElapsed(elapsed);
+
+      if (_jobFinishedAt != null) {
+        $("etaTime").textContent = "done";
+        return;
+      }
+
+      // ETA: linear projection from progress over time. Refuse to estimate
+      // until we have at least 8s of runtime AND progress > 5% — too early
+      // and the answer is meaningless.
+      if (_jobLastProgress > 0.05 && elapsed > 8) {
+        const total = elapsed / _jobLastProgress;
+        const remaining = Math.max(0, total - elapsed);
+        $("etaTime").textContent = fmtElapsed(remaining) + " left";
+      } else {
+        $("etaTime").textContent = "calculating…";
+      }
+    }
+
     function streamProgress(jobId) {
+      resetJobTimers();
+      startJobTicker();
       const es = new EventSource(`/api/job/${jobId}/events`);
       es.onmessage = (ev) => {
         const d = JSON.parse(ev.data);
         bar.style.width = `${Math.max(1, d.progress*100).toFixed(1)}%`;
         progressMsg.textContent = d.message + (d.progress >= 1 ? "" : ` — ${(d.progress*100).toFixed(1)}%`);
+        if (typeof d.started_at === "number") _jobStartedAt = d.started_at;
+        if (typeof d.finished_at === "number") _jobFinishedAt = d.finished_at;
+        if (typeof d.progress === "number" && d.progress > _jobLastProgress) {
+          _jobLastProgress = d.progress;
+          _jobLastProgressTime = Date.now() / 1000;
+        }
+        updateTimers();
         if (d.status === "done") {
           es.close();
+          stopJobTicker();
+          updateTimers();
           loadResult(jobId);
         } else if (d.status === "error") {
           es.close();
+          stopJobTicker();
           showError(d.error || "Unknown error");
           goBtn.disabled = false;
         }
       };
       es.onerror = () => {
         es.close();
+        stopJobTicker();
         showError("Lost connection to server.");
         goBtn.disabled = false;
       };
