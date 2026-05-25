@@ -58,6 +58,29 @@ MAX_SENSITISING_CONCEPT_LEN = 200
 MAX_SENSITISING_CONCEPTS = 64
 MAX_DESCRIPTION_LEN = 4000
 
+# Project-level settings (F3.1) — a small free-form key/value store
+# for project preferences (default coder name, AI on/off, default
+# code colour, UI display prefs, etc.). Bounded so the file stays
+# small and so a stray UI bug can't write megabytes of state.
+#
+# The shape: ``dict[str, scalar | list[scalar] | dict[str, scalar]]``.
+# Scalars are str, int, float, bool, None. One level of nesting is
+# allowed (so e.g. ``ai: {model: "...", enabled: false}`` works) —
+# beyond that, define a real first-class field instead.
+MAX_SETTINGS_KEYS = 64
+MAX_SETTINGS_KEY_LEN = 64
+MAX_SETTINGS_STRING_LEN = 4000
+MAX_SETTINGS_LIST_LEN = 64
+MAX_SETTINGS_BYTES = 16 * 1024  # 16 KiB serialised
+
+# Recognised settings keys. We don't restrict keys to this set
+# (forward compat — F8.x will add AI keys we haven't named yet),
+# but the constants are exported so other modules don't typo.
+SETTING_DEFAULT_CODER = "default_coder"
+SETTING_DEFAULT_CODE_COLOUR = "default_code_colour"
+SETTING_AI_ENABLED = "ai_enabled"
+SETTING_UI_PREFS = "ui_prefs"
+
 # Project IDs follow the same shape as job IDs: 12-char lowercase hex.
 # Keeps URL routing rules consistent across the app.
 PROJECT_ID_RE = re.compile(r"^[a-f0-9]{12}$")
@@ -111,6 +134,10 @@ class Project:
     sensitising_concepts: list[str] = field(default_factory=list)
     codebook_stage: str = "initial"
     description: str = ""
+    # F3.1: free-form project settings (default coder, AI prefs, UI prefs).
+    # Bounded; see MAX_SETTINGS_* above. Keys/values are deeply validated
+    # by ``_validate_settings_dict``.
+    settings: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
     modified_at: str = ""
 
@@ -128,6 +155,7 @@ class Project:
         sensitising_concepts: Iterable[str] | None = None,
         description: str = "",
         codebook_stage: str = "initial",
+        settings: dict[str, Any] | None = None,
         project_id: str | None = None,
         now: str | None = None,
     ) -> "Project":
@@ -141,6 +169,7 @@ class Project:
             sensitising_concepts=list(sensitising_concepts or []),
             codebook_stage=codebook_stage,
             description=description,
+            settings=dict(settings or {}),
             created_at=ts,
             modified_at=ts,
         )
@@ -160,6 +189,15 @@ class Project:
             raise ProjectValidationError("Project payload must be an object")
         if "id" not in d or "name" not in d:
             raise ProjectValidationError("Project payload missing required keys")
+        # ``settings`` defaults to {} on disks written before F3.1 added
+        # the field — old projects parse cleanly without migration.
+        raw_settings = d.get("settings")
+        if raw_settings is None:
+            settings: dict[str, Any] = {}
+        elif isinstance(raw_settings, dict):
+            settings = dict(raw_settings)
+        else:
+            raise ProjectValidationError("settings must be an object")
         p = cls(
             id=str(d["id"]),
             name=str(d.get("name", "")),
@@ -168,6 +206,7 @@ class Project:
             sensitising_concepts=[str(s) for s in (d.get("sensitising_concepts") or [])],
             codebook_stage=str(d.get("codebook_stage", "initial") or "initial"),
             description=str(d.get("description", "") or ""),
+            settings=settings,
             created_at=str(d.get("created_at", "") or ""),
             modified_at=str(d.get("modified_at", "") or ""),
         )
@@ -210,6 +249,14 @@ class Project:
             self.codebook_stage = str(patch["codebook_stage"] or "")
         if "description" in patch:
             self.description = str(patch["description"] or "")
+        if "settings" in patch:
+            settings = patch["settings"]
+            if settings is None:
+                self.settings = {}
+            elif isinstance(settings, dict):
+                self.settings = dict(settings)
+            else:
+                raise ProjectValidationError("settings must be an object")
 
         self.validate()
         # Only stamp modified_at after validation succeeds — a failed
@@ -272,6 +319,122 @@ class Project:
             cleaned.append(s)
         self.sensitising_concepts = cleaned
 
+        # Settings (F3.1). Validated deeply: bounded keys/values, no
+        # surprise types, and a hard ceiling on serialised size.
+        self.settings = _validate_settings_dict(self.settings)
+
+
+def _validate_settings_dict(raw: Any) -> dict[str, Any]:
+    """Validate a project ``settings`` payload and return a normalised copy.
+
+    Rules (F3.1):
+      * Top-level must be a ``dict[str, ...]``.
+      * Keys: non-empty strings, ≤ ``MAX_SETTINGS_KEY_LEN`` chars.
+      * Values may be: str, int, float, bool, None,
+        ``list`` of those scalars, or one level of nested
+        ``dict[str, scalar]``.
+      * Strings ≤ ``MAX_SETTINGS_STRING_LEN`` chars; lists ≤
+        ``MAX_SETTINGS_LIST_LEN`` items; ≤ ``MAX_SETTINGS_KEYS`` keys
+        per dict; total JSON size ≤ ``MAX_SETTINGS_BYTES``.
+
+    Anything richer (nested lists of dicts, custom objects) is rejected
+    on the spot — callers should promote it to a real first-class
+    field rather than smuggle it through ``settings``.
+    """
+    if not isinstance(raw, dict):
+        raise ProjectValidationError("settings must be an object")
+    if len(raw) > MAX_SETTINGS_KEYS:
+        raise ProjectValidationError(
+            f"settings has too many keys (>{MAX_SETTINGS_KEYS})"
+        )
+    out: dict[str, Any] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not k.strip():
+            raise ProjectValidationError(
+                "settings keys must be non-empty strings"
+            )
+        key = k.strip()
+        if len(key) > MAX_SETTINGS_KEY_LEN:
+            raise ProjectValidationError(
+                f"settings key {key[:40]!r}… exceeds "
+                f"{MAX_SETTINGS_KEY_LEN} chars"
+            )
+        out[key] = _validate_settings_value(v, depth=0, path=key)
+    # Hard size ceiling on the serialised form so a runaway loop in
+    # the UI can't grow the file unboundedly.
+    blob = json.dumps(out, ensure_ascii=False)
+    if len(blob.encode("utf-8")) > MAX_SETTINGS_BYTES:
+        raise ProjectValidationError(
+            f"settings exceed {MAX_SETTINGS_BYTES} bytes serialised"
+        )
+    return out
+
+
+_SETTINGS_SCALAR_TYPES: tuple[type, ...] = (str, int, float, bool, type(None))
+
+
+def _validate_settings_value(v: Any, *, depth: int, path: str) -> Any:
+    """Recursive helper: validate one value in a settings tree."""
+    # bool is a subclass of int — that's fine, both are scalar.
+    if isinstance(v, _SETTINGS_SCALAR_TYPES):
+        if isinstance(v, str) and len(v) > MAX_SETTINGS_STRING_LEN:
+            raise ProjectValidationError(
+                f"settings value at {path!r} exceeds "
+                f"{MAX_SETTINGS_STRING_LEN} chars"
+            )
+        # Reject NaN / Infinity — they round-trip badly through JSON
+        # and almost certainly indicate a UI bug.
+        if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+            raise ProjectValidationError(
+                f"settings value at {path!r} must be finite"
+            )
+        return v
+    if isinstance(v, list):
+        if len(v) > MAX_SETTINGS_LIST_LEN:
+            raise ProjectValidationError(
+                f"settings list at {path!r} exceeds "
+                f"{MAX_SETTINGS_LIST_LEN} items"
+            )
+        if depth >= 1:
+            raise ProjectValidationError(
+                f"settings nesting at {path!r} too deep "
+                "(lists may only hold scalars)"
+            )
+        return [
+            _validate_settings_value(x, depth=depth + 1, path=f"{path}[{i}]")
+            for i, x in enumerate(v)
+        ]
+    if isinstance(v, dict):
+        if depth >= 1:
+            raise ProjectValidationError(
+                f"settings nesting at {path!r} too deep "
+                "(only one level of nested dicts allowed)"
+            )
+        if len(v) > MAX_SETTINGS_KEYS:
+            raise ProjectValidationError(
+                f"settings dict at {path!r} has too many keys "
+                f"(>{MAX_SETTINGS_KEYS})"
+            )
+        nested: dict[str, Any] = {}
+        for k, vv in v.items():
+            if not isinstance(k, str) or not k.strip():
+                raise ProjectValidationError(
+                    f"settings dict at {path!r} has a non-string key"
+                )
+            key = k.strip()
+            if len(key) > MAX_SETTINGS_KEY_LEN:
+                raise ProjectValidationError(
+                    f"settings key at {path!r}.{key[:40]!r}… exceeds "
+                    f"{MAX_SETTINGS_KEY_LEN} chars"
+                )
+            nested[key] = _validate_settings_value(
+                vv, depth=depth + 1, path=f"{path}.{key}"
+            )
+        return nested
+    raise ProjectValidationError(
+        f"settings value at {path!r} has unsupported type {type(v).__name__}"
+    )
+
 
 # Fields a PATCH may set. id/created_at/modified_at are managed by the
 # entity itself; passing them is allowed (and ignored) so a client can
@@ -283,6 +446,7 @@ _ALLOWED_PATCH_KEYS = {
     "sensitising_concepts",
     "codebook_stage",
     "description",
+    "settings",
 }
 _IGNORED_PATCH_KEYS = {"id", "created_at", "modified_at"}
 

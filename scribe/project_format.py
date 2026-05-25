@@ -87,6 +87,13 @@ from .sampling_log import (
     read_sampling_log,
     sampling_log_path,
 )
+from .codes import (
+    CODE_ID_RE,
+    Code,
+    codes_dir,
+    list_codes,
+    save_code,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -115,6 +122,9 @@ COMPONENT_PROJECT = "project"
 COMPONENT_SOURCES_DIR = "sources_dir"
 COMPONENT_PARTICIPANTS_DIR = "participants_dir"
 COMPONENT_SAMPLING_LOG = "sampling_log"
+# F3.1: codebook directory ships under the project root alongside
+# sources/ and participants/. Each code is one JSON file (see F2.1).
+COMPONENT_CODES_DIR = "codes_dir"
 
 # Default values for the "components" dict in the manifest. These are
 # relative paths inside the project directory.
@@ -123,6 +133,7 @@ DEFAULT_COMPONENT_PATHS: dict[str, str] = {
     COMPONENT_SOURCES_DIR: "sources",
     COMPONENT_PARTICIPANTS_DIR: "participants",
     COMPONENT_SAMPLING_LOG: "sampling_log.jsonl",
+    COMPONENT_CODES_DIR: "codes",
 }
 
 
@@ -439,14 +450,21 @@ class ProjectBundle:
 
     Use this for whole-project operations (export, import, clone,
     snapshot). For incremental edits (saving one source, appending
-    one sampling-log entry) keep using the F1.1–F1.4 helpers
-    directly.
+    one sampling-log entry, persisting a code) keep using the
+    F1.1–F1.4 / F2.x helpers directly.
+
+    F3.1: the bundle is the integration point for the project shell
+    — sources, participants, sampling log, *codebook* (the F2.x
+    codes), and (in the future) memos. Project-level settings live on
+    ``project.settings`` rather than as a separate file because they
+    semantically belong to the project entity.
     """
 
     project: Project
     sources: list[Source] = field(default_factory=list)
     participants: list[Participant] = field(default_factory=list)
     sampling_log: list[SamplingEntry] = field(default_factory=list)
+    codes: list[Code] = field(default_factory=list)
     manifest: ProjectManifest | None = None
 
     # ------------------------------------------------------------------ #
@@ -497,6 +515,18 @@ class ProjectBundle:
         if len(set(eids)) != len(eids):
             raise ProjectFormatError("Bundle has duplicate sampling-log entry ids")
 
+        # F3.1: codebook (F2.1 codes) ride along inside the bundle.
+        for c in self.codes:
+            c.validate()
+            if c.project_id != pid:
+                raise ProjectFormatError(
+                    f"Code {c.id} project_id {c.project_id!r} "
+                    f"does not match bundle project {pid!r}"
+                )
+        cids = [c.id for c in self.codes]
+        if len(set(cids)) != len(cids):
+            raise ProjectFormatError("Bundle has duplicate code ids")
+
         if self.manifest is not None:
             self.manifest.validate()
             if self.manifest.project_id != pid:
@@ -528,6 +558,7 @@ def load_project_bundle(
     sources = list_sources(projects_root, project_id)
     participants = list_participants(projects_root, project_id)
     log = read_sampling_log(projects_root, project_id)
+    codes = list_codes(projects_root, project_id)
     try:
         manifest = read_or_build_manifest(projects_root, project_id)
     except FileNotFoundError:
@@ -537,6 +568,7 @@ def load_project_bundle(
         sources=sources,
         participants=participants,
         sampling_log=log,
+        codes=codes,
         manifest=manifest,
     )
     bundle.validate()
@@ -576,6 +608,13 @@ def save_project_bundle(
     # 3. Participants.
     for p in bundle.participants:
         save_participant(projects_root, p)
+
+    # 3b. Codebook (F3.1). Persist every code in the bundle. Existing
+    # codes on disk that aren't in the bundle are *not* deleted —
+    # mirrors the sampling-log "append-only by default" stance, so an
+    # incomplete bundle can't accidentally erase the codebook.
+    for c in bundle.codes:
+        save_code(projects_root, c)
 
     # 4. Sampling log.
     if replace_sampling_log:

@@ -30,9 +30,15 @@ from scribe.sampling_log import (
     SamplingEntry,
     append_sampling_entry,
 )
+from scribe.codes import (
+    Code,
+    save_code,
+    list_codes,
+)
 from scribe.project_format import (
     ARCHIVE_SUFFIX,
     ASSET_KIND_TRANSCRIPT,
+    COMPONENT_CODES_DIR,
     DEFAULT_COMPONENT_PATHS,
     FORMAT_NAME,
     FORMAT_VERSION,
@@ -129,8 +135,20 @@ class TestFormatConstants:
         assert FORMAT_VERSION >= 1
 
     def test_default_component_paths_have_expected_keys(self) -> None:
-        for k in ("project", "sources_dir", "participants_dir", "sampling_log"):
+        for k in (
+            "project",
+            "sources_dir",
+            "participants_dir",
+            "sampling_log",
+            "codes_dir",  # F3.1
+        ):
             assert k in DEFAULT_COMPONENT_PATHS
+
+    def test_default_component_paths_includes_codes_dir(self) -> None:
+        # F3.1: the codebook directory rides in the manifest's
+        # components dict so external readers know where to look.
+        assert COMPONENT_CODES_DIR == "codes_dir"
+        assert DEFAULT_COMPONENT_PATHS[COMPONENT_CODES_DIR] == "codes"
 
     def test_archive_suffix_ends_zip(self) -> None:
         assert ARCHIVE_SUFFIX.endswith(".zip")
@@ -880,3 +898,157 @@ class TestManifestDeterminism:
         write_manifest(tmp_path, project.id)
         bytes2 = manifest_path(tmp_path, project.id).read_bytes()
         assert bytes1 == bytes2
+
+
+# --------------------------------------------------------------------------- #
+# F3.1: codebook (F2.1 codes) rides inside the project shell.
+# --------------------------------------------------------------------------- #
+
+
+def _new_code(project: Project, *, name: str = "Initial code") -> Code:
+    """Build a fresh F2.1 Code attached to the given project."""
+    return Code.new(project_id=project.id, name=name)
+
+
+class TestProjectBundleCodes:
+    def test_validate_accepts_codes(self) -> None:
+        project = Project.new(name="X")
+        c = _new_code(project, name="Drifting")
+        b = ProjectBundle(project=project, codes=[c])
+        b.validate()  # no raise
+
+    def test_validate_rejects_code_with_wrong_project_id(self) -> None:
+        project = Project.new(name="X", project_id="aaaaaaaaaaaa")
+        rogue = Code.new(project_id="bbbbbbbbbbbb", name="Rogue")
+        b = ProjectBundle(project=project, codes=[rogue])
+        with pytest.raises(ProjectFormatError):
+            b.validate()
+
+    def test_validate_rejects_duplicate_code_ids(self) -> None:
+        project = Project.new(name="X")
+        c1 = Code.new(
+            project_id=project.id, name="A", code_id="abcdef012345"
+        )
+        c2 = Code.new(
+            project_id=project.id, name="B", code_id="abcdef012345"
+        )
+        b = ProjectBundle(project=project, codes=[c1, c2])
+        with pytest.raises(ProjectFormatError):
+            b.validate()
+
+
+class TestLoadBundleWithCodes:
+    def test_loads_persisted_codes(self, tmp_path: Path) -> None:
+        project = _saved_project(tmp_path)
+        c1 = _new_code(project, name="Trying to fit in")
+        c2 = _new_code(project, name="Coping silently")
+        save_code(tmp_path, c1)
+        save_code(tmp_path, c2)
+        bundle = load_project_bundle(tmp_path, project.id)
+        loaded_ids = {c.id for c in bundle.codes}
+        assert loaded_ids == {c1.id, c2.id}
+
+    def test_empty_codes_when_none_on_disk(self, tmp_path: Path) -> None:
+        project = _saved_project(tmp_path)
+        bundle = load_project_bundle(tmp_path, project.id)
+        assert bundle.codes == []
+
+
+class TestSaveBundleWithCodes:
+    def test_persists_codes(self, tmp_path: Path) -> None:
+        project = Project.new(name="X")
+        c1 = _new_code(project, name="One")
+        c2 = _new_code(project, name="Two")
+        bundle = ProjectBundle(project=project, codes=[c1, c2])
+        save_project_bundle(tmp_path, bundle)
+        on_disk = list_codes(tmp_path, project.id)
+        assert {c.id for c in on_disk} == {c1.id, c2.id}
+
+    def test_save_does_not_clobber_codes_not_in_bundle(
+        self, tmp_path: Path
+    ) -> None:
+        # Mirrors the sampling-log "append-only" stance: an empty
+        # bundle.codes must not erase pre-existing codes on disk.
+        project = _saved_project(tmp_path)
+        existing = _new_code(project, name="Existing")
+        save_code(tmp_path, existing)
+        bundle = ProjectBundle(project=project, codes=[])
+        save_project_bundle(tmp_path, bundle)
+        on_disk = list_codes(tmp_path, project.id)
+        assert [c.id for c in on_disk] == [existing.id]
+
+    def test_round_trip_through_load_then_save(self, tmp_path: Path) -> None:
+        project = _saved_project(tmp_path)
+        original = _new_code(project, name="Roundtrip")
+        save_code(tmp_path, original)
+        bundle = load_project_bundle(tmp_path, project.id)
+        assert [c.id for c in bundle.codes] == [original.id]
+        # Re-save via bundle path; codes must still load.
+        save_project_bundle(tmp_path, bundle)
+        again = load_project_bundle(tmp_path, project.id)
+        assert [c.id for c in again.codes] == [original.id]
+
+
+class TestArchiveIncludesCodes:
+    def test_export_archive_includes_codes_directory(
+        self, tmp_path: Path
+    ) -> None:
+        # F3.1: codes/<id>.json should ride inside the project
+        # archive automatically (it lives under the project root,
+        # which the archive walks recursively).
+        projects_root, project = _build_demo_project_on_disk(tmp_path)
+        c = _new_code(project, name="Archived code")
+        save_code(projects_root, c)
+
+        out = tmp_path / f"{project.id}{ARCHIVE_SUFFIX}"
+        export_project_archive(projects_root, project.id, out)
+
+        with zipfile.ZipFile(out, "r") as zf:
+            names = zf.namelist()
+        assert f"{project.id}/codes/{c.id}.json" in names
+
+    def test_import_archive_restores_codes(self, tmp_path: Path) -> None:
+        projects_root, project = _build_demo_project_on_disk(tmp_path)
+        c = _new_code(project, name="To be restored")
+        save_code(projects_root, c)
+        archive = tmp_path / f"{project.id}{ARCHIVE_SUFFIX}"
+        export_project_archive(projects_root, project.id, archive)
+
+        # Fresh root.
+        target_root = tmp_path / "restored"
+        target_root.mkdir()
+        bundle = import_project_archive(target_root, archive)
+        assert [code.id for code in bundle.codes] == [c.id]
+        assert [code.name for code in bundle.codes] == ["To be restored"]
+
+
+class TestProjectSettingsRoundTripThroughBundle:
+    def test_save_load_preserves_settings(self, tmp_path: Path) -> None:
+        # F3.1: project-level settings travel with the project
+        # through the bundle save/load round trip.
+        project = Project.new(
+            name="Settings Project",
+            settings={
+                "default_coder": "Luke",
+                "ai": {"enabled": False, "model": "phi-4"},
+            },
+        )
+        bundle = ProjectBundle(project=project)
+        save_project_bundle(tmp_path, bundle)
+        loaded = load_project_bundle(tmp_path, project.id)
+        assert loaded.project.settings == project.settings
+
+    def test_archive_round_trip_preserves_settings(
+        self, tmp_path: Path
+    ) -> None:
+        projects_root, project = _build_demo_project_on_disk(tmp_path)
+        # Mutate settings and save the project.json again.
+        project.apply_update({"settings": {"default_coder": "Sam"}})
+        from scribe.projects import save_project as _save
+        _save(projects_root, project)
+        archive = tmp_path / f"{project.id}{ARCHIVE_SUFFIX}"
+        export_project_archive(projects_root, project.id, archive)
+        target = tmp_path / "restored"
+        target.mkdir()
+        bundle = import_project_archive(target, archive)
+        assert bundle.project.settings == {"default_coder": "Sam"}

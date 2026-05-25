@@ -18,9 +18,16 @@ from scribe.projects import (
     MAX_RESEARCH_QUESTION_LEN,
     MAX_SENSITISING_CONCEPT_LEN,
     MAX_SENSITISING_CONCEPTS,
+    MAX_SETTINGS_BYTES,
+    MAX_SETTINGS_KEYS,
+    MAX_SETTINGS_KEY_LEN,
+    MAX_SETTINGS_LIST_LEN,
+    MAX_SETTINGS_STRING_LEN,
     PROJECT_ID_RE,
     Project,
     ProjectValidationError,
+    SETTING_AI_ENABLED,
+    SETTING_DEFAULT_CODER,
     delete_project,
     list_projects,
     load_project,
@@ -322,3 +329,187 @@ class TestPersistence:
         save_project(tmp_path, p)
         on_disk = json.loads(project_state_path(tmp_path, p.id).read_text())
         assert on_disk["name"] == "trim me"
+
+
+# --------------------------------------------------------------------------- #
+# F3.1: project-level settings — bounded free-form key/value store.
+# --------------------------------------------------------------------------- #
+
+
+class TestSettings:
+    def test_default_is_empty_dict(self) -> None:
+        p = Project.new(name="x")
+        assert p.settings == {}
+
+    def test_accepts_scalar_values(self) -> None:
+        p = Project.new(
+            name="x",
+            settings={
+                SETTING_DEFAULT_CODER: "Luke",
+                SETTING_AI_ENABLED: False,
+                "max_codes_warning": 200,
+                "score_threshold": 0.75,
+                "last_seen_at": None,
+            },
+        )
+        assert p.settings[SETTING_DEFAULT_CODER] == "Luke"
+        assert p.settings[SETTING_AI_ENABLED] is False
+        assert p.settings["max_codes_warning"] == 200
+        assert p.settings["score_threshold"] == 0.75
+        assert p.settings["last_seen_at"] is None
+
+    def test_accepts_list_of_scalars(self) -> None:
+        p = Project.new(name="x", settings={"recent_coders": ["Luke", "Sam"]})
+        assert p.settings["recent_coders"] == ["Luke", "Sam"]
+
+    def test_accepts_one_level_nested_dict(self) -> None:
+        p = Project.new(
+            name="x",
+            settings={"ai": {"enabled": True, "model": "phi-4"}},
+        )
+        assert p.settings["ai"]["model"] == "phi-4"
+
+    def test_strips_whitespace_in_keys(self) -> None:
+        p = Project.new(name="x", settings={"  spacey  ": 1})
+        assert "spacey" in p.settings
+
+    def test_round_trips_through_dict(self) -> None:
+        p = Project.new(
+            name="x",
+            settings={"a": 1, "nested": {"b": "y"}, "items": [1, 2, 3]},
+        )
+        d = p.to_dict()
+        restored = Project.from_dict(d)
+        assert restored.settings == p.settings
+
+    def test_missing_settings_in_dict_defaults_to_empty(self) -> None:
+        p = Project.new(name="x")
+        d = p.to_dict()
+        d.pop("settings", None)
+        restored = Project.from_dict(d)
+        assert restored.settings == {}
+
+    def test_non_dict_settings_in_dict_rejected(self) -> None:
+        p = Project.new(name="x")
+        d = p.to_dict()
+        d["settings"] = ["not", "a", "dict"]
+        with pytest.raises(ProjectValidationError):
+            Project.from_dict(d)
+
+    def test_non_string_key_rejected(self) -> None:
+        with pytest.raises(ProjectValidationError):
+            Project.new(name="x", settings={1: "value"})  # type: ignore[dict-item]
+
+    def test_empty_string_key_rejected(self) -> None:
+        with pytest.raises(ProjectValidationError):
+            Project.new(name="x", settings={"   ": 1})
+
+    def test_long_key_rejected(self) -> None:
+        with pytest.raises(ProjectValidationError):
+            Project.new(name="x", settings={"a" * (MAX_SETTINGS_KEY_LEN + 1): 1})
+
+    def test_long_string_rejected(self) -> None:
+        with pytest.raises(ProjectValidationError):
+            Project.new(name="x", settings={"k": "v" * (MAX_SETTINGS_STRING_LEN + 1)})
+
+    def test_too_many_keys_rejected(self) -> None:
+        big = {f"k{i}": i for i in range(MAX_SETTINGS_KEYS + 1)}
+        with pytest.raises(ProjectValidationError):
+            Project.new(name="x", settings=big)
+
+    def test_long_list_rejected(self) -> None:
+        with pytest.raises(ProjectValidationError):
+            Project.new(name="x", settings={"k": list(range(MAX_SETTINGS_LIST_LEN + 1))})
+
+    def test_unsupported_value_type_rejected(self) -> None:
+        # Tuples, sets, custom objects are not allowed even though some
+        # of them serialise — the rule is "JSON-friendly scalars only".
+        with pytest.raises(ProjectValidationError):
+            Project.new(name="x", settings={"k": object()})
+
+    def test_nested_list_in_list_rejected(self) -> None:
+        # Lists may only hold scalars (no list-of-lists, no list-of-dicts).
+        with pytest.raises(ProjectValidationError):
+            Project.new(name="x", settings={"k": [[1, 2], [3, 4]]})
+
+    def test_nested_dict_too_deep_rejected(self) -> None:
+        # Two-level nesting is rejected.
+        with pytest.raises(ProjectValidationError):
+            Project.new(name="x", settings={"k": {"inner": {"too": "deep"}}})
+
+    def test_nan_rejected(self) -> None:
+        with pytest.raises(ProjectValidationError):
+            Project.new(name="x", settings={"k": float("nan")})
+
+    def test_inf_rejected(self) -> None:
+        with pytest.raises(ProjectValidationError):
+            Project.new(name="x", settings={"k": float("inf")})
+
+    def test_oversized_blob_rejected(self) -> None:
+        # 64 keys × ~3 KiB each easily exceeds MAX_SETTINGS_BYTES.
+        big = {
+            f"k{i:02d}": "x" * (MAX_SETTINGS_STRING_LEN - 1)
+            for i in range(MAX_SETTINGS_KEYS // 2)
+        }
+        # Sanity-check that we'd otherwise pass per-field limits.
+        with pytest.raises(ProjectValidationError) as exc:
+            Project.new(name="x", settings=big)
+        assert str(MAX_SETTINGS_BYTES) in str(exc.value)
+
+    def test_apply_update_replaces_settings(self) -> None:
+        p = Project.new(name="x", settings={"a": 1})
+        p.apply_update({"settings": {"b": 2}})
+        assert p.settings == {"b": 2}
+
+    def test_apply_update_clearing_with_none(self) -> None:
+        p = Project.new(name="x", settings={"a": 1})
+        p.apply_update({"settings": None})
+        assert p.settings == {}
+
+    def test_apply_update_non_dict_settings_rejected(self) -> None:
+        p = Project.new(name="x")
+        with pytest.raises(ProjectValidationError):
+            p.apply_update({"settings": "not-an-object"})
+
+    def test_apply_update_failed_settings_does_not_advance_modified_at(self) -> None:
+        # Mirrors test_failed_validation_does_not_mutate: validation
+        # failure must not stamp modified_at. (Field-level rollback is
+        # not part of the apply_update contract today; the in-memory
+        # value may be partially updated, but the on-disk state stays
+        # consistent because save() re-validates.)
+        p = Project.new(
+            name="x", settings={"a": 1}, now="2024-01-01T00:00:00.000000Z"
+        )
+        with pytest.raises(ProjectValidationError):
+            p.apply_update(
+                {"settings": {"k": object()}},
+                now="2099-01-01T00:00:00.000000Z",
+            )
+        assert p.modified_at == "2024-01-01T00:00:00.000000Z"
+
+    def test_save_load_round_trip_preserves_settings(self, tmp_path: Path) -> None:
+        p = Project.new(
+            name="x",
+            settings={
+                SETTING_DEFAULT_CODER: "Luke",
+                SETTING_AI_ENABLED: True,
+                "ai": {"model": "phi-4", "temperature": 0.2},
+                "tags": ["alpha", "beta"],
+            },
+        )
+        save_project(tmp_path, p)
+        restored = load_project(tmp_path, p.id)
+        assert restored.settings == p.settings
+
+    def test_old_project_json_without_settings_loads_clean(
+        self, tmp_path: Path
+    ) -> None:
+        # Simulate a project written before F3.1 added the field.
+        p = Project.new(name="legacy")
+        save_project(tmp_path, p)
+        path = project_state_path(tmp_path, p.id)
+        d = json.loads(path.read_text())
+        d.pop("settings", None)
+        path.write_text(json.dumps(d))
+        restored = load_project(tmp_path, p.id)
+        assert restored.settings == {}
