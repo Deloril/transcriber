@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Scribe — local transcription</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #181b22;
+      --panel-2: #1f232c;
+      --border: #2a2f3a;
+      --text: #e7ebf2;
+      --muted: #8b94a7;
+      --accent: #7aa7ff;
+      --accent-2: #a78bfa;
+      --ok: #5fd49b;
+      --err: #ff7676;
+      --shadow: 0 8px 30px rgba(0,0,0,.4);
+    }
+    * { box-sizing: border-box; }
+    html, body { background: var(--bg); color: var(--text); margin: 0; height: 100%; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 80px; }
+    header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 24px; }
+    h1 { font-size: 22px; margin: 0; letter-spacing: -.01em; }
+    header .sub { color: var(--muted); font-size: 13px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 24px;
+      box-shadow: var(--shadow);
+      margin-bottom: 20px;
+    }
+    .drop {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 36px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .15s, background .15s;
+    }
+    .drop:hover, .drop.drag { border-color: var(--accent); background: rgba(122,167,255,.06); }
+    .drop strong { color: var(--text); }
+    .drop small { color: var(--muted); display: block; margin-top: 6px; }
+    .file-info { margin-top: 12px; color: var(--muted); font-size: 13px; }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+    select, input[type="text"], input[type="number"] {
+      width: 100%;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 10px;
+      font: inherit;
+    }
+    select:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
+    button {
+      background: linear-gradient(180deg, var(--accent), #5b87e6);
+      color: #0b1020;
+      border: 0;
+      border-radius: 9px;
+      padding: 11px 18px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button[disabled] { opacity: .5; cursor: not-allowed; }
+    .progress-wrap { margin-top: 14px; }
+    .progress {
+      height: 8px;
+      background: var(--panel-2);
+      border-radius: 999px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .progress > div {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      width: 0%;
+      transition: width .25s ease;
+    }
+    .progress-msg { color: var(--muted); font-size: 13px; margin-top: 8px; }
+    .downloads a {
+      display: inline-block;
+      margin-right: 8px;
+      margin-top: 8px;
+      padding: 7px 12px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      text-decoration: none;
+      font-size: 13px;
+    }
+    .downloads a:hover { border-color: var(--accent); }
+    .transcript {
+      margin-top: 16px;
+      max-height: 60vh;
+      overflow: auto;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    .turn { margin-bottom: 14px; }
+    .turn .meta {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 2px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .turn .speaker { color: var(--accent); font-weight: 600; }
+    .err { color: var(--err); margin-top: 12px; font-size: 13px; white-space: pre-wrap; }
+    .ok { color: var(--ok); }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); font-size: 11px; color: var(--muted); margin-left: 6px; }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .hidden { display: none; }
+
+    /* Header docs button */
+    .doc-btn {
+      margin-left: auto;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .doc-btn:hover { border-color: var(--accent); }
+
+    /* Slide-in docs panel */
+    .doc-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(8, 10, 14, .55);
+      backdrop-filter: blur(2px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .18s ease;
+      z-index: 50;
+    }
+    .doc-overlay.open { opacity: 1; pointer-events: auto; }
+    .doc-panel {
+      position: fixed;
+      top: 0; right: 0; bottom: 0;
+      width: min(860px, 92vw);
+      background: var(--panel);
+      border-left: 1px solid var(--border);
+      box-shadow: -10px 0 40px rgba(0,0,0,.5);
+      transform: translateX(100%);
+      transition: transform .22s ease;
+      z-index: 60;
+      display: flex;
+      flex-direction: column;
+    }
+    .doc-panel.open { transform: translateX(0); }
+    .doc-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel-2);
+    }
+    .doc-head h2 { margin: 0; font-size: 15px; }
+    .doc-head .actions { display: flex; gap: 8px; }
+    .doc-head a, .doc-head button {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 5px 10px;
+      font-size: 12px;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .doc-head a:hover, .doc-head button:hover { border-color: var(--accent); }
+    .doc-body {
+      padding: 22px 26px 60px;
+      overflow-y: auto;
+      flex: 1;
+    }
+    .doc-loading { color: var(--muted); font-size: 13px; padding: 6px 0; }
+  </style>
+  {% include "_doc_styles.html" %}
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Scribe</h1>
+      <span class="sub">Offline interview transcription · Whisper large-v3 · 100% local</span>
+      <button id="docsBtn" class="doc-btn" title="Open documentation (?)">📖 Docs</button>
+    </header>
+
+    <div class="card">
+      <div id="drop" class="drop">
+        <strong>Drag a video or audio file here</strong>
+        <small>or click to choose · MP4, MKV, MOV, WAV, M4A, MP3 — anything ffmpeg can read</small>
+        <input id="file" type="file" class="hidden" accept="video/*,audio/*,.mkv,.mp4,.mov,.wav,.m4a,.mp3,.flac,.ogg,.webm">
+        <div id="fileInfo" class="file-info"></div>
+      </div>
+
+      <div style="height: 16px;"></div>
+
+      <div class="row3">
+        <div>
+          <label>Mode</label>
+          <select id="mode">
+            <option value="auto" selected>Auto (multi-track if available)</option>
+            <option value="multi-track">Multi-track (one speaker per audio track)</option>
+            <option value="diarize">Diarize (single track, AI speaker ID)</option>
+          </select>
+        </div>
+        <div>
+          <label>Language</label>
+          <select id="language">
+            <option value="en" selected>English</option>
+            <option value="auto">Auto-detect</option>
+          </select>
+        </div>
+        <div>
+          <label>Model</label>
+          <select id="model">
+            <option value="large-v3" selected>large-v3 (best)</option>
+            <option value="large-v2">large-v2</option>
+            <option value="medium.en">medium.en (faster)</option>
+            <option value="distil-large-v3">distil-large-v3 (fastest, EN only)</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="height: 14px;"></div>
+
+      <div class="row">
+        <div>
+          <label>Speaker names (multi-track only) — comma-separated, in track order</label>
+          <input id="speakers" type="text" placeholder="e.g. Luke, Guest">
+        </div>
+        <div>
+          <label>Number of speakers (diarize only — leave blank to auto-detect)</label>
+          <input id="numSpeakers" type="number" min="1" max="10" placeholder="e.g. 2">
+        </div>
+      </div>
+
+      {% if not hf_token_set %}
+      <p class="hint">⚠ Diarize mode needs an HF_TOKEN in <code>.env</code>. See the README. Multi-track mode does not.</p>
+      {% endif %}
+
+      <div style="margin-top: 18px;">
+        <button id="go" disabled>Transcribe</button>
+        <span id="status" class="hint" style="margin-left: 10px;"></span>
+      </div>
+
+      <div id="progressWrap" class="progress-wrap hidden">
+        <div class="progress"><div id="bar"></div></div>
+        <div id="progressMsg" class="progress-msg">Starting…</div>
+      </div>
+      <div id="errBox" class="err hidden"></div>
+    </div>
+
+    <!-- Slide-in docs -->
+    <div id="docOverlay" class="doc-overlay" aria-hidden="true"></div>
+    <aside id="docPanel" class="doc-panel" aria-hidden="true" aria-label="Documentation">
+      <div class="doc-head">
+        <h2>Documentation</h2>
+        <div class="actions">
+          <a href="/docs/readme" target="_blank" rel="noopener">Open in new tab ↗</a>
+          <button id="docClose" aria-label="Close documentation">Close ✕</button>
+        </div>
+      </div>
+      <div id="docBody" class="doc-body doc">
+        <div class="doc-loading">Loading…</div>
+      </div>
+    </aside>
+
+    <div id="resultCard" class="card hidden">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+        <h2 style="margin:0;font-size:16px;">Transcript</h2>
+        <div id="meta" class="hint"></div>
+      </div>
+      <div class="downloads" id="downloads"></div>
+      <div class="transcript" id="transcript"></div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const drop = $("drop"), fileInput = $("file"), fileInfo = $("fileInfo");
+    const goBtn = $("go"), statusEl = $("status");
+    const progressWrap = $("progressWrap"), bar = $("bar"), progressMsg = $("progressMsg");
+    const errBox = $("errBox");
+    const resultCard = $("resultCard"), downloads = $("downloads"), transcriptEl = $("transcript"), metaEl = $("meta");
+
+    let chosenFile = null;
+
+    drop.addEventListener("click", () => fileInput.click());
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("drag"); });
+    drop.addEventListener("dragleave", () => drop.classList.remove("drag"));
+    drop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      drop.classList.remove("drag");
+      if (e.dataTransfer.files && e.dataTransfer.files.length) {
+        setFile(e.dataTransfer.files[0]);
+      }
+    });
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files && fileInput.files.length) setFile(fileInput.files[0]);
+    });
+
+    function setFile(f) {
+      chosenFile = f;
+      const mb = (f.size / (1024*1024)).toFixed(1);
+      fileInfo.textContent = `${f.name} · ${mb} MB`;
+      goBtn.disabled = false;
+    }
+
+    function fmtTime(s) {
+      s = Math.max(0, s|0);
+      const h = (s/3600)|0, m = ((s%3600)/60)|0, sec = s%60;
+      return h ? `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`
+              : `${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
+    }
+
+    goBtn.addEventListener("click", async () => {
+      if (!chosenFile) return;
+      goBtn.disabled = true;
+      errBox.classList.add("hidden");
+      resultCard.classList.add("hidden");
+      progressWrap.classList.remove("hidden");
+      bar.style.width = "1%";
+      progressMsg.textContent = "Uploading…";
+
+      const fd = new FormData();
+      fd.append("file", chosenFile);
+      fd.append("mode", $("mode").value);
+      fd.append("speakers", $("speakers").value);
+      fd.append("num_speakers", $("numSpeakers").value);
+      fd.append("language", $("language").value);
+      fd.append("model", $("model").value);
+
+      let resp;
+      try {
+        resp = await fetch("/api/upload", { method: "POST", body: fd });
+      } catch (e) {
+        showError("Upload failed: " + e); goBtn.disabled = false; return;
+      }
+      if (!resp.ok) {
+        const t = await resp.text();
+        showError("Upload failed: " + t); goBtn.disabled = false; return;
+      }
+      const j = await resp.json();
+      statusEl.textContent = `Job ${j.job_id} · ${j.audio_streams} audio stream${j.audio_streams===1?"":"s"} detected`;
+      streamProgress(j.job_id);
+    });
+
+    function streamProgress(jobId) {
+      const es = new EventSource(`/api/job/${jobId}/events`);
+      es.onmessage = (ev) => {
+        const d = JSON.parse(ev.data);
+        bar.style.width = `${Math.max(1, d.progress*100).toFixed(1)}%`;
+        progressMsg.textContent = d.message + (d.progress >= 1 ? "" : ` — ${(d.progress*100).toFixed(1)}%`);
+        if (d.status === "done") {
+          es.close();
+          loadResult(jobId);
+        } else if (d.status === "error") {
+          es.close();
+          showError(d.error || "Unknown error");
+          goBtn.disabled = false;
+        }
+      };
+      es.onerror = () => {
+        es.close();
+        showError("Lost connection to server.");
+        goBtn.disabled = false;
+      };
+    }
+
+    async function loadResult(jobId) {
+      const r = await fetch(`/api/job/${jobId}`);
+      if (!r.ok) { showError("Could not load result."); return; }
+      const data = await r.json();
+      goBtn.disabled = false;
+
+      // downloads
+      downloads.innerHTML = "";
+      Object.keys(data.output_paths).forEach(kind => {
+        const a = document.createElement("a");
+        a.href = `/api/job/${jobId}/download/${kind}`;
+        a.textContent = `Download .${kind}`;
+        a.download = "";
+        downloads.appendChild(a);
+      });
+
+      // meta
+      const r2 = data.result;
+      metaEl.textContent = `${r2.mode} · ${r2.language} · ${r2.speakers.length} speaker${r2.speakers.length===1?"":"s"}`;
+
+      // transcript: group consecutive same-speaker segments
+      transcriptEl.innerHTML = "";
+      let block = null;
+      for (const seg of r2.segments) {
+        if (!seg.text || !seg.text.trim()) continue;
+        if (!block || block.speaker !== seg.speaker) {
+          if (block) transcriptEl.appendChild(renderBlock(block));
+          block = { speaker: seg.speaker, start: seg.start, text: seg.text.trim() };
+        } else {
+          block.text += " " + seg.text.trim();
+        }
+      }
+      if (block) transcriptEl.appendChild(renderBlock(block));
+
+      resultCard.classList.remove("hidden");
+    }
+
+    function renderBlock(b) {
+      const wrap = document.createElement("div");
+      wrap.className = "turn";
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.innerHTML = `<span class="speaker">${escapeHtml(b.speaker)}</span> · ${fmtTime(b.start)}`;
+      const body = document.createElement("div");
+      body.textContent = b.text;
+      wrap.appendChild(meta); wrap.appendChild(body);
+      return wrap;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+      }[c]));
+    }
+
+    function showError(msg) {
+      errBox.textContent = msg;
+      errBox.classList.remove("hidden");
+    }
+
+    // ---- Docs panel ----
+    const docsBtn = $("docsBtn"), docOverlay = $("docOverlay"), docPanel = $("docPanel");
+    const docBody = $("docBody"), docClose = $("docClose");
+    let docsLoaded = false;
+
+    async function openDocs() {
+      docOverlay.classList.add("open");
+      docPanel.classList.add("open");
+      docOverlay.setAttribute("aria-hidden", "false");
+      docPanel.setAttribute("aria-hidden", "false");
+      if (!docsLoaded) {
+        try {
+          const r = await fetch("/api/readme");
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          docBody.innerHTML = await r.text();
+          docsLoaded = true;
+          // make in-doc anchor links scroll within the panel
+          docBody.querySelectorAll('a[href^="#"]').forEach(a => {
+            a.addEventListener("click", (e) => {
+              const id = a.getAttribute("href").slice(1);
+              const target = docBody.querySelector(`#${CSS.escape(id)}`);
+              if (target) {
+                e.preventDefault();
+                target.scrollIntoView({ behavior: "smooth", block: "start" });
+              }
+            });
+          });
+          // open external links in a new tab
+          docBody.querySelectorAll('a[href^="http"]').forEach(a => {
+            a.target = "_blank";
+            a.rel = "noopener";
+          });
+        } catch (e) {
+          docBody.innerHTML = `<p style="color:var(--err)">Couldn't load README: ${e}</p>`;
+        }
+      }
+    }
+    function closeDocs() {
+      docOverlay.classList.remove("open");
+      docPanel.classList.remove("open");
+      docOverlay.setAttribute("aria-hidden", "true");
+      docPanel.setAttribute("aria-hidden", "true");
+    }
+    docsBtn.addEventListener("click", openDocs);
+    docOverlay.addEventListener("click", closeDocs);
+    docClose.addEventListener("click", closeDocs);
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeDocs();
+      else if (e.key === "?" && !["INPUT","SELECT","TEXTAREA"].includes(document.activeElement.tagName)) openDocs();
+    });
+  </script>
+</body>
+</html>

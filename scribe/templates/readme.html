@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Scribe — Documentation</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #181b22;
+      --panel-2: #1f232c;
+      --border: #2a2f3a;
+      --text: #e7ebf2;
+      --muted: #8b94a7;
+      --accent: #7aa7ff;
+      --accent-2: #a78bfa;
+    }
+    * { box-sizing: border-box; }
+    html, body { background: var(--bg); color: var(--text); margin: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif; }
+    .wrap { max-width: 860px; margin: 0 auto; padding: 32px 24px 80px; }
+    .topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; color: var(--muted); font-size: 13px; }
+    .topbar a { color: var(--accent); text-decoration: none; }
+    .topbar a:hover { text-decoration: underline; }
+  </style>
+  {% include "_doc_styles.html" %}
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <a href="/">← Back to Scribe</a>
+      <span>·</span>
+      <span>Documentation</span>
+    </div>
+    <div class="doc">{{ content | safe }}</div>
+  </div>
+</body>
+</html>

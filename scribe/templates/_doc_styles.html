@@ -1,0 +1,74 @@
+{# Shared styles for rendered README content. Included by both the docs panel and the standalone /docs/readme page. #}
+<style>
+  .doc {
+    color: var(--text);
+    font-size: 14.5px;
+    line-height: 1.65;
+    word-wrap: break-word;
+  }
+  .doc h1, .doc h2, .doc h3, .doc h4 {
+    color: var(--text);
+    font-weight: 650;
+    letter-spacing: -.005em;
+    margin-top: 1.7em;
+    margin-bottom: .55em;
+    line-height: 1.25;
+  }
+  .doc h1:first-child { margin-top: 0; }
+  .doc h1 { font-size: 1.7em; border-bottom: 1px solid var(--border); padding-bottom: .25em; }
+  .doc h2 { font-size: 1.3em; border-bottom: 1px solid var(--border); padding-bottom: .2em; }
+  .doc h3 { font-size: 1.1em; }
+  .doc h4 { font-size: 1em; color: var(--muted); }
+  .doc p { margin: 0 0 .9em; }
+  .doc a { color: var(--accent); text-decoration: none; }
+  .doc a:hover { text-decoration: underline; }
+  .doc strong { color: var(--text); }
+  .doc ul, .doc ol { margin: 0 0 1em; padding-left: 1.4em; }
+  .doc li { margin-bottom: .25em; }
+  .doc li > p { margin: 0 0 .35em; }
+  .doc code {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+  }
+  .doc pre {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: 0 0 1em;
+  }
+  .doc pre code {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    font-size: 12.5px;
+    line-height: 1.55;
+    white-space: pre;
+  }
+  .doc blockquote {
+    border-left: 3px solid var(--accent);
+    margin: 0 0 1em;
+    padding: .2em 1em;
+    color: var(--muted);
+    background: rgba(122,167,255,.05);
+    border-radius: 0 6px 6px 0;
+  }
+  .doc table {
+    border-collapse: collapse;
+    margin: 0 0 1em;
+    width: 100%;
+  }
+  .doc th, .doc td {
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    text-align: left;
+  }
+  .doc th { background: var(--panel-2); }
+  .doc hr { border: 0; border-top: 1px solid var(--border); margin: 1.5em 0; }
+  .doc img { max-width: 100%; border-radius: 8px; }
+</style>
