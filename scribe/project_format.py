@@ -797,6 +797,7 @@ def export_project_archive(
     *,
     outputs_root: Path | None = None,
     include_outputs: bool = False,
+    exclude_relative: Iterable[str] | None = None,
 ) -> Path:
     """Bundle a project into a single zip file.
 
@@ -814,6 +815,14 @@ def export_project_archive(
     every transcript directory referenced by a source's
     ``transcript_job_id``. Missing directories are skipped (with no
     error) so a partial corpus still exports.
+
+    ``exclude_relative`` is a list of project-relative path *prefixes*
+    (POSIX-style, no leading slash) to skip while walking the project
+    tree. The F9.4 checkpoint flow uses this to avoid embedding the
+    ``checkpoints/`` subdirectory recursively in its own archive.
+    Each entry matches when the relative path is exactly the prefix or
+    starts with ``<prefix>/``; entries with absolute paths or ``..``
+    components are rejected.
     """
     if not PROJECT_ID_RE.match(project_id):
         raise ProjectFormatError(f"Invalid project id: {project_id!r}")
@@ -824,15 +833,43 @@ def export_project_archive(
     # Make sure the manifest is current before we snapshot the tree.
     write_manifest(projects_root, project_id)
 
+    # Normalise excludes: strip slashes, reject absolute / traversal
+    # paths, dedupe.
+    excludes: list[str] = []
+    for raw in exclude_relative or []:
+        if not isinstance(raw, str):
+            raise ProjectFormatError(
+                f"exclude_relative entries must be strings; got {type(raw).__name__}"
+            )
+        norm = raw.replace("\\", "/").strip("/")
+        if not norm:
+            continue
+        if Path(norm).is_absolute() or ".." in Path(norm).parts:
+            raise ProjectFormatError(
+                f"exclude_relative entry must be a relative project path: {raw!r}"
+            )
+        if norm not in excludes:
+            excludes.append(norm)
+
+    def _is_excluded(rel: str) -> bool:
+        for ex in excludes:
+            if rel == ex or rel.startswith(ex + "/"):
+                return True
+        return False
+
     archive_path = Path(archive_path)
     archive_path.parent.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(
         archive_path, mode="w", compression=zipfile.ZIP_DEFLATED
     ) as zf:
-        # Walk the project tree and add every regular file.
+        # Walk the project tree and add every regular file (minus the
+        # exclusions).
         for f in _iter_project_files(pdir):
-            arc = f"{project_id}/" + str(f.relative_to(pdir)).replace("\\", "/")
+            rel = str(f.relative_to(pdir)).replace("\\", "/")
+            if _is_excluded(rel):
+                continue
+            arc = f"{project_id}/" + rel
             zf.write(f, arcname=arc)
 
         if include_outputs:

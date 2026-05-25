@@ -100,6 +100,13 @@ EVENT_ACTION_PROMOTE = "promote"
 EVENT_ACTION_LOCK = "lock"
 EVENT_ACTION_UNLOCK = "unlock"
 EVENT_ACTION_SNAPSHOT = "snapshot"
+# F9.4: a "checkpoint" is the full-project sibling of an F9.3
+# codebook snapshot — a named, dated, immutable archive of the entire
+# project state. We give it its own action verb so audit-log readers
+# can distinguish a "codebook snapshot taken" event from a
+# "whole-project checkpoint created" event without inspecting the
+# entity_type.
+EVENT_ACTION_CHECKPOINT = "checkpoint"
 EVENT_ACTION_IMPORT = "import"
 EVENT_ACTION_EXPORT = "export"
 EVENT_ACTION_OTHER = "other"
@@ -115,6 +122,7 @@ EVENT_ACTIONS: tuple[str, ...] = (
     EVENT_ACTION_LOCK,
     EVENT_ACTION_UNLOCK,
     EVENT_ACTION_SNAPSHOT,
+    EVENT_ACTION_CHECKPOINT,
     EVENT_ACTION_IMPORT,
     EVENT_ACTION_EXPORT,
     EVENT_ACTION_OTHER,
@@ -135,6 +143,13 @@ EVENT_ENTITY_SAVED_QUERY = "saved_query"
 EVENT_ENTITY_SAMPLING_LOG = "sampling_log"
 EVENT_ENTITY_CODEBOOK = "codebook"
 EVENT_ENTITY_SNAPSHOT = "snapshot"
+# F9.4: ``checkpoint`` is the full-project sibling of ``snapshot``.
+# A checkpoint references a frozen archive of the whole project tree
+# (project + sources + participants + codebook + applications + memos
+# + sampling log + saved queries + ...). The archive lives at
+# ``projects/<pid>/checkpoints/<cid>.scribe.zip`` with a sidecar
+# metadata JSON next to it.
+EVENT_ENTITY_CHECKPOINT = "checkpoint"
 EVENT_ENTITY_OTHER = "other"
 EVENT_ENTITY_TYPES: tuple[str, ...] = (
     EVENT_ENTITY_PROJECT,
@@ -149,6 +164,7 @@ EVENT_ENTITY_TYPES: tuple[str, ...] = (
     EVENT_ENTITY_SAMPLING_LOG,
     EVENT_ENTITY_CODEBOOK,
     EVENT_ENTITY_SNAPSHOT,
+    EVENT_ENTITY_CHECKPOINT,
     EVENT_ENTITY_OTHER,
 )
 
