@@ -1160,3 +1160,214 @@ export function buildAssignCardPayload() {
   // canvas API surface.
   return {};
 }
+
+// ---------- F5.5 — promote a memo into a code definition ----------
+//
+// Mirrors scribe/memo_promote.py. The editor uses these to build the
+// wire body for `POST /api/projects/<pid>/memos/<mid>/promote-to-code`
+// from a one-click "promote" action on a memo card. The server runs
+// full validation; this helper is shape-only with the same closed-
+// vocabulary checks the Python module performs (stage / status /
+// reserved provenance keys) so an obvious caller bug surfaces in the
+// browser before a round-trip.
+
+const _CODE_STATUSES = Object.freeze(["active", "draft", "retired"]);
+const _CODEBOOK_STAGES = Object.freeze([
+  "initial",
+  "focused",
+  "axial",
+  "theoretical",
+  "locked",
+]);
+const _RESERVED_PROMOTE_PROVENANCE_KEYS = Object.freeze([
+  "source",
+  "memo_id",
+]);
+// Code colour: ``#RGB`` or ``#RRGGBB``. Mirrors CODE_COLOUR_RE.
+const _CODE_COLOUR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+export const PROMOTE_DEFAULTS = Object.freeze({
+  stage: "initial",
+  status: "active",
+  recordBackLink: true,
+  backLinkRole: "promoted_to",
+});
+
+/**
+ * Build the JSON body for `POST /api/projects/<pid>/memos/<mid>/promote-to-code`.
+ *
+ * Returns a plain object — no fetch is made. All fields are optional;
+ * the server fills defaults from scribe/memo_promote.py when keys are
+ * absent. Pass `null` / leave undefined to defer to the server's
+ * defaults; pass an explicit value to override.
+ *
+ * @param {object} [args]
+ * @param {string} [args.name]              code name override (else server derives from memo)
+ * @param {string} [args.definition]        code definition override (else memo.body)
+ * @param {string} [args.inclusionCriteria]
+ * @param {string} [args.exclusionCriteria]
+ * @param {Array<string>} [args.exemplars]
+ * @param {string} [args.parentCodeId]      parent in the codebook hierarchy
+ * @param {Array<object>} [args.relatedCodes]  list of {code_id, relation_type}
+ * @param {string} [args.theoreticalMemo]   override the theoretical memo seed
+ * @param {string} [args.stage]             one of CODEBOOK_STAGES (default: 'initial')
+ * @param {string} [args.colour]            #RGB / #RRGGBB
+ * @param {string} [args.status]            one of CODE_STATUSES (default: 'active')
+ * @param {object} [args.extraProvenance]   additional provenance keys (string→string)
+ * @param {string} [args.codeId]            pin a specific code id (rare; tests/imports)
+ * @param {string} [args.changeNote]        version-log note (default: server fills lineage)
+ * @param {boolean} [args.recordBackLink]   default true; pass false to skip back-link
+ * @param {string} [args.backLinkRole]      default 'promoted_to'
+ *
+ * Validation here is shape-only:
+ *   - stage / status / colour are checked against their closed
+ *     vocabularies / regex.
+ *   - extraProvenance cannot contain the reserved keys (`source`,
+ *     `memo_id`) — the server would refuse anyway, but failing fast
+ *     in the browser keeps the audit trail safe.
+ */
+export function buildPromoteMemoPayload({
+  name = null,
+  definition = null,
+  inclusionCriteria = null,
+  exclusionCriteria = null,
+  exemplars = null,
+  parentCodeId = null,
+  relatedCodes = null,
+  theoreticalMemo = null,
+  stage = null,
+  colour = null,
+  status = null,
+  extraProvenance = null,
+  codeId = null,
+  changeNote = null,
+  recordBackLink = null,
+  backLinkRole = null,
+} = {}) {
+  const out = {};
+
+  if (name != null) {
+    if (typeof name !== "string") throw new Error("name must be a string");
+    out.name = name;
+  }
+  if (definition != null) {
+    if (typeof definition !== "string") {
+      throw new Error("definition must be a string");
+    }
+    out.definition = definition;
+  }
+  if (inclusionCriteria != null) {
+    if (typeof inclusionCriteria !== "string") {
+      throw new Error("inclusion_criteria must be a string");
+    }
+    out.inclusion_criteria = inclusionCriteria;
+  }
+  if (exclusionCriteria != null) {
+    if (typeof exclusionCriteria !== "string") {
+      throw new Error("exclusion_criteria must be a string");
+    }
+    out.exclusion_criteria = exclusionCriteria;
+  }
+  if (exemplars != null) {
+    if (!Array.isArray(exemplars)) {
+      throw new Error("exemplars must be an array of strings");
+    }
+    out.exemplars = exemplars.map((e) => String(e));
+  }
+  if (parentCodeId != null) {
+    if (typeof parentCodeId !== "string" || !_TARGET_ID_RE.test(parentCodeId)) {
+      throw new Error(`parent_code_id must be 12-char hex (got ${parentCodeId})`);
+    }
+    out.parent_code_id = parentCodeId;
+  }
+  if (relatedCodes != null) {
+    if (!Array.isArray(relatedCodes)) {
+      throw new Error("related_codes must be an array");
+    }
+    out.related_codes = relatedCodes.map((r) => {
+      if (!r || typeof r !== "object") {
+        throw new Error("related_codes entries must be objects");
+      }
+      const code_id = r.code_id ?? r.codeId;
+      const relation_type = r.relation_type ?? r.relationType;
+      if (typeof code_id !== "string" || !_TARGET_ID_RE.test(code_id)) {
+        throw new Error("related_codes.code_id must be 12-char hex");
+      }
+      if (typeof relation_type !== "string" || !relation_type) {
+        throw new Error("related_codes.relation_type is required");
+      }
+      return { code_id, relation_type };
+    });
+  }
+  if (theoreticalMemo != null) {
+    if (typeof theoreticalMemo !== "string") {
+      throw new Error("theoretical_memo must be a string");
+    }
+    out.theoretical_memo = theoreticalMemo;
+  }
+  if (stage != null) {
+    if (!_CODEBOOK_STAGES.includes(stage)) {
+      throw new Error(`unknown stage: ${stage}`);
+    }
+    out.stage = stage;
+  }
+  if (colour != null) {
+    if (colour !== "" && !_CODE_COLOUR_RE.test(colour)) {
+      throw new Error(`colour must be #RGB or #RRGGBB (got ${colour})`);
+    }
+    out.colour = colour;
+  }
+  if (status != null) {
+    if (!_CODE_STATUSES.includes(status)) {
+      throw new Error(`unknown status: ${status}`);
+    }
+    out.status = status;
+  }
+  if (extraProvenance != null) {
+    if (typeof extraProvenance !== "object" || Array.isArray(extraProvenance)) {
+      throw new Error("extra_provenance must be a plain object");
+    }
+    const cleaned = {};
+    for (const [k, v] of Object.entries(extraProvenance)) {
+      const key = String(k).trim();
+      if (!key) continue;
+      if (_RESERVED_PROMOTE_PROVENANCE_KEYS.includes(key)) {
+        throw new Error(
+          `extra_provenance cannot override reserved key: ${key}`,
+        );
+      }
+      cleaned[key] = String(v);
+    }
+    if (Object.keys(cleaned).length) {
+      out.extra_provenance = cleaned;
+    }
+  }
+  if (codeId != null) {
+    if (typeof codeId !== "string" || !_TARGET_ID_RE.test(codeId)) {
+      throw new Error(`code_id must be 12-char hex (got ${codeId})`);
+    }
+    out.code_id = codeId;
+  }
+  if (changeNote != null) {
+    if (typeof changeNote !== "string") {
+      throw new Error("change_note must be a string");
+    }
+    out.change_note = changeNote;
+  }
+  if (recordBackLink != null) {
+    out.record_back_link = Boolean(recordBackLink);
+  }
+  if (backLinkRole != null) {
+    if (typeof backLinkRole !== "string") {
+      throw new Error("back_link_role must be a string");
+    }
+    const role = backLinkRole.trim();
+    if (role) {
+      if (!_ROLE_RE.test(role)) {
+        throw new Error(`invalid back_link_role: ${backLinkRole}`);
+      }
+      out.back_link_role = role;
+    }
+  }
+  return out;
+}

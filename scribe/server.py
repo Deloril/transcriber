@@ -1097,6 +1097,124 @@ async def link_memos_on_canvas_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Promote a memo into a code definition (F5.5)
+#
+# One-click endpoint: load the memo, mint a Code, persist v1 of its
+# definition to the version log, and (by default) back-link the memo
+# to the new code with role 'promoted_to'. Codebook lock (F2.4) is
+# enforced at the boundary — a locked codebook refuses promotions
+# the same way it refuses code edits, mirroring the methodological
+# transparency F2.4 was designed for.
+# --------------------------------------------------------------------------- #
+
+from . import memo_promote as _memo_promote  # noqa: E402
+from . import codebook_lock as _codebook_lock  # noqa: E402
+
+
+@app.post("/api/projects/{project_id}/memos/{memo_id}/promote-to-code")
+async def promote_memo_to_code_endpoint(
+    project_id: str, memo_id: str, request: Request
+) -> JSONResponse:
+    """Promote a memo into a new Code (F5.5).
+
+    Body (all keys optional; the server fills defaults from
+    :mod:`scribe.memo_promote` when keys are absent)::
+
+        {
+          "name": "...",
+          "definition": "...",
+          "inclusion_criteria": "...",
+          "exclusion_criteria": "...",
+          "exemplars": ["..."],
+          "parent_code_id": "...",
+          "related_codes": [{"code_id": "...", "relation_type": "..."}],
+          "theoretical_memo": "...",
+          "stage": "initial" | "focused" | "axial" | "theoretical",
+          "colour": "#abc",
+          "status": "active" | "draft" | "retired",
+          "extra_provenance": {"key": "value", ...},
+          "code_id": "...",
+          "change_note": "...",
+          "record_back_link": true,
+          "back_link_role": "promoted_to"
+        }
+
+    Returns 201 with ``{"code": ..., "version": ..., "memo": ...}`` on
+    success. 400 on validation, 404 on missing project/memo, 409 if
+    the codebook is locked (F2.4).
+    """
+    _check_project_id(project_id)
+    _check_memo_id(memo_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    # Build the keyword payload for promote_memo_to_code from the body.
+    # Only forward keys the user actually supplied; missing keys fall
+    # through to the helper's defaults.
+    fields: dict[str, Any] = {}
+    for key in (
+        "name",
+        "definition",
+        "inclusion_criteria",
+        "exclusion_criteria",
+        "theoretical_memo",
+        "stage",
+        "colour",
+        "status",
+        "code_id",
+        "change_note",
+        "back_link_role",
+    ):
+        if key in body and body[key] is not None:
+            fields[key] = body[key]
+    if "parent_code_id" in body:
+        v = body.get("parent_code_id")
+        fields["parent_code_id"] = str(v) if v else None
+    if "exemplars" in body:
+        fields["exemplars"] = body.get("exemplars") or []
+    if "related_codes" in body:
+        fields["related_codes"] = body.get("related_codes") or []
+    if "extra_provenance" in body:
+        fields["extra_provenance"] = body.get("extra_provenance") or {}
+    if "record_back_link" in body and body["record_back_link"] is not None:
+        fields["record_back_link"] = bool(body["record_back_link"])
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            _codebook_lock.assert_codebook_unlocked(
+                _projects_root(), project_id
+            )
+        except _codebook_lock.LockedCodebookError as e:
+            raise HTTPException(409, str(e))
+        try:
+            result = _memo_promote.promote_memo_to_code(
+                _projects_root(), project_id, memo_id, **fields
+            )
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid promotion payload: {e}")
+
+    return JSONResponse(
+        {
+            "code": result.code.to_dict(),
+            "version": result.version.to_dict(),
+            "memo": result.memo.to_dict(),
+        },
+        status_code=201,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 

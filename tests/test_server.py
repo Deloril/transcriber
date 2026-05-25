@@ -2131,3 +2131,256 @@ class TestCanvasAPI:
         r = client.delete(f"/api/projects/{pid}")
         assert r.status_code == 200
         assert not canvas_path.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Promote a memo into a code definition (F5.5)
+# --------------------------------------------------------------------------- #
+
+
+class TestPromoteMemoToCodeAPI:
+    """POST /api/projects/{pid}/memos/{mid}/promote-to-code.
+
+    F5.5 turns a matured memo into a real Code with v1 of its
+    definition logged. The endpoint:
+
+    * loads the memo, builds a Code via :mod:`scribe.memo_promote`,
+      records v1 in the version log, and (by default) back-links
+      the memo;
+    * enforces F2.4's codebook lock — locked codebooks return 409;
+    * reuses the same id-shape rules as the other project endpoints
+      (404 for unknown / 400 for malformed).
+    """
+
+    MEMO_ID = "f" * 12
+    CODE_ID = "a" * 12
+    CODER_ID = "c" * 12
+
+    def _make_project(self, client) -> str:
+        r = client.post("/api/projects", json={"name": "P"})
+        assert r.status_code == 201
+        return r.json()["id"]
+
+    def _make_memo(
+        self,
+        client,
+        pid: str,
+        *,
+        title: str = "Managing the project",
+        body: str = "Managing notes.",
+        type: str = "free",
+    ) -> str:
+        r = client.post(
+            f"/api/projects/{pid}/memos",
+            json={"title": title, "body": body, "type": type},
+        )
+        assert r.status_code == 201, r.text
+        return r.json()["id"]
+
+    # -- Happy path --------------------------------------------------- #
+
+    def test_minimal_promotion_returns_201(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        mid = self._make_memo(client, pid)
+        r = client.post(
+            f"/api/projects/{pid}/memos/{mid}/promote-to-code",
+            json={},
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert "code" in body
+        assert "version" in body
+        assert "memo" in body
+        assert body["code"]["project_id"] == pid
+        assert body["code"]["name"] == "Managing the project"
+        # Provenance lineage recorded.
+        assert body["code"]["provenance"]["source"] == "promoted_from_memo"
+        assert body["code"]["provenance"]["memo_id"] == mid
+        # v1 in the version log.
+        assert body["version"]["version"] == 1
+
+    def test_back_link_added_by_default(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        mid = self._make_memo(client, pid)
+        r = client.post(
+            f"/api/projects/{pid}/memos/{mid}/promote-to-code",
+            json={},
+        )
+        assert r.status_code == 201
+        body = r.json()
+        cid = body["code"]["id"]
+        memo_links = body["memo"]["links"]
+        assert any(
+            link["target_type"] == "code"
+            and link["target_id"] == cid
+            and link.get("role") == "promoted_to"
+            for link in memo_links
+        )
+
+    def test_record_back_link_false_skips_link(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        mid = self._make_memo(client, pid)
+        r = client.post(
+            f"/api/projects/{pid}/memos/{mid}/promote-to-code",
+            json={"record_back_link": False},
+        )
+        assert r.status_code == 201
+        cid = r.json()["code"]["id"]
+        memo_links = r.json()["memo"]["links"]
+        assert not any(
+            link["target_type"] == "code" and link["target_id"] == cid
+            for link in memo_links
+        )
+
+    def test_explicit_overrides_apply(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        mid = self._make_memo(client, pid, body="long body")
+        r = client.post(
+            f"/api/projects/{pid}/memos/{mid}/promote-to-code",
+            json={
+                "name": "Renamed",
+                "definition": "Crisp definition.",
+                "stage": "focused",
+                "status": "draft",
+                "colour": "#abc",
+            },
+        )
+        assert r.status_code == 201
+        code = r.json()["code"]
+        assert code["name"] == "Renamed"
+        assert code["definition"] == "Crisp definition."
+        assert code["stage"] == "focused"
+        assert code["status"] == "draft"
+        assert code["colour"] == "#abc"
+
+    def test_extra_provenance_round_trips(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        mid = self._make_memo(client, pid)
+        r = client.post(
+            f"/api/projects/{pid}/memos/{mid}/promote-to-code",
+            json={"extra_provenance": {"promoted_by": self.CODER_ID}},
+        )
+        assert r.status_code == 201
+        prov = r.json()["code"]["provenance"]
+        assert prov["promoted_by"] == self.CODER_ID
+        assert prov["source"] == "promoted_from_memo"
+
+    def test_back_link_role_overridable(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        mid = self._make_memo(client, pid)
+        r = client.post(
+            f"/api/projects/{pid}/memos/{mid}/promote-to-code",
+            json={"back_link_role": "became"},
+        )
+        assert r.status_code == 201
+        cid = r.json()["code"]["id"]
+        memo_links = r.json()["memo"]["links"]
+        match = [
+            l for l in memo_links
+            if l["target_type"] == "code" and l["target_id"] == cid
+        ]
+        assert match
+        assert match[0]["role"] == "became"
+
+    def test_explicit_code_id_used_on_response(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        mid = self._make_memo(client, pid)
+        r = client.post(
+            f"/api/projects/{pid}/memos/{mid}/promote-to-code",
+            json={"code_id": self.CODE_ID},
+        )
+        assert r.status_code == 201
+        assert r.json()["code"]["id"] == self.CODE_ID
+
+    # -- Errors ------------------------------------------------------- #
+
+    def test_unknown_project_returns_404(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            f"/api/projects/{'0' * 12}/memos/{self.MEMO_ID}/promote-to-code",
+            json={},
+        )
+        assert r.status_code == 404
+
+    def test_unknown_memo_returns_404(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos/{self.MEMO_ID}/promote-to-code",
+            json={},
+        )
+        assert r.status_code == 404
+
+    def test_invalid_project_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            f"/api/projects/not-hex/memos/{self.MEMO_ID}/promote-to-code",
+            json={},
+        )
+        assert r.status_code == 400
+
+    def test_invalid_memo_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/memos/not-hex/promote-to-code",
+            json={},
+        )
+        assert r.status_code == 400
+
+    def test_invalid_payload_shape_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        mid = self._make_memo(client, pid)
+        # Body is a JSON list — endpoint expects an object.
+        r = client.post(
+            f"/api/projects/{pid}/memos/{mid}/promote-to-code",
+            json=["not", "an", "object"],
+        )
+        assert r.status_code == 400
+
+    def test_unknown_status_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        mid = self._make_memo(client, pid)
+        r = client.post(
+            f"/api/projects/{pid}/memos/{mid}/promote-to-code",
+            json={"status": "garbage"},
+        )
+        assert r.status_code == 400
+
+    def test_reserved_provenance_key_400(self, server_env) -> None:
+        # The endpoint forwards extra_provenance straight to the helper,
+        # which raises ProjectValidationError on reserved keys.
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        mid = self._make_memo(client, pid)
+        r = client.post(
+            f"/api/projects/{pid}/memos/{mid}/promote-to-code",
+            json={"extra_provenance": {"source": "human"}},
+        )
+        assert r.status_code == 400
+
+    def test_locked_codebook_returns_409(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        mid = self._make_memo(client, pid)
+        # Lock the codebook directly via the data layer (no HTTP toggle
+        # exists yet — F2.4 is server-pure).
+        from scribe import codebook_lock as cl
+
+        cl.lock_codebook(
+            srv.PROJECTS_DIR, pid, reason="ICR begins"
+        )
+        r = client.post(
+            f"/api/projects/{pid}/memos/{mid}/promote-to-code",
+            json={},
+        )
+        assert r.status_code == 409
