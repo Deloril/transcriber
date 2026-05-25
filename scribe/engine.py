@@ -219,6 +219,17 @@ def _register_safe_globals() -> None:
     except Exception:
         pass
     try:
+        # typing.Any and a few stdlib types pyannote/lightning checkpoints reach for.
+        import typing
+        safe.append(typing.Any)
+    except Exception:
+        pass
+    try:
+        import builtins
+        safe.extend([slice, range, complex, bytes, set, frozenset, dict, list, tuple])
+    except Exception:
+        pass
+    try:
         torch.serialization.add_safe_globals(safe)
     except Exception as e:  # noqa: BLE001
         print(f"[scribe] add_safe_globals failed (continuing): {e}")
@@ -230,12 +241,11 @@ def _register_safe_globals() -> None:
 _register_safe_globals()
 
 
-# Belt-and-braces: pyannote's checkpoint loader still trips the strict
-# unpickler on globals we haven't enumerated (it pickles arbitrary lightning
-# hyperparameters). Until pyannote ships a fix for PyTorch 2.6, monkeypatch
-# torch.load so that when the caller doesn't explicitly set weights_only=True,
-# we default to False for these model files. Opt out by setting
-# SCRIBE_STRICT_TORCH_LOAD=1.
+# Belt-and-braces: pyannote's checkpoint loader trips the strict loader on
+# globals we can't fully enumerate (lightning hyperparameters with arbitrary
+# user types). Pyannote also calls torch.load(..., weights_only=True)
+# *explicitly* in some paths, so a polite "respect the caller" wrapper isn't
+# enough — we have to force-override. Opt out via SCRIBE_STRICT_TORCH_LOAD=1.
 if (
     os.environ.get("SCRIBE_STRICT_TORCH_LOAD", "").strip() not in {"1", "true", "True"}
     and not getattr(torch.load, "_scribe_patched", False)
@@ -243,13 +253,20 @@ if (
     _orig_torch_load = torch.load
 
     def _scribe_torch_load(*args: Any, **kwargs: Any):
-        # If the caller passed weights_only explicitly, respect it.
-        if "weights_only" not in kwargs:
-            kwargs["weights_only"] = False
+        # Force the legacy load path regardless of what the caller passed.
+        kwargs["weights_only"] = False
         return _orig_torch_load(*args, **kwargs)
 
     _scribe_torch_load._scribe_patched = True  # type: ignore[attr-defined]
     torch.load = _scribe_torch_load  # type: ignore[assignment]
+    try:
+        # Modules that imported `from torch.serialization import load` before
+        # our patch landed will still hold the original reference. Patching
+        # the attribute here covers any later `import torch.serialization` usage.
+        import torch.serialization as _ts
+        _ts.load = _scribe_torch_load  # type: ignore[assignment]
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
