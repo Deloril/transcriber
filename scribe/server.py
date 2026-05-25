@@ -1285,6 +1285,114 @@ async def export_codebook_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# REFI-QDA / QDPX project export (F6.4)
+# --------------------------------------------------------------------------- #
+
+from . import applications as _applications  # noqa: E402
+from . import coders as _coders  # noqa: E402
+from . import refi_qda_project as _refi_qda_project  # noqa: E402
+# _sources and _memos are already imported earlier; re-importing is
+# harmless but kept out for clarity.
+
+
+def _load_segments_for_source_for_qdpx(
+    source: "_sources.Source",
+) -> list[dict] | None:
+    """Resolve a source's transcript segments under the server's OUTPUT_DIR.
+
+    Mirrors the discovery rules used by the CLI script: prefer
+    ``edited.json`` (the editor's authoritative version), fall back to
+    any ``*.json`` engine sidecar that has a ``segments`` array.
+    Returns ``None`` if no transcript is available — the caller emits
+    the source in the QDPX without selections.
+    """
+    if not getattr(source, "transcript_job_id", ""):
+        return None
+    job_dir = OUTPUT_DIR / source.transcript_job_id
+    if not job_dir.is_dir():
+        return None
+    edited = job_dir / "edited.json"
+    candidates: list[Path] = []
+    if edited.is_file():
+        candidates.append(edited)
+    candidates.extend(
+        sorted(p for p in job_dir.glob("*.json") if p.name != "edited.json")
+    )
+    for p in candidates:
+        try:
+            data = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("segments"), list):
+            return data["segments"]
+    return None
+
+
+@app.get("/api/projects/{project_id}/qdpx")
+async def export_qdpx_endpoint(project_id: str) -> Response:
+    """Download the project as a REFI-QDA / QDPX archive (F6.4).
+
+    The QDPX is a zip with a single ``project.qde`` XML manifest plus
+    ``Sources/<source_id>.txt`` plain-text representations of each
+    source. Importable into any QDA tool that accepts the REFI-QDA
+    interchange format (Atlas.ti, MAXQDA, NVivo, QDA Miner, Quirkos,
+    Dedoose).
+
+    Sources whose transcripts can't be found under ``outputs/`` still
+    appear in the manifest, but their applications are skipped (we
+    can't compute char-offsets without the transcript).
+
+    Status codes: ``404`` if the project is missing; ``200`` otherwise
+    (including an empty project — a bare manifest is valid output).
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        sources = _sources.list_sources(_projects_root(), project_id)
+        codes = _codes.list_codes(_projects_root(), project_id)
+        apps = _applications.list_applications(
+            _projects_root(), project_id
+        )
+        memos = _memos.list_memos(_projects_root(), project_id)
+        coders = _coders.list_coders(_projects_root(), project_id)
+
+    rendered_sources: list[_refi_qda_project.RenderedSource] = []
+    for s in sources:
+        segs = _load_segments_for_source_for_qdpx(s)
+        if segs is None:
+            continue
+        rendered_sources.append(
+            _refi_qda_project.render_source_plain_text(s.id, segs)
+        )
+
+    archive = _refi_qda_project.to_qdpx(
+        project=project,
+        sources=sources,
+        codes=codes,
+        applications=apps,
+        memos=memos,
+        coders=coders,
+        rendered_sources=rendered_sources,
+    )
+
+    filename = _refi_qda_project.slugify_qdpx_filename(project)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(
+        content=archive,
+        # QDPX is a zip; ``application/x-qdpx`` is the de facto vendor
+        # type used by Atlas.ti et al. but ``application/zip`` is the
+        # generic fallback most browsers map to a save dialog.
+        media_type="application/x-qdpx",
+        headers=headers,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 

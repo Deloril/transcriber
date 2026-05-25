@@ -2643,3 +2643,177 @@ class TestExportCodebookAPI:
         # Exactly one closing quote (the header-trailing one); no
         # mid-filename quote characters.
         assert cd.count('"') == 2
+
+
+# --------------------------------------------------------------------------- #
+# F6.4 — REFI-QDA / QDPX project export endpoint
+# --------------------------------------------------------------------------- #
+
+
+class TestExportQdpxAPI:
+    """``GET /api/projects/{pid}/qdpx``
+
+    F6.4 wires the pure :mod:`scribe.refi_qda_project` builder to a
+    download endpoint. The endpoint reads sources / codes / applications
+    / memos / coders from disk, hydrates each source's transcript by
+    looking under ``OUTPUT_DIR/<job>/edited.json`` (with a *.json
+    fallback), and returns a QDPX zip.
+    """
+
+    def _make_project(self, client, name: str = "Pilot") -> str:
+        r = client.post("/api/projects", json={"name": name})
+        assert r.status_code == 201
+        return r.json()["id"]
+
+    def _seed_full(self, srv, pid: str) -> dict:
+        """Lay down two codes, a source, a transcript, two applications,
+        a memo, and a coder.
+        """
+        from scribe import applications as a_mod
+        from scribe import coders as cd_mod
+        from scribe import codes as c_mod
+        from scribe import memos as m_mod
+        from scribe import sources as s_mod
+        from scribe.applications import Application
+        from scribe.coders import Coder
+        from scribe.codes import Code
+        from scribe.memos import Memo
+        from scribe.sources import Source
+
+        coder = Coder.new(project_id=pid, name="Coder A")
+        cd_mod.save_coder(srv.PROJECTS_DIR, coder)
+        c1 = Code.new(project_id=pid, name="Pacing")
+        c2 = Code.new(project_id=pid, name="Disclosure")
+        c_mod.save_code(srv.PROJECTS_DIR, c1)
+        c_mod.save_code(srv.PROJECTS_DIR, c2)
+
+        job_id = "abcdef012345"
+        source = Source.new(
+            project_id=pid,
+            name="Interview 1",
+            source_type="transcript",
+            transcript_job_id=job_id,
+        )
+        s_mod.save_source(srv.PROJECTS_DIR, source)
+
+        # Drop a transcript under OUTPUT_DIR/<job>/edited.json
+        job_dir = srv.OUTPUT_DIR / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "edited.json").write_text(json.dumps({
+            "segments": [
+                {"speaker": "LUKE",
+                 "words": [{"text": "Hello"}, {"text": "world"}]},
+                {"speaker": "ANA",
+                 "words": [{"text": "Goodbye"}]},
+            ],
+        }))
+
+        a1 = Application.new(
+            project_id=pid,
+            code_id=c1.id,
+            source_id=source.id,
+            coder_id=coder.id,
+            anchor_start_word_id="s0w0",
+            anchor_end_word_id="s0w1",
+            definition_version_id_at_apply="aaaabbbbcccc",
+        )
+        a2 = Application.new(
+            project_id=pid,
+            code_id=c2.id,
+            source_id=source.id,
+            coder_id=coder.id,
+            anchor_start_word_id="s1w0",
+            anchor_end_word_id="s1w0",
+            definition_version_id_at_apply="aaaabbbbcccc",
+        )
+        a_mod.save_application(srv.PROJECTS_DIR, a1)
+        a_mod.save_application(srv.PROJECTS_DIR, a2)
+
+        memo = Memo.new(
+            project_id=pid,
+            type="theoretical",
+            title="A memo",
+            body="Pacing as self-management.",
+        )
+        m_mod.save_memo(srv.PROJECTS_DIR, memo)
+
+        return {
+            "source_id": source.id,
+            "memo_id": memo.id,
+            "code_ids": [c1.id, c2.id],
+        }
+
+    # -- Happy path ---------------------------------------------------- #
+
+    def test_returns_qdpx_zip(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client, name="Pilot Study")
+        seeds = self._seed_full(srv, pid)
+        r = client.get(f"/api/projects/{pid}/qdpx")
+        assert r.status_code == 200
+        # Body is a zip.
+        assert r.content[:2] == b"PK"
+        # x-qdpx is the de-facto vendor type.
+        assert r.headers["content-type"].startswith("application/x-qdpx")
+        # Content-Disposition has a sensible filename.
+        cd = r.headers["content-disposition"]
+        assert "pilot-study.qdpx" in cd
+
+    def test_archive_contains_expected_entries(self, server_env) -> None:
+        import io
+        import zipfile
+
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        seeds = self._seed_full(srv, pid)
+        r = client.get(f"/api/projects/{pid}/qdpx")
+        assert r.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+            names = set(zf.namelist())
+            assert "project.qde" in names
+            assert f"Sources/{seeds['source_id']}.txt" in names
+            assert f"Notes/{seeds['memo_id']}.txt" in names
+            text = zf.read(f"Sources/{seeds['source_id']}.txt").decode("utf-8")
+            assert "LUKE: Hello world" in text
+            assert "ANA: Goodbye" in text
+
+    def test_qde_xml_validates(self, server_env) -> None:
+        import io
+        import zipfile
+        from xml.etree import ElementTree as ET
+
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        self._seed_full(srv, pid)
+        r = client.get(f"/api/projects/{pid}/qdpx")
+        assert r.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+            qde = zf.read("project.qde").decode("utf-8")
+        # Parse XML to validate well-formedness.
+        root = ET.fromstring(qde)
+        assert root.tag.endswith("}Project")
+
+    def test_empty_project_still_returns_zip(self, server_env) -> None:
+        # A project with no codes / sources / memos still produces a
+        # valid (if sparse) QDPX. Importers tolerate the empty case.
+        import io
+        import zipfile
+
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.get(f"/api/projects/{pid}/qdpx")
+        assert r.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+            assert "project.qde" in zf.namelist()
+
+    # -- Failure modes -------------------------------------------------- #
+
+    def test_404_when_project_missing(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get(f"/api/projects/{'0' * 12}/qdpx")
+        assert r.status_code == 404
+
+    def test_400_on_malformed_project_id(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get("/api/projects/not-hex/qdpx")
+        assert r.status_code == 400
