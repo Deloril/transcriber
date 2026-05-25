@@ -171,3 +171,195 @@ export function rangeForMatch(tokens, needle) {
   }
   return matches;
 }
+
+// ---------- gutter / margin layout for code applications (F4.3) ----------
+
+/**
+ * Parse a Scribe word id (`s<seg>w<word>`) into `[seg, word]` integers.
+ * Returns null on malformed input — the caller can decide whether that's
+ * an exception or a "skip this application" event. Mirrors
+ * `scribe.applications.parse_word_id` (Python).
+ */
+export function parseWordId(wordId) {
+  if (typeof wordId !== "string") return null;
+  const m = /^s(\d+)w(\d+)$/.exec(wordId);
+  if (!m) return null;
+  return [parseInt(m[1], 10), parseInt(m[2], 10)];
+}
+
+/**
+ * Compare two 3-tuples of `(seg, word, offset)` lexicographically, where
+ * `offset` may be Number.POSITIVE_INFINITY (used as the "end of word"
+ * sentinel — matches the Python `_END_OF_WORD = math.inf` convention).
+ *
+ * Returns -1, 0, or +1.
+ */
+function _cmpAnchor(a, b) {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] < b[i]) return -1;
+    if (a[i] > b[i]) return 1;
+  }
+  return 0;
+}
+
+/**
+ * Compute the "leftmost position" of an application's span as a
+ * `[seg, word, startOffset]` tuple. Mirrors `_start_position` in
+ * `scribe.application_spans`.
+ *
+ * `app` is expected to carry: anchorStartWordId, startCharOffset (or null).
+ */
+function _startPos(app) {
+  const p = parseWordId(app.anchorStartWordId);
+  if (!p) return null;
+  const so = app.startCharOffset == null ? 0 : app.startCharOffset;
+  return [p[0], p[1], so];
+}
+
+/**
+ * Compute the "rightmost position" of an application's span as a
+ * `[seg, word, endOffsetOrInf]` tuple.
+ */
+function _endPos(app) {
+  const p = parseWordId(app.anchorEndWordId);
+  if (!p) return null;
+  const eo = app.endCharOffset == null
+    ? Number.POSITIVE_INFINITY
+    : app.endCharOffset;
+  return [p[0], p[1], eo];
+}
+
+/**
+ * Sort applications in document order, ties broken by application id.
+ * Mirrors `sort_by_anchor` in `scribe.application_spans`.
+ *
+ * Pure: returns a new array; input is not mutated.
+ */
+export function sortApplicationsByAnchor(apps) {
+  const decorated = apps.map((a) => ({
+    a,
+    start: _startPos(a),
+    end: _endPos(a),
+  }));
+  decorated.sort((x, y) => {
+    const c1 = _cmpAnchor(x.start, y.start);
+    if (c1 !== 0) return c1;
+    const c2 = _cmpAnchor(x.end, y.end);
+    if (c2 !== 0) return c2;
+    return x.a.id < y.a.id ? -1 : x.a.id > y.a.id ? 1 : 0;
+  });
+  return decorated.map((d) => d.a);
+}
+
+/**
+ * Lay out a single source's applications into non-overlapping lanes for
+ * the gutter renderer. Mirrors `assign_lanes` in
+ * `scribe.application_gutter` — same algorithm, same lane numbering.
+ *
+ * Input: an array of objects with at least:
+ *   - id (string)
+ *   - sourceId (string) — must all match
+ *   - anchorStartWordId / anchorEndWordId (string, `s<seg>w<word>`)
+ *   - startCharOffset / endCharOffset (number or null)
+ *
+ * Returns:
+ *   {
+ *     sourceId,
+ *     placements: [{ applicationId, lane, stackDepth }, ...],   // doc order
+ *     laneCount,
+ *     maxStackDepth,
+ *   }
+ *
+ * Throws on mixed sources (matches the Python guard).
+ */
+export function assignLanes(apps) {
+  if (!apps || apps.length === 0) {
+    return { sourceId: "", placements: [], laneCount: 0, maxStackDepth: 0 };
+  }
+  const sourceIds = new Set(apps.map((a) => a.sourceId));
+  if (sourceIds.size > 1) {
+    throw new Error(
+      "assignLanes requires single-source input; got " +
+      sourceIds.size + " distinct sourceIds"
+    );
+  }
+  const [sourceId] = sourceIds;
+
+  const ordered = sortApplicationsByAnchor(apps);
+
+  const laneEnds = []; // index → end-position tuple of last app on that lane
+  const laneOf = Object.create(null);
+
+  for (const app of ordered) {
+    const start = _startPos(app);
+    const end = _endPos(app);
+    let chosen = -1;
+    for (let i = 0; i < laneEnds.length; i++) {
+      if (_cmpAnchor(laneEnds[i], start) <= 0) {
+        chosen = i;
+        break;
+      }
+    }
+    if (chosen === -1) {
+      chosen = laneEnds.length;
+      laneEnds.push(end);
+    } else {
+      laneEnds[chosen] = end;
+    }
+    laneOf[app.id] = chosen;
+  }
+
+  // Stack depth: pairwise overlap (strict). O(n^2) like the Python side.
+  const depths = Object.create(null);
+  for (const a of ordered) depths[a.id] = 0;
+  for (let i = 0; i < ordered.length; i++) {
+    const aLo = _startPos(ordered[i]);
+    const aHi = _endPos(ordered[i]);
+    for (let j = 0; j < ordered.length; j++) {
+      if (i === j) continue;
+      const b = ordered[j];
+      const bLo = _startPos(b);
+      const bHi = _endPos(b);
+      // [aLo, aHi] and [bLo, bHi] overlap iff aLo < bHi and bLo < aHi.
+      if (_cmpAnchor(aLo, bHi) < 0 && _cmpAnchor(bLo, aHi) < 0) {
+        depths[ordered[i].id] += 1;
+      }
+    }
+  }
+
+  const placements = ordered.map((a) => ({
+    applicationId: a.id,
+    lane: laneOf[a.id],
+    stackDepth: depths[a.id],
+  }));
+
+  let maxDepth = 0;
+  for (const v of Object.values(depths)) {
+    if (v > maxDepth) maxDepth = v;
+  }
+
+  return {
+    sourceId,
+    placements,
+    laneCount: laneEnds.length,
+    maxStackDepth: maxDepth,
+  };
+}
+
+/**
+ * Bucket applications by sourceId and lay each source out independently.
+ * Mirrors `assign_lanes_per_source`. Returns a plain object
+ * `{ [sourceId]: layout }`.
+ */
+export function assignLanesPerSource(apps) {
+  const buckets = Object.create(null);
+  for (const a of apps || []) {
+    if (!buckets[a.sourceId]) buckets[a.sourceId] = [];
+    buckets[a.sourceId].push(a);
+  }
+  const out = Object.create(null);
+  for (const [sid, list] of Object.entries(buckets)) {
+    out[sid] = assignLanes(list);
+  }
+  return out;
+}
