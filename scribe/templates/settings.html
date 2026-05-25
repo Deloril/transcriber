@@ -1,0 +1,60 @@
+{% extends "_shell.html" %}
+{% set active_nav = "settings" %}
+{% block title %}Settings{% endblock %}
+
+{% block body %}
+<div class="stub">
+  <strong>Wireframe.</strong> Top-level settings — host preferences and credentials, not project-scoped.
+  Project settings (codebook stage, methodology, attributes) live under <code>/projects/&lt;id&gt;/settings</code>.
+</div>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Hugging Face token</h2>
+    <div class="hint">Required for diarisation. Set in <code>.env</code>; UI for managing this lives in the
+    upload page today and will move here.</div>
+    <div class="wf" style="margin-top:10px">
+      <span class="label">Wireframe</span><br>
+      Show whether HF_TOKEN is present (masked). Set / clear actions.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Default transcription profile</h2>
+    <div class="hint">Pick a profile that gets pre-applied to new uploads.</div>
+    <div class="wf" style="margin-top:10px">
+      <span class="label">Wireframe</span><br>
+      Profile dropdown · "Manage profiles" link.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Local AI</h2>
+    <div class="hint">Model picker for the academic-coding suggester (<code>F8.1</code>, <code>F8.11</code>).</div>
+    <div class="wf" style="margin-top:10px">
+      <span class="label">Wireframe</span><br>
+      Backend: Ollama / llama.cpp / off · Tier: small / mid / large · Model name · Embedding model · "Test" button.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Hardware backend</h2>
+    <div class="hint">Read-only summary of the current PyTorch / CT2 backend. Mirrors <code>python -m scribe.devices</code>.</div>
+    <div id="caps" class="hint" style="margin-top:8px">Loading…</div>
+  </div>
+</div>
+
+<script>
+fetch("/api/capabilities").then(r => r.ok ? r.json() : null).then(c => {
+  if (!c) { document.getElementById("caps").textContent = "Capabilities API not available."; return; }
+  const gpu = c.gpu || {};
+  const lines = [
+    `Backend: ${(gpu.backend || "cpu").toUpperCase()}`,
+    gpu.device_name ? `Device: ${gpu.device_name}` : "",
+    gpu.vram_gb ? `${gpu.vram_gb} GB VRAM` : "",
+    `Parakeet: ${c.parakeet?.available ? "available" : (c.parakeet?.installed ? "installed but blocked" : "not installed")}`,
+  ].filter(Boolean);
+  document.getElementById("caps").innerHTML = lines.join("<br>");
+}).catch(() => {});
+</script>
+{% endblock %}

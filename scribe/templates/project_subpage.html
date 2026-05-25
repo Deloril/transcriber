@@ -1,0 +1,66 @@
+{#
+  Generic subpage for sources / codebook / queries / memos / ai / audit /
+  settings under a project. Each is a placeholder wireframe today; the
+  loop will replace the body block per-page as the corresponding F-feature
+  graduates from "data layer done" to "UI done".
+
+  Variables passed in:
+    project_id       — required
+    page_kind        — one of: sources, codebook, queries, memos, ai, audit, settings
+    page_title       — heading
+    feature_refs     — list of strings like "F2.1", "F2.2" — printed as the "backed by" line
+    description      — one-line subtitle
+    wireframe_blocks — list of dicts {label, lines}
+#}
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}{{ page_title }}{% endblock %}
+{% block heading %}{{ page_title }}{% endblock %}
+{% block subtitle_block %}
+  <span class="sub">{{ description }}</span>
+{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+  {% if page_kind == "sources" %}
+    <a class="btn" href="/projects/{{ project_id }}/sources/add">+ Add source</a>
+  {% elif page_kind == "codebook" %}
+    <a class="btn" href="#" onclick="alert('Stub: F2.x'); return false;">+ New code</a>
+  {% elif page_kind == "queries" %}
+    <a class="btn" href="#" onclick="alert('Stub: F3.5'); return false;">+ New query</a>
+  {% elif page_kind == "memos" %}
+    <a class="btn" href="#" onclick="alert('Stub: F5.1'); return false;">+ New memo</a>
+  {% endif %}
+{% endblock %}
+
+{% block body %}
+<div class="stub">
+  <strong>Wireframe.</strong> {{ description }}
+  {% if feature_refs %}
+  <br>Backed by:
+  {% for f in feature_refs %}<code>{{ f }}</code>{% if not loop.last %} · {% endif %}{% endfor %}.
+  {% endif %}
+</div>
+
+<nav style="display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap">
+  <a class="btn secondary" href="/projects/{{ project_id }}">Overview</a>
+  <a class="btn secondary{% if page_kind == 'sources' %} active{% endif %}" href="/projects/{{ project_id }}/sources">Sources</a>
+  <a class="btn secondary{% if page_kind == 'codebook' %} active{% endif %}" href="/projects/{{ project_id }}/codebook">Codebook</a>
+  <a class="btn secondary{% if page_kind == 'queries' %} active{% endif %}" href="/projects/{{ project_id }}/queries">Queries</a>
+  <a class="btn secondary{% if page_kind == 'memos' %} active{% endif %}" href="/projects/{{ project_id }}/memos">Memos</a>
+  <a class="btn secondary{% if page_kind == 'ai' %} active{% endif %}" href="/projects/{{ project_id }}/ai">AI</a>
+  <a class="btn secondary{% if page_kind == 'audit' %} active{% endif %}" href="/projects/{{ project_id }}/audit">Audit</a>
+</nav>
+
+<div class="grid {% if wireframe_blocks|length == 1 %}{% elif wireframe_blocks|length == 2 %}two{% else %}two{% endif %}">
+  {% for wb in wireframe_blocks %}
+    <div class="card">
+      <h2>{{ wb.heading }}</h2>
+      <div class="wf">
+        <span class="label">{{ wb.label or "Wireframe" }}</span><br>
+        {% for line in wb.lines %}{{ line | safe }}<br>{% endfor %}
+      </div>
+    </div>
+  {% endfor %}
+</div>
+{% endblock %}

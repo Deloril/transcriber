@@ -1,0 +1,64 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Projects{% endblock %}
+
+{% block actions %}
+  <a class="btn" href="/projects/new">+ New project</a>
+{% endblock %}
+
+{% block body %}
+<div class="stub">
+  <strong>Wireframe.</strong> This page will list every research project you've created. Each project bundles
+  multiple transcripts under a shared codebook (see <code>F1.1</code>, <code>F3.1</code>). The data model and
+  REST endpoints under <code>/api/projects</code> already exist; this page just doesn't render them yet.
+</div>
+
+<div class="card">
+  <div class="wf">
+    <span class="label">Wireframe — projects table</span><br>
+    <strong>Columns:</strong> name · methodology · sources count · code count · current stage (initial / focused / axial / theoretical / locked) · last modified · open ▸<br><br>
+    <strong>Toolbar:</strong> search · sort · filter by stage · "+ New project"<br><br>
+    <strong>Empty state:</strong> "No projects yet. Create your first to start coding transcripts together."
+  </div>
+</div>
+
+<div id="projectsList" class="card" style="display:none">
+  <h2>Your projects</h2>
+  <div id="projectsBody" class="hint">Loading…</div>
+</div>
+
+<div id="emptyState" class="empty card" style="display:none">
+  <h3>No projects yet</h3>
+  <p>A project ties multiple transcripts to one codebook so you can code across the whole corpus.</p>
+  <a class="btn" href="/projects/new">Create your first project</a>
+</div>
+
+<script>
+  // Best-effort live wiring: if the projects API is up, surface real data.
+  // Failure is silent; the wireframe block above stays the user-visible
+  // explanation either way.
+  fetch("/api/projects").then(r => {
+    if (!r.ok) throw new Error("not available");
+    return r.json();
+  }).then(data => {
+    const list = Array.isArray(data) ? data : (data.projects || []);
+    if (!list.length) {
+      document.getElementById("emptyState").style.display = "";
+      return;
+    }
+    const body = document.getElementById("projectsBody");
+    body.innerHTML = list.map(p => {
+      const id = p.id || p.project_id || "";
+      const name = (p.name || "Untitled project").replace(/[<>]/g, "");
+      const stage = p.codebook_stage || p.stage || "initial";
+      const modified = p.modified_at || p.updated_at || p.created_at || "";
+      return `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+        <a href="/projects/${id}"><strong>${name}</strong></a>
+        <span class="hint" style="margin-left:8px">stage: ${stage}</span>
+        <span class="hint" style="margin-left:8px">${modified}</span>
+      </div>`;
+    }).join("");
+    document.getElementById("projectsList").style.display = "";
+  }).catch(() => { /* keep wireframe visible */ });
+</script>
+{% endblock %}

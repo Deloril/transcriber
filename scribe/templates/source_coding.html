@@ -1,0 +1,106 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Coding — source {{ source_id }}{% endblock %}
+{% block heading %}Coding{% endblock %}
+{% block subtitle_block %}
+  <span class="sub">Source {{ source_id }} in project {{ project_id }}</span>
+{% endblock %}
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}/sources">← Sources</a>
+  <a class="btn secondary" href="/edit/{{ source_id }}" title="Open in the legacy single-transcript editor">Edit transcript</a>
+{% endblock %}
+
+{% block extra_styles %}
+  /* The coding view is a 3-column layout: gutter | transcript | side panel.
+     This stub paints the layout so future work can fill the slots. */
+  .coding {
+    display: grid;
+    grid-template-columns: 60px 1fr 340px;
+    gap: 14px;
+    min-height: 60vh;
+  }
+  @media (max-width: 1100px) {
+    .coding { grid-template-columns: 1fr; }
+    .coding .gutter { display: none; }
+    .coding .side { order: 3; }
+  }
+  .coding .gutter {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 8px;
+    color: var(--muted);
+    font-size: 11px;
+    text-align: center;
+  }
+  .coding .center {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 22px;
+  }
+  .coding .side {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .coding .side .pane {
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .coding .side .pane strong { color: var(--text); }
+{% endblock %}
+
+{% block body %}
+<div class="stub">
+  <strong>Wireframe.</strong> The coding view — a 3-pane layout where you read the transcript with the
+  gutter on the left showing overlapping code applications (<code>F4.3</code>) and the right pane holding
+  the codebook, AI suggestions, and quote memos. Today this just sketches the layout; the body of work
+  to populate it spans most of the F2/F4/F5/F8 features. The legacy single-transcript editor is one click
+  away via the &quot;Edit transcript&quot; button above.
+</div>
+
+<div class="coding">
+  <div class="gutter">
+    <div class="hint" style="writing-mode:vertical-rl; transform:rotate(180deg); margin-top:24px">Code application gutter (F4.3)</div>
+  </div>
+
+  <div class="center">
+    <div class="wf">
+      <span class="label">Wireframe — transcript pane</span><br>
+      Word-level rendered transcript identical to <code>/edit/{{ source_id }}</code>: speaker turns, click-to-play,
+      contenteditable per segment.<br><br>
+      <strong>Selection helpers:</strong> snap-to-word / sentence / paragraph (<code>F4.4</code>).<br>
+      <strong>On selection:</strong> popover with &quot;Apply code…&quot; (existing codes), &quot;Suggest with AI&quot;
+      (<code>F8.3</code>), &quot;Memo&quot;, &quot;Find similar quotes&quot; (<code>F8.5</code>).<br>
+      <strong>Overlap rendering:</strong> in-text underline + gutter bar for each overlapping application;
+      hover highlights the spanning text on both sides.
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="pane">
+      <strong>Codebook</strong><br>
+      Tree view of codes filtered by recently-used. Drag a code onto a selection to apply.
+    </div>
+    <div class="pane">
+      <strong>AI suggestions</strong><br>
+      Per-span: ranked code suggestions with embedding similarity score (<code>F8.3</code>).
+      Buttons: accept · modify · reject. Provenance logged either way (<code>F9.6</code>).
+    </div>
+    <div class="pane">
+      <strong>Quote memos</strong><br>
+      Margin annotations against the selected segment (<code>F5.1</code> quote memo).
+    </div>
+    <div class="pane">
+      <strong>Similar quotes</strong><br>
+      Embedding-search results across the corpus for the active selection (<code>F8.5</code>).
+    </div>
+  </div>
+</div>
+{% endblock %}

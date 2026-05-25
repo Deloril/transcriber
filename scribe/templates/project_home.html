@@ -1,0 +1,91 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}{{ project_name or "Project" }}{% endblock %}
+{% block heading %}{{ project_name or "Project" }}{% endblock %}
+
+{% block subtitle_block %}
+  <span class="sub">
+    {% if project_methodology %}{{ project_methodology }} · {% endif %}
+    Stage: {{ project_stage or "initial" }}
+  </span>
+{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}/audit">Audit log</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/settings">Settings</a>
+{% endblock %}
+
+{% block body %}
+<div class="stub">
+  <strong>Wireframe.</strong> Project home — the dashboard for one research project. Pulls from
+  <code>/api/projects/{{ project_id }}</code>. Real data loads via the JS at the bottom; if the API isn't there
+  yet, the wireframe blocks show what the cards will hold.
+</div>
+
+<nav style="display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap">
+  <a class="btn secondary" href="/projects/{{ project_id }}">Overview</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/sources">Sources</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/codebook">Codebook</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/queries">Queries</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/memos">Memos</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/ai">AI suggestions</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/audit">Audit</a>
+</nav>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Sources</h2>
+    <div class="wf">
+      <span class="label">Wireframe</span><br>
+      Count + last 5 sources + "Add source" button.<br>
+      <strong>Backed by:</strong> <code>F1.2</code>, <code>F1.3</code>, <code>F3.3</code>, <code>F10.3</code>.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Codebook</h2>
+    <div class="wf">
+      <span class="label">Wireframe</span><br>
+      Code count by stage (initial / focused / axial / theoretical), top frequent codes, recent edits.<br>
+      <strong>Backed by:</strong> <code>F2.1</code>, <code>F2.2</code>, <code>F9.3</code>.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Recent memos</h2>
+    <div class="wf">
+      <span class="label">Wireframe</span><br>
+      Last 5 memos with type chip + linked code/source. "View all".<br>
+      <strong>Backed by:</strong> <code>F5.1</code>, <code>F5.4</code>.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Theoretical sampling log</h2>
+    <div class="wf">
+      <span class="label">Wireframe</span><br>
+      Why each source was added; what category it was meant to fill.<br>
+      <strong>Backed by:</strong> <code>F1.4</code>.
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Recent activity</h2>
+  <div class="wf">
+    <span class="label">Wireframe</span><br>
+    Chronological feed of project events: code applied, definition edited, codebook locked, memo written, AI suggestion accepted/rejected.<br>
+    <strong>Backed by:</strong> <code>F9.1</code> (event log) — already implemented; this view consumes it.
+  </div>
+</div>
+
+<script>
+  const PROJECT_ID = {{ project_id | tojson }};
+  fetch(`/api/projects/${PROJECT_ID}`).then(r => r.ok ? r.json() : null).then(p => {
+    if (!p) return;
+    // When the API gives us real data, swap the wireframe blocks for it.
+    // For now we just leave the wireframe in place — graduation work is
+    // F12.x territory.
+  }).catch(() => {});
+</script>
+{% endblock %}

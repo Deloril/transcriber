@@ -231,6 +231,300 @@ async def library_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "library.html", {})
 
 
+# --------------------------------------------------------------------------- #
+# Project / coding-engine UI shell
+#
+# These pages establish the new IA: top-level Library + Projects, with
+# project-scoped subpages for sources, codebook, queries, memos, AI
+# suggestions, and the audit timeline. Most are placeholder wireframes — they
+# render correctly, link to each other, and gracefully degrade if the
+# backing API isn't there yet. The data layer for a chunk of the F-features
+# already exists; the UI graduations land per-feature as the loop reaches
+# them.
+# --------------------------------------------------------------------------- #
+
+
+def _project_id_or_404(project_id: str) -> str:
+    """
+    Light validation for the URL parameter. Real lookups happen against
+    /api/projects/{id} which validates strictly; this just keeps malformed
+    paths from rendering a confusing wireframe. We don't 404 here — empty
+    pages still render so the user can see the IA — but we do refuse
+    obviously-malicious paths.
+    """
+    if not project_id or "/" in project_id or ".." in project_id or len(project_id) > 64:
+        raise HTTPException(400, "Invalid project id")
+    return project_id
+
+
+@app.get("/projects", response_class=HTMLResponse)
+async def projects_list_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "projects_list.html", {
+        "page_title": "Projects",
+        "subtitle": "Each project ties multiple transcripts to a shared codebook.",
+    })
+
+
+@app.get("/projects/new", response_class=HTMLResponse)
+async def project_new_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "project_new.html", {
+        "page_title": "New project",
+        "subtitle": "Bundle transcripts under a shared codebook.",
+    })
+
+
+@app.get("/projects/{project_id}", response_class=HTMLResponse)
+async def project_home_page(request: Request, project_id: str) -> HTMLResponse:
+    pid = _project_id_or_404(project_id)
+    # Best-effort lookup so we can show real metadata in the heading. If the
+    # project doesn't exist yet we still render the wireframe — the page is
+    # also useful as a "create one" landing.
+    project = None
+    try:
+        from .projects import load_project  # type: ignore
+        project = load_project(pid)
+    except Exception:
+        project = None
+    return templates.TemplateResponse(request, "project_home.html", {
+        "project_id": pid,
+        "project_name": (project or {}).get("name") if isinstance(project, dict) else getattr(project, "name", None),
+        "project_methodology": (project or {}).get("methodology") if isinstance(project, dict) else getattr(project, "methodology", None),
+        "project_stage": (project or {}).get("codebook_stage") if isinstance(project, dict) else getattr(project, "codebook_stage", None),
+    })
+
+
+def _render_subpage(
+    request: Request, project_id: str, *,
+    page_kind: str, page_title: str, description: str,
+    feature_refs: list[str], wireframe_blocks: list[dict[str, Any]],
+) -> HTMLResponse:
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "project_subpage.html", {
+        "project_id": pid,
+        "page_kind": page_kind,
+        "page_title": page_title,
+        "description": description,
+        "feature_refs": feature_refs,
+        "wireframe_blocks": wireframe_blocks,
+    })
+
+
+@app.get("/projects/{project_id}/sources", response_class=HTMLResponse)
+async def project_sources_page(request: Request, project_id: str) -> HTMLResponse:
+    return _render_subpage(
+        request, project_id,
+        page_kind="sources",
+        page_title="Sources",
+        description="Transcripts and field notes attached to this project.",
+        feature_refs=["F1.2", "F1.3", "F3.3", "F10.3"],
+        wireframe_blocks=[
+            {"heading": "Source list", "lines": [
+                "<strong>Columns:</strong> filename · participant · duration · language · added · per-row action (open editor)",
+                "<strong>Toolbar:</strong> search · filter by participant attribute (F3.2) · &quot;+ Add source&quot;",
+            ]},
+            {"heading": "Participants", "lines": [
+                "Participant table with user-defined demographic columns (F1.3, F3.3).",
+                "One participant ↔ many sources.",
+            ]},
+            {"heading": "Sampling log", "lines": [
+                "Why each source was added, what category it was meant to fill (F1.4 — theoretical sampling).",
+            ]},
+        ],
+    )
+
+
+@app.get("/projects/{project_id}/sources/add", response_class=HTMLResponse)
+async def project_source_add_page(request: Request, project_id: str) -> HTMLResponse:
+    return _render_subpage(
+        request, project_id,
+        page_kind="sources",
+        page_title="Add source",
+        description="Pick an existing transcription from the library, upload a new recording, or import an existing transcript.",
+        feature_refs=["F1.2", "F10.3"],
+        wireframe_blocks=[
+            {"heading": "From the library", "lines": [
+                "Pick a completed transcription from <code>/library</code> and attach it to this project.",
+            ]},
+            {"heading": "Upload new audio/video", "lines": [
+                "Drag a recording — same flow as <code>/</code>, but lands in this project on completion.",
+            ]},
+            {"heading": "Import existing transcript", "lines": [
+                "Drop a <code>.txt / .srt / .vtt / .json</code> file. F10.3 covers the parsers.",
+            ]},
+        ],
+    )
+
+
+@app.get("/projects/{project_id}/sources/{source_id}", response_class=HTMLResponse)
+async def project_source_coding_page(request: Request, project_id: str, source_id: str) -> HTMLResponse:
+    pid = _project_id_or_404(project_id)
+    sid = _project_id_or_404(source_id)
+    return templates.TemplateResponse(request, "source_coding.html", {
+        "project_id": pid,
+        "source_id": sid,
+        "page_title": "Coding",
+    })
+
+
+@app.get("/projects/{project_id}/codebook", response_class=HTMLResponse)
+async def project_codebook_page(request: Request, project_id: str) -> HTMLResponse:
+    return _render_subpage(
+        request, project_id,
+        page_kind="codebook",
+        page_title="Codebook",
+        description="Codes, definitions, hierarchy, and stage gates.",
+        feature_refs=["F2.1", "F2.2", "F2.3", "F2.4", "F9.3"],
+        wireframe_blocks=[
+            {"heading": "Codes", "lines": [
+                "<strong>Tree view:</strong> hierarchy of codes by parent · color swatch · application count · stage chip.",
+                "<strong>Editor pane:</strong> definition, inclusion / exclusion criteria, exemplar quotes, related codes.",
+                "<strong>Lifecycle ops:</strong> merge · split · rename · retire · promote (F2.3).",
+            ]},
+            {"heading": "Stages & snapshots", "lines": [
+                "Current stage: initial / focused / axial / theoretical / locked.",
+                "Named codebook snapshots (F9.3). Lock toggle (F2.4) requires a methodological memo on unlock.",
+            ]},
+            {"heading": "Export", "lines": [
+                "CSV · Markdown · Word · REFI-QDA Codebook XML (F2.6).",
+            ]},
+            {"heading": "Inter-coder reliability (multi-coder)", "lines": [
+                "Cohen's kappa per code · reconciliation queue (F2.5). Visible only when multi-coder mode is on.",
+            ]},
+        ],
+    )
+
+
+@app.get("/projects/{project_id}/queries", response_class=HTMLResponse)
+async def project_queries_page(request: Request, project_id: str) -> HTMLResponse:
+    return _render_subpage(
+        request, project_id,
+        page_kind="queries",
+        page_title="Queries",
+        description="Cross-corpus search and matrices.",
+        feature_refs=["F3.4", "F3.5", "F3.6", "F3.7"],
+        wireframe_blocks=[
+            {"heading": "Query builder", "lines": [
+                "Code filter · source filter · participant attribute · speaker filter · boolean combinator · proximity (F3.5).",
+            ]},
+            {"heading": "Saved queries", "lines": [
+                "List of named, re-runnable queries (F3.7).",
+            ]},
+            {"heading": "Matrix views", "lines": [
+                "code × source (frequency) · code × code (co-occurrence) · code × attribute (cross-tab). Export CSV/XLSX (F3.6, F6.3).",
+            ]},
+            {"heading": "Coded segment retrieval", "lines": [
+                "&quot;Show all quotes for code X grouped by participant&quot; — the most-run query (F6.2).",
+            ]},
+        ],
+    )
+
+
+@app.get("/projects/{project_id}/memos", response_class=HTMLResponse)
+async def project_memos_page(request: Request, project_id: str) -> HTMLResponse:
+    return _render_subpage(
+        request, project_id,
+        page_kind="memos",
+        page_title="Memos",
+        description="Code · theoretical · methodological · reflexive · quote · source · project memos.",
+        feature_refs=["F5.1", "F5.2", "F5.3", "F5.4", "F5.5"],
+        wireframe_blocks=[
+            {"heading": "Memo list", "lines": [
+                "Filter by type · linked-to · author. Cards with body preview.",
+            ]},
+            {"heading": "Memo canvas", "lines": [
+                "Drag-arrangeable canvas for sorting / clustering memos toward a theory (F5.3).",
+            ]},
+            {"heading": "Promote to code definition", "lines": [
+                "One-click promotion of a memo into a code's operational definition (F5.5).",
+            ]},
+        ],
+    )
+
+
+@app.get("/projects/{project_id}/ai", response_class=HTMLResponse)
+async def project_ai_page(request: Request, project_id: str) -> HTMLResponse:
+    return _render_subpage(
+        request, project_id,
+        page_kind="ai",
+        page_title="AI suggestions",
+        description="Locally-running model proposes codes / similar quotes / memo drafts. Never auto-applies.",
+        feature_refs=["F8.1", "F8.3", "F8.4", "F8.5", "F8.6", "F8.7", "F8.8", "F8.10"],
+        wireframe_blocks=[
+            {"heading": "Active model", "lines": [
+                "Show backend (ollama / llama.cpp / off), model name, status. Link to settings.",
+            ]},
+            {"heading": "Suggestion queue", "lines": [
+                "Pending whole-transcript review pass (F8.6) results · second-coder diff (F8.7) · per-span suggestions (F8.3, F8.4).",
+                "Each suggestion: accept / modify / reject. Provenance recorded either way (F9.6).",
+            ]},
+            {"heading": "AI-off gate", "lines": [
+                "F8.10 — AI suggestions disabled until the codebook has hand-coded shape (default ≥8 codes, ≥2 transcripts). Settings to override.",
+            ]},
+        ],
+    )
+
+
+@app.get("/projects/{project_id}/audit", response_class=HTMLResponse)
+async def project_audit_page(request: Request, project_id: str) -> HTMLResponse:
+    return _render_subpage(
+        request, project_id,
+        page_kind="audit",
+        page_title="Audit timeline",
+        description="Append-only event log: codes, applications, definitions, memos, AI invocations.",
+        feature_refs=["F9.1", "F9.2", "F9.4", "F9.6", "F9.7", "F9.8"],
+        wireframe_blocks=[
+            {"heading": "Timeline", "lines": [
+                "Chronological feed with event-type filter, actor filter, date range. Each row links to its target.",
+            ]},
+            {"heading": "Time-travel", "lines": [
+                "&quot;Show project as it was on 2026-04-12&quot; — read-only snapshot view (F9.8).",
+            ]},
+            {"heading": "Checkpoints", "lines": [
+                "Named project-wide checkpoints (F9.4). Restore (read-only).",
+            ]},
+            {"heading": "Export", "lines": [
+                "CSV · Markdown · RTF audit log for thesis appendices (F9.7).",
+            ]},
+        ],
+    )
+
+
+@app.get("/projects/{project_id}/settings", response_class=HTMLResponse)
+async def project_settings_page(request: Request, project_id: str) -> HTMLResponse:
+    return _render_subpage(
+        request, project_id,
+        page_kind="settings",
+        page_title="Project settings",
+        description="Methodology, attribute schema, codebook stage, AI gating, danger zone.",
+        feature_refs=["F1.1", "F2.4", "F3.2", "F8.10"],
+        wireframe_blocks=[
+            {"heading": "Methodology & sensitising concepts", "lines": [
+                "Editable. Methodology choice drives gerund-encouragement and other UI nudges.",
+            ]},
+            {"heading": "Source attribute schema", "lines": [
+                "User-defined columns on sources / participants (F3.2). Add / remove / reorder.",
+            ]},
+            {"heading": "Codebook stage", "lines": [
+                "Stage selector. Lock toggle (F2.4) — unlocking requires a methodological memo with reason.",
+            ]},
+            {"heading": "AI gating", "lines": [
+                "Override the F8.10 default (AI off until codebook has shape). Researcher discretion.",
+            ]},
+            {"heading": "Danger zone", "lines": [
+                "Delete project. Export REFI-QDA / QDPX (F6.4). Anonymised export (F6.7).",
+            ]},
+        ],
+    )
+
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "settings.html", {
+        "page_title": "Settings",
+        "subtitle": "Host preferences and credentials.",
+    })
+
+
 _README_PATH = ROOT / "README.md"
 _README_CACHE: dict[str, Any] = {"mtime": 0.0, "html": ""}
 
