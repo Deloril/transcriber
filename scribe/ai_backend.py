@@ -372,6 +372,83 @@ class EmbeddingResponse:
 
 
 @dataclass(frozen=True)
+class PullProgressEvent:
+    """One progress event from Ollama's ``/api/pull`` NDJSON stream.
+
+    Ollama emits events whose shape varies through the pull lifecycle:
+
+      * ``{"status": "pulling manifest"}``
+      * ``{"status": "pulling <digest>", "digest": "...", "total": N,
+         "completed": M}``  (repeated as bytes arrive)
+      * ``{"status": "verifying sha256 digest"}``
+      * ``{"status": "writing manifest"}``
+      * ``{"status": "removing any unused layers"}``
+      * ``{"status": "success"}``
+
+    Or, on failure, ``{"error": "..."}``. We canonicalise both into
+    one type.
+    """
+
+    status: str
+    digest: str = ""
+    total: int = 0
+    completed: int = 0
+    error: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def percent(self) -> float:
+        """0.0 – 100.0 for layer downloads; 0.0 for non-byte phases."""
+        if self.total <= 0:
+            return 0.0
+        return min(100.0, max(0.0, 100.0 * self.completed / self.total))
+
+    @property
+    def is_terminal_success(self) -> bool:
+        return self.status == "success" and not self.error
+
+    @property
+    def is_error(self) -> bool:
+        return bool(self.error) or self.status == "error"
+
+
+@dataclass(frozen=True)
+class PullSummary:
+    """Outcome of a complete ``pull_model`` call.
+
+    ``events`` is the raw ordered stream so callers (and the audit
+    log) can replay exactly what the daemon reported. ``success``
+    and ``error`` are the convenience flags for the common
+    "did it finish?" check.
+    """
+
+    model: str
+    provider: str
+    success: bool
+    error: str = ""
+    events: tuple[PullProgressEvent, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "provider": self.provider,
+            "success": self.success,
+            "error": self.error,
+            "events": [
+                {
+                    "status": e.status,
+                    "digest": e.digest,
+                    "total": e.total,
+                    "completed": e.completed,
+                    "error": e.error,
+                    "percent": e.percent,
+                }
+                for e in self.events
+            ],
+        }
+
+
+@dataclass(frozen=True)
 class BackendHealth:
     ok: bool
     provider: str
@@ -502,6 +579,29 @@ class ModelBackend(abc.ABC):
         *,
         transport: Transport = urllib_transport,
     ) -> EmbeddingResponse: ...
+
+    # ------------------------------------------------------------------ #
+    # Download manager (F8.11)
+    #
+    # Not every provider has a "pull this model into local storage"
+    # concept (llama.cpp wants a path to a GGUF file the user got
+    # themselves; transformers pulls from HF Hub via its own machinery).
+    # We give the ABC a default that raises ``BackendValidationError``
+    # so the abstract surface stays narrow and individual backends opt
+    # in. Ollama overrides; the others can grow their own when added.
+    # ------------------------------------------------------------------ #
+
+    def pull_model(  # pragma: no cover - default raises; tested via Ollama
+        self,
+        config: BackendConfig,
+        model: str,
+        *,
+        transport: Transport = urllib_transport,
+        progress_callback: "Callable[[PullProgressEvent], None] | None" = None,
+    ) -> "PullSummary":
+        raise BackendValidationError(
+            f"Backend {self.name!r} does not support pull_model"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -741,6 +841,90 @@ class OllamaBackend(ModelBackend):
             raw=dict(data),
         )
 
+    def pull_model(
+        self,
+        config: BackendConfig,
+        model: str,
+        *,
+        transport: Transport = urllib_transport,
+        progress_callback: Callable[[PullProgressEvent], None] | None = None,
+    ) -> PullSummary:
+        """Download a model via Ollama's ``/api/pull`` endpoint (F8.11).
+
+        Sends the request with ``stream: true`` so the daemon emits an
+        NDJSON event stream; the buffered transport returns the whole
+        body once the pull completes. ``progress_callback`` (if given)
+        is invoked for each parsed event in order.
+
+        Errors map cleanly:
+
+          * Daemon unreachable / 5xx → ``BackendUnavailable``.
+          * 4xx (e.g. unknown model name) → ``BackendValidationError``.
+          * Daemon emitted an ``{"error": "..."}`` event → returned in
+            ``PullSummary.error`` with ``success=False``. We *don't*
+            raise on a daemon-reported error because the caller often
+            wants to surface the partial event list to the UI.
+        """
+        if not model.strip():
+            raise BackendValidationError("pull_model: model is required")
+        if len(model) > MAX_MODEL_NAME_LEN:
+            raise BackendValidationError(
+                f"pull_model: model exceeds {MAX_MODEL_NAME_LEN} chars"
+            )
+        url = _join_url(config.base_url, "/api/pull")
+        payload = json.dumps({"model": model, "stream": True}).encode("utf-8")
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "application/x-ndjson",
+        }
+        for k, v in config.extra_headers:
+            headers[k] = v
+        # Pulls take *minutes* on slow links; reuse the long generate
+        # timeout rather than the short request timeout.
+        resp = transport(
+            "POST", url, headers, payload, config.generate_timeout_s
+        )
+        if resp.status >= 500:
+            raise BackendUnavailable(
+                f"POST {url} → HTTP {resp.status}: {resp.body[:500]!r}"
+            )
+        if resp.status >= 400:
+            raise BackendValidationError(
+                f"POST {url} → HTTP {resp.status}: {resp.body[:500]!r}"
+            )
+        events = parse_pull_stream(resp.body)
+        if progress_callback is not None:
+            for ev in events:
+                try:
+                    progress_callback(ev)
+                except Exception:  # noqa: BLE001
+                    # The callback is observability-only; never let a
+                    # buggy UI hook break a successful pull.
+                    pass
+        if not events:
+            return PullSummary(
+                model=model,
+                provider=self.name,
+                success=False,
+                error="pull returned no events",
+            )
+        last = events[-1]
+        # Find any error event in the stream (Ollama puts the error
+        # on the last line, but be defensive).
+        err = ""
+        for ev in events:
+            if ev.is_error:
+                err = ev.error or "pull failed"
+                break
+        success = (not err) and last.is_terminal_success
+        return PullSummary(
+            model=model,
+            provider=self.name,
+            success=success,
+            error=err if not success else "",
+            events=tuple(events),
+        )
+
     def embed(
         self,
         config: BackendConfig,
@@ -856,6 +1040,71 @@ def _validate_embedding_request(req: EmbeddingRequest) -> None:
                 f"EmbeddingRequest.inputs[{i}] exceeds "
                 f"{MAX_EMBED_INPUT_LEN} chars"
             )
+
+
+# --------------------------------------------------------------------------- #
+# Pull stream parsing (F8.11)
+#
+# Kept as standalone functions (not methods) so any future backend
+# wrapping a similar NDJSON pull endpoint can reuse them, and so tests
+# exercise the parser without spinning up a backend.
+# --------------------------------------------------------------------------- #
+
+
+def parse_pull_event(line: str) -> PullProgressEvent:
+    """Parse one NDJSON line from Ollama's ``/api/pull`` stream.
+
+    Empty lines are a programmer error — the streaming caller is
+    expected to filter them. Returns a ``PullProgressEvent`` with the
+    ``raw`` payload preserved.
+    """
+    if not line or not line.strip():
+        raise BackendError("parse_pull_event: empty line")
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError as e:
+        raise BackendError(f"pull event is not JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise BackendError(
+            f"pull event must be an object, got {type(data).__name__}"
+        )
+    err = str(data.get("error", "") or "")
+    if err:
+        return PullProgressEvent(
+            status=str(data.get("status", "error") or "error"),
+            error=err,
+            raw=dict(data),
+        )
+    total = int(data.get("total", 0) or 0)
+    completed = int(data.get("completed", 0) or 0)
+    return PullProgressEvent(
+        status=str(data.get("status", "") or ""),
+        digest=str(data.get("digest", "") or ""),
+        total=total,
+        completed=completed,
+        raw=dict(data),
+    )
+
+
+def parse_pull_stream(body: bytes | str) -> list[PullProgressEvent]:
+    """Parse the full NDJSON body from ``/api/pull`` into events.
+
+    Skips blank lines (the daemon sometimes emits them between
+    layers). Tolerant of a trailing newline. Order is preserved so
+    callers can find the terminal ``success`` / ``error`` event by
+    checking the last entry.
+    """
+    if isinstance(body, (bytes, bytearray)):
+        text = bytes(body).decode("utf-8", errors="replace")
+    else:
+        text = body
+    events: list[PullProgressEvent] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        events.append(parse_pull_event(line))
+    return events
 
 
 # --------------------------------------------------------------------------- #

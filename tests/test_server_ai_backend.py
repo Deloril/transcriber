@@ -51,6 +51,8 @@ def server_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(srv, "PROJECTS_DIR", projects_dir)
     # Reset transport override between tests.
     monkeypatch.setattr(srv, "_ai_backend_transport_override", None)
+    # Reset model-tiers snapshot override (F8.11) so tests don't leak.
+    monkeypatch.setattr(srv, "_model_tiers_snapshot_override", None)
 
     client = TestClient(srv.app)
     yield srv, client, tmp_path
@@ -368,3 +370,173 @@ class TestHeadersPersistence:
             (srv._projects_root() / pid / "project.json").read_text()
         )
         assert SETTING_AI_BACKEND_HEADERS not in on_disk["settings"]
+
+
+# --------------------------------------------------------------------------- #
+# /api/projects/{id}/ai/backend/pull (F8.11)
+# --------------------------------------------------------------------------- #
+
+
+class TestProjectAiBackendPullEndpoint:
+    OK_STREAM = (
+        b'{"status": "pulling manifest"}\n'
+        b'{"status": "pulling l1", "digest": "sha256:1", "total": 10, "completed": 10}\n'
+        b'{"status": "writing manifest"}\n'
+        b'{"status": "success"}\n'
+    )
+
+    def test_pull_success(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = _make_project(client)
+        transport = StubTransport(
+            {("POST", "/api/pull"): HTTPResponse(200, self.OK_STREAM)}
+        )
+        srv._ai_backend_transport_override = transport
+
+        r = client.post(
+            f"/api/projects/{pid}/ai/backend/pull",
+            json={"model": "llama3.2:3b"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["success"] is True
+        assert body["model"] == "llama3.2:3b"
+        assert body["error"] == ""
+        assert len(body["events"]) == 4
+        # Each event shape includes the keys the UI cares about.
+        for ev in body["events"]:
+            for key in ("status", "digest", "total", "completed", "error", "percent"):
+                assert key in ev
+
+    def test_pull_failure_returns_200_with_success_false(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = _make_project(client)
+        transport = StubTransport(
+            {("POST", "/api/pull"): HTTPResponse(
+                200,
+                b'{"status":"pulling manifest"}\n{"error":"model not found"}\n',
+            )}
+        )
+        srv._ai_backend_transport_override = transport
+
+        r = client.post(
+            f"/api/projects/{pid}/ai/backend/pull",
+            json={"model": "nope:99"},
+        )
+        # 200 — UI wants the per-event log even when the daemon errored.
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is False
+        assert "model not found" in body["error"]
+
+    def test_pull_unreachable_daemon_returns_502(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = _make_project(client)
+
+        from scribe.ai_backend import BackendUnavailable
+
+        def boom(*args, **kwargs):
+            raise BackendUnavailable("connection refused")
+
+        srv._ai_backend_transport_override = boom
+
+        r = client.post(
+            f"/api/projects/{pid}/ai/backend/pull",
+            json={"model": "x:1b"},
+        )
+        assert r.status_code == 502
+
+    def test_pull_missing_model_returns_400(self, server_env) -> None:
+        _srv, client, _ = server_env
+        pid = _make_project(client)
+
+        r = client.post(
+            f"/api/projects/{pid}/ai/backend/pull",
+            json={},
+        )
+        assert r.status_code == 400
+
+    def test_pull_invalid_json_returns_400(self, server_env) -> None:
+        _srv, client, _ = server_env
+        pid = _make_project(client)
+
+        r = client.post(
+            f"/api/projects/{pid}/ai/backend/pull",
+            content=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert r.status_code == 400
+
+    def test_pull_unknown_project_returns_404(self, server_env) -> None:
+        _srv, client, _ = server_env
+        r = client.post(
+            "/api/projects/" + ("a" * 12) + "/ai/backend/pull",
+            json={"model": "x:1b"},
+        )
+        assert r.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# /api/system/model-tiers (F8.11)
+# --------------------------------------------------------------------------- #
+
+
+class TestSystemModelTiersEndpoint:
+    def test_returns_three_tiers_with_recommendation(self, server_env) -> None:
+        srv, client, _ = server_env
+        from scribe.model_tiers import (
+            HardwareSnapshot,
+            KNOWN_TIER_IDS,
+            TIER_LARGE,
+        )
+
+        srv._model_tiers_snapshot_override = HardwareSnapshot(
+            gpu_backend="cuda",
+            gpu_name="Test GPU",
+            vram_gb=24.0,
+            system_ram_gb=64.0,
+            cpu_count=16,
+        )
+        try:
+            r = client.get("/api/system/model-tiers")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["recommended"] == TIER_LARGE
+            assert body["hardware"]["gpu_backend"] == "cuda"
+            assert body["hardware"]["vram_gb"] == 24.0
+            assert [t["id"] for t in body["tiers"]] == list(KNOWN_TIER_IDS)
+            for entry in body["tiers"]:
+                assert entry["fit"] in ("comfortable", "marginal", "infeasible")
+        finally:
+            srv._model_tiers_snapshot_override = None
+
+    def test_returns_small_recommendation_on_weak_box(self, server_env) -> None:
+        srv, client, _ = server_env
+        from scribe.model_tiers import HardwareSnapshot, TIER_SMALL
+
+        srv._model_tiers_snapshot_override = HardwareSnapshot(
+            gpu_backend="cpu",
+            gpu_name="",
+            vram_gb=0.0,
+            system_ram_gb=8.0,
+            cpu_count=4,
+        )
+        try:
+            r = client.get("/api/system/model-tiers")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["recommended"] == TIER_SMALL
+            assert body["hardware"]["gpu_backend"] == "cpu"
+        finally:
+            srv._model_tiers_snapshot_override = None
+
+    def test_endpoint_works_with_no_override(self, server_env) -> None:
+        # No override set — falls back to detect_hardware. Must return
+        # 200 with a known tier id, regardless of the host's hardware.
+        _srv, client, _ = server_env
+        r = client.get("/api/system/model-tiers")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["recommended"] in ("small", "mid", "large")
+        assert "hardware" in body
+        assert "tiers" in body

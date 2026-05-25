@@ -891,3 +891,301 @@ class TestExtraHeaders:
         c = BackendConfig.new(extra_headers={"X-Token": "abc"})
         OllamaBackend().health_check(c, transport=transport)
         assert transport.calls[0]["headers"].get("X-Token") == "abc"
+
+
+# --------------------------------------------------------------------------- #
+# Pull stream parsing (F8.11)
+# --------------------------------------------------------------------------- #
+
+
+from scribe.ai_backend import (  # noqa: E402  -- re-imported for grouping
+    PullProgressEvent,
+    PullSummary,
+    parse_pull_event,
+    parse_pull_stream,
+)
+
+
+class TestParsePullEvent:
+    def test_pulling_manifest_event(self) -> None:
+        ev = parse_pull_event('{"status": "pulling manifest"}')
+        assert ev.status == "pulling manifest"
+        assert ev.total == 0
+        assert ev.completed == 0
+        assert ev.error == ""
+        assert ev.is_terminal_success is False
+        assert ev.is_error is False
+
+    def test_layer_progress_event(self) -> None:
+        ev = parse_pull_event(
+            '{"status":"pulling abc","digest":"sha256:abc",'
+            '"total":2048,"completed":1024}'
+        )
+        assert ev.status == "pulling abc"
+        assert ev.digest == "sha256:abc"
+        assert ev.total == 2048
+        assert ev.completed == 1024
+        assert ev.percent == 50.0
+
+    def test_terminal_success_event(self) -> None:
+        ev = parse_pull_event('{"status": "success"}')
+        assert ev.is_terminal_success is True
+        assert ev.is_error is False
+
+    def test_error_event(self) -> None:
+        ev = parse_pull_event('{"error": "manifest not found"}')
+        assert ev.is_error is True
+        assert ev.error == "manifest not found"
+        # Falls back to "error" status when none is supplied.
+        assert ev.status == "error"
+
+    def test_percent_zero_when_total_unknown(self) -> None:
+        ev = parse_pull_event('{"status": "verifying"}')
+        assert ev.percent == 0.0
+
+    def test_percent_clamped_to_100(self) -> None:
+        # Defensive: if Ollama ever reports completed > total we clamp.
+        ev = parse_pull_event(
+            '{"status":"x","total":100,"completed":150}'
+        )
+        assert ev.percent == 100.0
+
+    def test_empty_line_rejected(self) -> None:
+        with pytest.raises(BackendError):
+            parse_pull_event("")
+        with pytest.raises(BackendError):
+            parse_pull_event("   \n")
+
+    def test_non_json_rejected(self) -> None:
+        with pytest.raises(BackendError):
+            parse_pull_event("not json")
+
+    def test_non_object_rejected(self) -> None:
+        with pytest.raises(BackendError):
+            parse_pull_event("[1, 2]")
+
+
+class TestParsePullStream:
+    def test_full_stream_round_trip(self) -> None:
+        body = (
+            b'{"status": "pulling manifest"}\n'
+            b'{"status": "pulling l1", "digest": "sha256:1", "total": 100, "completed": 50}\n'
+            b'{"status": "pulling l1", "digest": "sha256:1", "total": 100, "completed": 100}\n'
+            b'{"status": "verifying sha256 digest"}\n'
+            b'{"status": "writing manifest"}\n'
+            b'{"status": "success"}\n'
+        )
+        events = parse_pull_stream(body)
+        assert len(events) == 6
+        assert events[0].status == "pulling manifest"
+        assert events[-1].is_terminal_success
+        # Bytes vs str both accepted.
+        events2 = parse_pull_stream(body.decode("utf-8"))
+        assert [e.status for e in events] == [e.status for e in events2]
+
+    def test_blank_lines_skipped(self) -> None:
+        body = b'\n{"status":"a"}\n\n\n{"status":"b"}\n'
+        events = parse_pull_stream(body)
+        assert [e.status for e in events] == ["a", "b"]
+
+    def test_empty_body_returns_empty_list(self) -> None:
+        assert parse_pull_stream(b"") == []
+        assert parse_pull_stream("\n\n  \n") == []
+
+    def test_error_inside_stream_preserved(self) -> None:
+        body = (
+            b'{"status": "pulling manifest"}\n'
+            b'{"error": "model not found"}\n'
+        )
+        events = parse_pull_stream(body)
+        assert len(events) == 2
+        assert events[1].is_error
+        assert events[1].error == "model not found"
+
+
+# --------------------------------------------------------------------------- #
+# OllamaBackend.pull_model (F8.11)
+# --------------------------------------------------------------------------- #
+
+
+class TestOllamaPullModel:
+    def _ok_stream(self) -> bytes:
+        return (
+            b'{"status": "pulling manifest"}\n'
+            b'{"status": "pulling l1", "digest": "sha256:1", "total": 10, "completed": 10}\n'
+            b'{"status": "writing manifest"}\n'
+            b'{"status": "success"}\n'
+        )
+
+    def test_happy_path_returns_success_summary(self) -> None:
+        body = self._ok_stream()
+        transport = StubTransport({("POST", "/api/pull"): HTTPResponse(200, body)})
+        c = BackendConfig.new()
+        summary = OllamaBackend().pull_model(c, "llama3.2:3b", transport=transport)
+        assert summary.success is True
+        assert summary.error == ""
+        assert summary.model == "llama3.2:3b"
+        assert summary.provider == PROVIDER_OLLAMA
+        assert len(summary.events) == 4
+        # Body contains the model name + stream flag.
+        sent = json.loads(transport.calls[0]["body"])
+        assert sent == {"model": "llama3.2:3b", "stream": True}
+        # Long timeout used (generate_timeout, not request_timeout).
+        assert transport.calls[0]["timeout_s"] == c.generate_timeout_s
+
+    def test_progress_callback_invoked_per_event(self) -> None:
+        body = self._ok_stream()
+        transport = StubTransport({("POST", "/api/pull"): HTTPResponse(200, body)})
+        c = BackendConfig.new()
+        seen: list[str] = []
+        OllamaBackend().pull_model(
+            c,
+            "llama3.2:3b",
+            transport=transport,
+            progress_callback=lambda ev: seen.append(ev.status),
+        )
+        assert seen == [
+            "pulling manifest",
+            "pulling l1",
+            "writing manifest",
+            "success",
+        ]
+
+    def test_progress_callback_exception_is_swallowed(self) -> None:
+        body = self._ok_stream()
+        transport = StubTransport({("POST", "/api/pull"): HTTPResponse(200, body)})
+        c = BackendConfig.new()
+
+        def boom(_ev: PullProgressEvent) -> None:
+            raise RuntimeError("UI bug")
+
+        # Doesn't propagate.
+        summary = OllamaBackend().pull_model(
+            c, "x:1b", transport=transport, progress_callback=boom
+        )
+        assert summary.success is True
+
+    def test_daemon_error_event_yields_failed_summary(self) -> None:
+        body = (
+            b'{"status": "pulling manifest"}\n'
+            b'{"error": "model not found"}\n'
+        )
+        transport = StubTransport({("POST", "/api/pull"): HTTPResponse(200, body)})
+        summary = OllamaBackend().pull_model(
+            BackendConfig.new(), "nope:99", transport=transport
+        )
+        assert summary.success is False
+        assert "model not found" in summary.error
+        assert len(summary.events) == 2
+
+    def test_empty_stream_yields_failed_summary(self) -> None:
+        transport = StubTransport({("POST", "/api/pull"): HTTPResponse(200, b"")})
+        summary = OllamaBackend().pull_model(
+            BackendConfig.new(), "x:1b", transport=transport
+        )
+        assert summary.success is False
+        assert "no events" in summary.error
+
+    def test_4xx_raises_validation_error(self) -> None:
+        transport = StubTransport(
+            {("POST", "/api/pull"): HTTPResponse(404, b"not found")}
+        )
+        with pytest.raises(BackendValidationError):
+            OllamaBackend().pull_model(
+                BackendConfig.new(), "missing:1b", transport=transport
+            )
+
+    def test_5xx_raises_unavailable(self) -> None:
+        transport = StubTransport(
+            {("POST", "/api/pull"): HTTPResponse(500, b"boom")}
+        )
+        with pytest.raises(BackendUnavailable):
+            OllamaBackend().pull_model(
+                BackendConfig.new(), "x:1b", transport=transport
+            )
+
+    def test_empty_model_name_rejected(self) -> None:
+        transport = StubTransport({})
+        with pytest.raises(BackendValidationError):
+            OllamaBackend().pull_model(
+                BackendConfig.new(), "", transport=transport
+            )
+
+    def test_overlong_model_name_rejected(self) -> None:
+        transport = StubTransport({})
+        with pytest.raises(BackendValidationError):
+            OllamaBackend().pull_model(
+                BackendConfig.new(),
+                "x" * (MAX_MODEL_NAME_LEN + 1),
+                transport=transport,
+            )
+
+    def test_extra_headers_attached_to_pull(self) -> None:
+        body = self._ok_stream()
+        transport = StubTransport({("POST", "/api/pull"): HTTPResponse(200, body)})
+        c = BackendConfig.new(extra_headers={"X-Token": "abc"})
+        OllamaBackend().pull_model(c, "x:1b", transport=transport)
+        assert transport.calls[0]["headers"].get("X-Token") == "abc"
+
+
+# --------------------------------------------------------------------------- #
+# ModelBackend ABC default
+# --------------------------------------------------------------------------- #
+
+
+class TestPullModelDefault:
+    def test_abc_default_raises_validation_error(self) -> None:
+        # Subclass that doesn't override pull_model should report a
+        # clean BackendValidationError, not NotImplementedError.
+        class FakeBackend(ModelBackend):
+            name = "fake"
+
+            def health_check(self, config, *, transport=urllib_transport):
+                return BackendHealth(
+                    ok=True, provider="fake", base_url=config.base_url
+                )
+
+            def list_models(self, config, *, transport=urllib_transport):
+                return []
+
+            def generate(self, config, request, *, transport=urllib_transport):
+                raise NotImplementedError
+
+            def embed(self, config, request, *, transport=urllib_transport):
+                raise NotImplementedError
+
+        with pytest.raises(BackendValidationError):
+            FakeBackend().pull_model(
+                BackendConfig.new(), "x:1b", transport=lambda *a, **k: None
+            )
+
+
+# --------------------------------------------------------------------------- #
+# PullSummary serialisation
+# --------------------------------------------------------------------------- #
+
+
+class TestPullSummaryToDict:
+    def test_to_dict_includes_events_with_percent(self) -> None:
+        events = (
+            PullProgressEvent(status="pulling manifest"),
+            PullProgressEvent(
+                status="pulling l1",
+                digest="sha256:1",
+                total=100,
+                completed=50,
+            ),
+            PullProgressEvent(status="success"),
+        )
+        s = PullSummary(
+            model="m",
+            provider=PROVIDER_OLLAMA,
+            success=True,
+            events=events,
+        )
+        d = s.to_dict()
+        assert d["model"] == "m"
+        assert d["success"] is True
+        assert len(d["events"]) == 3
+        assert d["events"][1]["percent"] == 50.0
+        assert d["events"][1]["digest"] == "sha256:1"

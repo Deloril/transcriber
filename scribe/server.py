@@ -1732,10 +1732,89 @@ async def get_project_ai_backend_models_endpoint(
     return JSONResponse({"models": [m.to_dict() for m in models]})
 
 
+@app.post("/api/projects/{project_id}/ai/backend/pull")
+async def post_project_ai_backend_pull_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    """Pull a model into the configured backend's local store (F8.11).
+
+    Body shape: ``{"model": "<name>"}``. The backend's ``pull_model``
+    is invoked synchronously; callers get the full event log in the
+    response so the UI can show what each phase took even though we
+    don't stream progressively yet (deferred to a later iteration —
+    the parser already handles partial streams).
+    """
+    _check_project_id(project_id)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Expected JSON object")
+    model = str(payload.get("model", "") or "").strip()
+    if not model:
+        raise HTTPException(400, "model is required")
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            cfg = _ai_backend.load_backend_config(project)
+            backend = _ai_backend.backend_for_config(cfg)
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+    transport = _ai_backend_transport_override or _ai_backend.urllib_transport
+    try:
+        summary = backend.pull_model(cfg, model, transport=transport)
+    except _ai_backend.BackendUnavailable as e:
+        raise HTTPException(502, f"Backend unavailable: {e}")
+    except _ai_backend.BackendValidationError as e:
+        raise HTTPException(400, str(e))
+    except _ai_backend.BackendError as e:
+        raise HTTPException(500, str(e))
+    body = summary.to_dict()
+    # 200 even when the daemon reported a model-side error: the caller
+    # wants the per-event log to render. ``success`` flag distinguishes.
+    return JSONResponse(body)
+
+
 # Test hook: when set, the AI backend endpoints use this transport
 # instead of ``urllib_transport``. Tests assign a stub here; production
 # leaves it ``None``.
 _ai_backend_transport_override: _ai_backend.Transport | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Model-tier picker (F8.11)
+#
+# The UI calls this endpoint *without a project context*: the tier
+# picker reflects what hardware Scribe can see, which is the same
+# regardless of which project happens to be open. Returns the
+# canonical tier list + a per-tier fit verdict + the recommended
+# tier id.
+# --------------------------------------------------------------------------- #
+
+
+from . import model_tiers as _model_tiers  # noqa: E402
+
+
+@app.get("/api/system/model-tiers")
+async def get_system_model_tiers_endpoint() -> JSONResponse:
+    """Return tier definitions, hardware snapshot, and recommendation.
+
+    Pure read; no project, no AI invocation. The hardware snapshot can
+    be overridden in tests via ``_model_tiers_snapshot_override`` so
+    we can pin specific VRAM / RAM combinations without touching torch.
+    """
+    snapshot = _model_tiers_snapshot_override or _model_tiers.detect_hardware()
+    return JSONResponse(_model_tiers.summarise(snapshot))
+
+
+# Test hook: when set, the model-tiers endpoint uses this snapshot
+# instead of probing real hardware. Tests assign a stub; production
+# leaves it ``None``.
+_model_tiers_snapshot_override: "_model_tiers.HardwareSnapshot | None" = None
 
 
 # --------------------------------------------------------------------------- #
