@@ -78,6 +78,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from .ai_provenance import AIProvenance
 from .codes import CODE_ID_RE
 from .code_versions import CODE_VERSION_ID_RE
 from .coders import CODER_ID_RE
@@ -253,6 +254,12 @@ class Application:
     end_char_offset: int | None = None
     confidence: float | None = None
     provenance: dict[str, str] = field(default_factory=dict)
+    # F8.9: structured AI provenance. Optional — manual applications
+    # leave it ``None``. When set, ``provenance['source']`` should be
+    # one of the ``ai_*`` values for consistency with the legacy dict;
+    # the helper :meth:`AIProvenance.to_application_provenance_dict`
+    # produces an aligned dict.
+    ai_provenance: "AIProvenance | None" = None
     note: str = ""
     created_at: str = ""
     modified_at: str = ""
@@ -276,6 +283,7 @@ class Application:
         end_char_offset: int | None = None,
         confidence: float | None = None,
         provenance: dict[str, Any] | None = None,
+        ai_provenance: "AIProvenance | dict[str, Any] | None" = None,
         note: str = "",
         application_id: str | None = None,
         now: str | None = None,
@@ -293,6 +301,7 @@ class Application:
             raise ProjectValidationError(
                 "provenance must be an object of string→string"
             )
+        coerced_ai_prov = _coerce_ai_provenance(ai_provenance)
         a = cls(
             id=application_id or new_application_id(),
             project_id=project_id,
@@ -306,6 +315,7 @@ class Application:
             end_char_offset=end_char_offset,
             confidence=confidence,
             provenance=coerced_provenance,
+            ai_provenance=coerced_ai_prov,
             note=note,
             created_at=ts,
             modified_at=ts,
@@ -318,7 +328,15 @@ class Application:
     # ------------------------------------------------------------------ #
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        # ``asdict`` recurses into nested dataclasses, but AIProvenance
+        # has its own to_dict that omits stray internal fields and keeps
+        # field order canonical — call it explicitly instead.
+        d = asdict(self)
+        if self.ai_provenance is None:
+            d["ai_provenance"] = None
+        else:
+            d["ai_provenance"] = self.ai_provenance.to_dict()
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Application":
@@ -362,6 +380,7 @@ class Application:
                 str(k): str(v)
                 for k, v in (d.get("provenance") or {}).items()
             },
+            ai_provenance=_coerce_ai_provenance(d.get("ai_provenance")),
             note=str(d.get("note", "") or ""),
             created_at=str(d.get("created_at", "") or ""),
             modified_at=str(d.get("modified_at", "") or ""),
@@ -416,6 +435,8 @@ class Application:
                     "provenance must be an object of string→string"
                 )
             self.provenance = {str(k): str(v) for k, v in prov.items()}
+        if "ai_provenance" in patch:
+            self.ai_provenance = _coerce_ai_provenance(patch["ai_provenance"])
         if "note" in patch:
             self.note = str(patch["note"] or "")
 
@@ -569,6 +590,14 @@ class Application:
                 )
         self.provenance = cleaned_prov
 
+        # Structured AI provenance (F8.9): optional dataclass.
+        if self.ai_provenance is not None:
+            if not isinstance(self.ai_provenance, AIProvenance):
+                raise ProjectValidationError(
+                    "ai_provenance must be an AIProvenance instance or null"
+                )
+            self.ai_provenance.validate()
+
         if len(self.note) > MAX_NOTE_LEN:
             raise ProjectValidationError(
                 f"note must be ≤ {MAX_NOTE_LEN} chars"
@@ -585,6 +614,7 @@ _ALLOWED_PATCH_KEYS = {
     "end_char_offset",
     "confidence",
     "provenance",
+    "ai_provenance",
     "note",
 }
 _IGNORED_PATCH_KEYS = {
@@ -602,6 +632,28 @@ _IGNORED_PATCH_KEYS = {
 # --------------------------------------------------------------------------- #
 # Optional-numeric coercion helpers
 # --------------------------------------------------------------------------- #
+
+
+def _coerce_ai_provenance(
+    v: "AIProvenance | dict[str, Any] | None",
+) -> "AIProvenance | None":
+    """Coerce ``v`` into an :class:`AIProvenance` or ``None``.
+
+    Accepts the dataclass (returned as-is after validation), a dict
+    (passed to ``AIProvenance.from_dict``), or ``None`` / ``""``.
+    Anything else is a clean :class:`ProjectValidationError`.
+    """
+    if v is None or v == "":
+        return None
+    if isinstance(v, AIProvenance):
+        v.validate()
+        return v
+    if isinstance(v, dict):
+        return AIProvenance.from_dict(v)
+    raise ProjectValidationError(
+        "ai_provenance must be an AIProvenance, an object, or null; got "
+        f"{type(v).__name__}"
+    )
 
 
 def _optional_int(v: Any, field_name: str) -> int | None:
