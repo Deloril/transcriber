@@ -12,6 +12,7 @@ This document captures the next-phase feature backlog. It's a working planning d
 - 🚧 **Test infrastructure** (in progress — pytest + Vitest set up; per-module test files still being written)
 - ⬜ **AMD / ROCm GPU support** (this doc)
 - ⬜ **Transcription management** (this doc)
+- ⬜ **Editor UX polish** (this doc)
 - ⬜ **Academic coding engine** (this doc)
 
 ---
@@ -109,6 +110,21 @@ Today, every transcription job creates `outputs/<job_id>/` and `uploads/<job_id>
 
 - **Phase A — Library + delete source** (F10.1, F10.2). Needs only persistence + UI work; no parsing.
 - **Phase B — Import** (F10.3). Builds on F10.2's `media_discarded` flag for the no-media path.
+
+---
+
+# Feature: Editor UX polish
+
+The transcript editor today hides every segment-level action behind the `⋮` dropdown. Two of those actions — **split at cursor** and **add annotation** — are used so frequently during review that hunting for them in a menu is friction. Promote them to inline buttons; leave the rest in the dropdown.
+
+## Backlog
+
+- **F11.1** Per-line inline action buttons for the two high-frequency segment ops:
+  - **Split at cursor** (✂) — splits the segment at the current caret position. Same behaviour as `Shift+Enter` and the `⋮ → Split at cursor` menu item; this just gives the action visible affordance.
+  - **Add annotation** (＋) — opens the annotation modal with the current segment pre-selected, same as `⋮ → Add annotation`.
+  - Visible on hover (and when the segment is focused), keyboard-accessible, paired with the existing `⋮` button. The dropdown keeps merge/insert/reassign/delete to avoid cluttering the row with 7 buttons.
+  - No new keyboard shortcuts; the existing `Shift+Enter` (split) and `?` shortcut help still apply.
+  - Implemented in `scribe/templates/editor.html` — adjusts the existing `.seg-menu-btn` rendering to add two siblings, reuses `splitAtCursor()` and `openNoteFor()` directly. Vitest only if extracting helpers; otherwise just a small edit.
 
 ---
 
