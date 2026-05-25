@@ -1,6 +1,8 @@
 whisperx==3.4.3
-torch>=2.2.0
-torchaudio>=2.2.0
+# torchaudio.AudioMetaData was removed in 2.9; whisperx 3.4.3 still imports it.
+# Pin both torch and torchaudio below 2.9 until whisperx ships a fix.
+torch>=2.2.0,<2.9
+torchaudio>=2.2.0,<2.9
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12
