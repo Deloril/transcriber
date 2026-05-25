@@ -1215,6 +1215,76 @@ async def promote_memo_to_code_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Codebook export (F6.1)
+#
+# Surface the F2.6 pure exporters (CSV / Markdown / RTF) as a download
+# endpoint. F2.6 left the disk-write helper / HTTP surface explicitly
+# deferred to F6.1; F6.5 will own the REFI-QDA XML button (kept off
+# this endpoint to keep the format set on this URL stable).
+#
+# Empty codebooks are valid input — they produce a header-only CSV /
+# placeholder Markdown / minimal RTF, never a 404. The browser
+# downloads the file with a slugified filename derived from the
+# project name (``my-pilot-codebook.csv``), per F6.1's "researcher
+# pastes this into their thesis appendix" use case.
+# --------------------------------------------------------------------------- #
+
+from . import codes as _codes  # noqa: E402
+from . import codebook_export as _codebook_export  # noqa: E402
+
+
+@app.get("/api/projects/{project_id}/codebook/export")
+async def export_codebook_endpoint(
+    project_id: str, format: str = "csv"
+) -> Response:
+    """Download the project's codebook in CSV / Markdown / RTF (F6.1).
+
+    Query string ``format``:
+
+    * ``csv`` — RFC-4180 CSV (default).
+    * ``markdown`` — structured CommonMark; alias ``md``.
+    * ``rtf`` — minimal RTF 1.x (Word, LibreOffice, Pages all open
+      it natively); aliases ``word`` / ``doc`` / ``docx``.
+
+    Headers:
+
+    * ``Content-Type`` matches the format (charset=utf-8 for CSV /
+      Markdown).
+    * ``Content-Disposition: attachment; filename="<slug>-codebook.<ext>"``
+      so browsers prompt a save rather than rendering inline.
+
+    Status codes: ``404`` if the project is missing; ``400`` for an
+    unrecognised format; ``200`` otherwise (including empty codebooks).
+    """
+    _check_project_id(project_id)
+    try:
+        fmt = _codebook_export.normalise_format(format)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        codes = _codes.list_codes(_projects_root(), project_id)
+    text = _codebook_export.render_codebook(fmt, codes, project=project)
+    spec = _codebook_export.EXPORT_FORMATS[fmt]
+    filename = _codebook_export.slugify_codebook_filename(project, fmt)
+    headers = {
+        # Quote the filename so spaces / non-ASCII never break the
+        # header. We slugify to ASCII upstream, so the simple quoted
+        # form is sufficient — no need for RFC 5987 ``filename*=``
+        # extension.
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(
+        content=text,
+        media_type=spec.media_type,
+        headers=headers,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 

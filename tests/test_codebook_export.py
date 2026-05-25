@@ -617,3 +617,337 @@ class TestResolveSafeParents:
         b = _code(code_id=b_id, parent_code_id=a_id)
         result = _resolve_safe_parents([a, b], {a_id: a, b_id: b})
         assert result == {a_id: None, b_id: None}
+
+
+# --------------------------------------------------------------------------- #
+# F6.1: format registry + slug + render dispatch + atomic disk write
+# --------------------------------------------------------------------------- #
+
+
+from pathlib import Path
+
+from scribe.codebook_export import (
+    EXPORT_FORMAT_CSV,
+    EXPORT_FORMAT_MARKDOWN,
+    EXPORT_FORMAT_RTF,
+    EXPORT_FORMATS,
+    FormatSpec,
+    normalise_format,
+    render_codebook,
+    slugify_codebook_filename,
+    write_codebook,
+)
+
+
+class TestExportFormatsRegistry:
+    """The ``EXPORT_FORMATS`` table is part of the F6.1 contract.
+
+    UI buttons, the HTTP endpoint, and the CLI all read from it; a
+    silent change to keys / extensions / media types breaks all three.
+    """
+
+    def test_registry_keys_are_canonical(self) -> None:
+        assert set(EXPORT_FORMATS.keys()) == {
+            EXPORT_FORMAT_CSV,
+            EXPORT_FORMAT_MARKDOWN,
+            EXPORT_FORMAT_RTF,
+        }
+
+    def test_csv_spec(self) -> None:
+        spec = EXPORT_FORMATS[EXPORT_FORMAT_CSV]
+        assert isinstance(spec, FormatSpec)
+        assert spec.key == "csv"
+        assert spec.extension == ".csv"
+        assert spec.media_type.startswith("text/csv")
+        assert "charset=utf-8" in spec.media_type
+        assert spec.label  # human label for UI
+
+    def test_markdown_spec(self) -> None:
+        spec = EXPORT_FORMATS[EXPORT_FORMAT_MARKDOWN]
+        assert spec.extension == ".md"
+        assert spec.media_type.startswith("text/markdown")
+        assert "charset=utf-8" in spec.media_type
+
+    def test_rtf_spec(self) -> None:
+        spec = EXPORT_FORMATS[EXPORT_FORMAT_RTF]
+        assert spec.extension == ".rtf"
+        # IETF practice + MS guidance is application/rtf, not text/rtf.
+        assert spec.media_type == "application/rtf"
+
+    def test_refi_qda_is_not_in_f6_1_registry(self) -> None:
+        # F6.5 owns the REFI-QDA XML button; we keep it off the F6.1
+        # surface so adding QDPX-specific metadata (UserCodes etc)
+        # later doesn't churn the codebook-only endpoint.
+        assert "refi-qda" not in EXPORT_FORMATS
+        assert "xml" not in EXPORT_FORMATS
+
+    def test_format_specs_are_immutable(self) -> None:
+        # frozen=True dataclasses raise on attribute assignment so the
+        # registry stays a real source of truth.
+        spec = EXPORT_FORMATS[EXPORT_FORMAT_CSV]
+        with pytest.raises(Exception):
+            spec.extension = ".tsv"  # type: ignore[misc]
+
+
+class TestNormaliseFormat:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("csv", "csv"),
+            ("CSV", "csv"),
+            (" Csv ", "csv"),
+            ("markdown", "markdown"),
+            ("MD", "markdown"),
+            ("md", "markdown"),
+            ("rtf", "rtf"),
+            ("word", "rtf"),
+            ("Word", "rtf"),
+            ("doc", "rtf"),
+            ("docx", "rtf"),
+        ],
+    )
+    def test_canonical_and_aliases(self, raw: str, expected: str) -> None:
+        assert normalise_format(raw) == expected
+
+    def test_none_raises(self) -> None:
+        with pytest.raises(ValueError):
+            normalise_format(None)
+
+    def test_empty_raises(self) -> None:
+        with pytest.raises(ValueError):
+            normalise_format("")
+
+    def test_unknown_raises_with_actionable_message(self) -> None:
+        with pytest.raises(ValueError) as ei:
+            normalise_format("yaml")
+        # The error message lists the valid formats so the user can fix it.
+        msg = str(ei.value)
+        assert "csv" in msg
+        assert "markdown" in msg
+        assert "rtf" in msg
+
+    def test_xml_alias_not_smuggled_in(self) -> None:
+        # We deliberately don't accept ``xml`` here — that's F6.5's
+        # surface, and the F6.1 endpoint shouldn't ever return XML.
+        with pytest.raises(ValueError):
+            normalise_format("xml")
+        with pytest.raises(ValueError):
+            normalise_format("refi-qda")
+
+
+class TestRenderCodebook:
+    def test_csv_dispatches_to_to_csv(self) -> None:
+        c = _code()
+        assert render_codebook("csv", [c]) == to_csv([c])
+
+    def test_markdown_dispatches_with_project(self) -> None:
+        c = _code()
+        p = _project(name="Pilot")
+        assert (
+            render_codebook("markdown", [c], project=p)
+            == to_markdown([c], project=p)
+        )
+
+    def test_rtf_dispatches_with_project(self) -> None:
+        c = _code()
+        p = _project(name="Pilot")
+        assert (
+            render_codebook("rtf", [c], project=p)
+            == to_rtf([c], project=p)
+        )
+
+    def test_md_alias(self) -> None:
+        c = _code()
+        out_md = render_codebook("md", [c])
+        out_markdown = render_codebook("markdown", [c])
+        assert out_md == out_markdown
+
+    def test_word_alias(self) -> None:
+        c = _code()
+        out_word = render_codebook("word", [c])
+        out_rtf = render_codebook("rtf", [c])
+        assert out_word == out_rtf
+
+    def test_csv_ignores_project_header(self) -> None:
+        # CSV is a contract; the project must not bleed into the
+        # column shape, even if a header sneaks past a refactor.
+        c = _code()
+        with_proj = render_codebook("csv", [c], project=_project())
+        without = render_codebook("csv", [c], project=None)
+        assert with_proj == without
+
+    def test_empty_codebook_csv(self) -> None:
+        # Header-only CSV is a valid empty-codebook export.
+        out = render_codebook("csv", [])
+        assert out == to_csv([])
+        # First row is the header; sanity check it's non-empty.
+        assert "id" in out.splitlines()[0]
+
+    def test_empty_codebook_markdown(self) -> None:
+        out = render_codebook("markdown", [])
+        assert "_(empty codebook)_" in out
+
+    def test_unknown_format_raises_value_error(self) -> None:
+        with pytest.raises(ValueError):
+            render_codebook("yaml", [])
+
+
+class TestSlugifyCodebookFilename:
+    def test_no_project_falls_back_to_codebook(self) -> None:
+        assert slugify_codebook_filename(None, "csv") == "codebook.csv"
+        assert slugify_codebook_filename(None, "markdown") == "codebook.md"
+        assert slugify_codebook_filename(None, "rtf") == "codebook.rtf"
+
+    def test_simple_name(self) -> None:
+        p = _project(name="Pilot")
+        assert (
+            slugify_codebook_filename(p, "csv") == "pilot-codebook.csv"
+        )
+
+    def test_spaces_become_dashes(self) -> None:
+        p = _project(name="Living with chronic illness")
+        assert (
+            slugify_codebook_filename(p, "csv")
+            == "living-with-chronic-illness-codebook.csv"
+        )
+
+    def test_punctuation_stripped(self) -> None:
+        p = _project(name="Pilot — Phase 1!")
+        assert (
+            slugify_codebook_filename(p, "md")
+            == "pilot-phase-1-codebook.md"
+        )
+
+    def test_diacritics_downgraded_to_ascii(self) -> None:
+        # NFKD-normalise + drop combining marks → "Café" → "cafe".
+        p = _project(name="Café études")
+        assert (
+            slugify_codebook_filename(p, "csv")
+            == "cafe-etudes-codebook.csv"
+        )
+
+    def test_non_ascii_only_falls_back_to_codebook(self) -> None:
+        # If literally every char drops out, slug is empty and we use
+        # the unprefixed default. (Keeps the URL printable.)
+        p = _project(name="日本語")
+        assert slugify_codebook_filename(p, "csv") == "codebook.csv"
+
+    def test_blank_name_falls_back(self) -> None:
+        # Project.new requires a name, so we can't construct one with
+        # an empty name. Pass a stub-equivalent via ``name`` patch.
+        p = _project(name="Pilot")
+        p.name = "   "
+        assert slugify_codebook_filename(p, "csv") == "codebook.csv"
+
+    def test_long_name_truncated(self) -> None:
+        # Project.new caps name at 200 chars; pick a length above the
+        # 80-char slug bound but below the project-name validator.
+        p = _project(name="x" * 150)
+        out = slugify_codebook_filename(p, "csv")
+        # Suffix is preserved; the slug body alone is bounded.
+        assert out.endswith("-codebook.csv")
+        # The slug portion is at most _FILENAME_SLUG_MAX (80) chars.
+        slug = out.removesuffix("-codebook.csv")
+        assert len(slug) <= 80
+        assert slug == "x" * 80
+
+    def test_extension_matches_format(self) -> None:
+        p = _project(name="P")
+        assert slugify_codebook_filename(p, "csv").endswith(".csv")
+        assert slugify_codebook_filename(p, "markdown").endswith(".md")
+        assert slugify_codebook_filename(p, "rtf").endswith(".rtf")
+
+    def test_word_alias_routes_to_rtf_extension(self) -> None:
+        p = _project(name="P")
+        assert slugify_codebook_filename(p, "word").endswith(".rtf")
+
+    def test_unknown_format_raises(self) -> None:
+        p = _project(name="P")
+        with pytest.raises(ValueError):
+            slugify_codebook_filename(p, "yaml")
+
+
+class TestWriteCodebook:
+    def test_writes_csv_to_disk(self, tmp_path: Path) -> None:
+        c = _code()
+        out = tmp_path / "out.csv"
+        result = write_codebook(out, "csv", [c])
+        assert result == out
+        assert out.exists()
+        # Read bytes to assert the exact RFC-4180 ``\r\n`` line endings
+        # survive the round-trip — text mode would translate them.
+        body = out.read_bytes().decode("utf-8")
+        assert body == to_csv([c])
+        assert b"\r\n" in out.read_bytes()
+
+    def test_writes_markdown_with_project(self, tmp_path: Path) -> None:
+        c = _code()
+        p = _project(name="Pilot")
+        out = tmp_path / "out.md"
+        write_codebook(out, "markdown", [c], project=p)
+        text = out.read_text(encoding="utf-8")
+        assert text == to_markdown([c], project=p)
+
+    def test_writes_rtf(self, tmp_path: Path) -> None:
+        c = _code()
+        out = tmp_path / "out.rtf"
+        write_codebook(out, "rtf", [c])
+        # RTF preamble.
+        assert out.read_text(encoding="utf-8").startswith(r"{\rtf1")
+
+    def test_unicode_round_trip(self, tmp_path: Path) -> None:
+        c = _code(name="Días buenos", definition="Buenos días.")
+        out = tmp_path / "out.md"
+        write_codebook(out, "markdown", [c])
+        text = out.read_text(encoding="utf-8")
+        assert "Días buenos" in text
+
+    def test_creates_parent_directories(self, tmp_path: Path) -> None:
+        c = _code()
+        out = tmp_path / "nested" / "deep" / "out.csv"
+        write_codebook(out, "csv", [c])
+        assert out.exists()
+
+    def test_atomic_swap_does_not_leak_tmp(self, tmp_path: Path) -> None:
+        c = _code()
+        out = tmp_path / "out.csv"
+        write_codebook(out, "csv", [c])
+        # No leftover ``.tmp`` after a successful write.
+        leftovers = list(tmp_path.glob("*.tmp"))
+        assert leftovers == []
+
+    def test_overwrite_is_atomic(self, tmp_path: Path) -> None:
+        out = tmp_path / "out.csv"
+        out.write_text("garbage", encoding="utf-8")
+        c = _code()
+        write_codebook(out, "csv", [c])
+        # New content fully replaced the old.
+        assert out.read_bytes().decode("utf-8") == to_csv([c])
+
+    def test_unknown_format_raises_before_touching_disk(
+        self, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "out.csv"
+        with pytest.raises(ValueError):
+            write_codebook(out, "yaml", [])
+        # Nothing written.
+        assert not out.exists()
+
+    def test_empty_codebook_writes_header_only_csv(self, tmp_path: Path) -> None:
+        out = tmp_path / "out.csv"
+        write_codebook(out, "csv", [])
+        assert out.exists()
+        text = out.read_text(encoding="utf-8")
+        # First line is the header; no data rows.
+        rows = list(csv.reader(io.StringIO(text)))
+        assert rows == [list(CSV_COLUMNS)]
+
+    def test_word_alias_writes_rtf(self, tmp_path: Path) -> None:
+        # The user types "word" and gets a .rtf-shaped file at the path
+        # they specified — extension on the path is whatever they wrote.
+        out = tmp_path / "out.docx"
+        c = _code()
+        write_codebook(out, "word", [c])
+        assert out.exists()
+        # Body is RTF regardless of what the user named the file.
+        assert out.read_text(encoding="utf-8").startswith(r"{\rtf1")

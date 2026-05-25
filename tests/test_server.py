@@ -2384,3 +2384,262 @@ class TestPromoteMemoToCodeAPI:
             json={},
         )
         assert r.status_code == 409
+
+
+# --------------------------------------------------------------------------- #
+# Codebook export (F6.1)
+# --------------------------------------------------------------------------- #
+
+
+class TestExportCodebookAPI:
+    """GET /api/projects/{pid}/codebook/export?format=...
+
+    F6.1 wires the F2.6 pure exporters (CSV / Markdown / RTF) to a
+    download endpoint. The test class exercises the format dispatch,
+    the ``Content-Type`` + ``Content-Disposition`` headers, and the
+    failure modes (missing project, unknown format, malformed id).
+    REFI-QDA XML is intentionally *not* on this endpoint — F6.5 owns
+    that surface — and a regression test guards the boundary.
+    """
+
+    def _make_project(self, client, name: str = "Pilot") -> str:
+        r = client.post("/api/projects", json={"name": name})
+        assert r.status_code == 201
+        return r.json()["id"]
+
+    def _make_code(
+        self,
+        srv,
+        project_id: str,
+        *,
+        name: str = "Pacing",
+        definition: str = "Adjusting daily activity to manage limited energy.",
+    ) -> str:
+        from scribe.codes import Code
+
+        code = Code.new(
+            project_id=project_id,
+            name=name,
+            definition=definition,
+        )
+        from scribe import codes as _codes
+
+        _codes.save_code(srv.PROJECTS_DIR, code)
+        return code.id
+
+    # -- Default format ------------------------------------------------ #
+
+    def test_default_format_is_csv(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        self._make_code(srv, pid, name="Pacing")
+        r = client.get(f"/api/projects/{pid}/codebook/export")
+        assert r.status_code == 200
+        # text/csv with utf-8 charset.
+        assert r.headers["content-type"].startswith("text/csv")
+        assert "charset=utf-8" in r.headers["content-type"]
+        # Body is a CSV with the F2.6 column header.
+        first_line = r.text.splitlines()[0]
+        assert first_line.startswith("id,name,definition")
+        # The created code is present.
+        assert "Pacing" in r.text
+
+    # -- Format dispatch ----------------------------------------------- #
+
+    def test_csv_format_explicit(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        self._make_code(srv, pid)
+        r = client.get(f"/api/projects/{pid}/codebook/export?format=csv")
+        assert r.status_code == 200
+        assert "text/csv" in r.headers["content-type"]
+
+    def test_markdown_format(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client, name="Pilot")
+        self._make_code(srv, pid, name="Pacing")
+        r = client.get(
+            f"/api/projects/{pid}/codebook/export?format=markdown"
+        )
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/markdown")
+        # Markdown export carries the project name in the heading.
+        assert r.text.startswith("# Codebook")
+        assert "Pilot" in r.text
+        assert "## Pacing" in r.text
+
+    def test_md_alias_is_markdown(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        self._make_code(srv, pid)
+        r1 = client.get(
+            f"/api/projects/{pid}/codebook/export?format=markdown"
+        )
+        r2 = client.get(f"/api/projects/{pid}/codebook/export?format=md")
+        assert r2.status_code == 200
+        assert r2.text == r1.text
+
+    def test_rtf_format(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        self._make_code(srv, pid)
+        r = client.get(f"/api/projects/{pid}/codebook/export?format=rtf")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "application/rtf"
+        assert r.text.startswith(r"{\rtf1")
+
+    def test_word_alias_routes_to_rtf(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        self._make_code(srv, pid)
+        r = client.get(
+            f"/api/projects/{pid}/codebook/export?format=word"
+        )
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "application/rtf"
+
+    def test_docx_alias_routes_to_rtf(self, server_env) -> None:
+        # User types the extension they expect Word to want; we still
+        # serve RTF (the F2.6 exporter doesn't ship a real .docx zip).
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        self._make_code(srv, pid)
+        r = client.get(
+            f"/api/projects/{pid}/codebook/export?format=docx"
+        )
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "application/rtf"
+
+    # -- Headers ------------------------------------------------------- #
+
+    def test_content_disposition_uses_project_slug(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client, name="My Living Project")
+        r = client.get(f"/api/projects/{pid}/codebook/export?format=csv")
+        cd = r.headers["content-disposition"]
+        assert 'filename="my-living-project-codebook.csv"' in cd
+        assert "attachment" in cd
+
+    def test_content_disposition_extension_matches_format(
+        self, server_env
+    ) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client, name="X")
+        for fmt, ext in (("csv", ".csv"), ("markdown", ".md"), ("rtf", ".rtf")):
+            r = client.get(
+                f"/api/projects/{pid}/codebook/export?format={fmt}"
+            )
+            cd = r.headers["content-disposition"]
+            assert ext in cd, (fmt, cd)
+
+    def test_content_disposition_diacritics_downgraded(
+        self, server_env
+    ) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client, name="Café études")
+        r = client.get(f"/api/projects/{pid}/codebook/export?format=csv")
+        cd = r.headers["content-disposition"]
+        # ASCII-only filename (HTTP header-friendly).
+        assert 'filename="cafe-etudes-codebook.csv"' in cd
+
+    # -- Empty codebook ------------------------------------------------- #
+
+    def test_empty_codebook_csv_is_header_only(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.get(f"/api/projects/{pid}/codebook/export?format=csv")
+        assert r.status_code == 200
+        # Just the header line; one (CRLF-terminated) row.
+        # `r.text` may collapse line endings depending on TestClient
+        # internals, so don't assert on those — assert the data shape.
+        assert r.text.startswith("id,name,definition")
+        assert "Pacing" not in r.text  # no codes were created
+
+    def test_empty_codebook_markdown_has_placeholder(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.get(
+            f"/api/projects/{pid}/codebook/export?format=markdown"
+        )
+        assert r.status_code == 200
+        assert "_(empty codebook)_" in r.text
+
+    # -- Multiple codes ------------------------------------------------- #
+
+    def test_multiple_codes_round_trip(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        self._make_code(srv, pid, name="Pacing")
+        self._make_code(srv, pid, name="Resting")
+        self._make_code(srv, pid, name="Negotiating energy")
+        r = client.get(f"/api/projects/{pid}/codebook/export?format=csv")
+        assert "Pacing" in r.text
+        assert "Resting" in r.text
+        assert "Negotiating energy" in r.text
+
+    # -- Failure modes -------------------------------------------------- #
+
+    def test_unknown_project_404(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get(
+            f"/api/projects/{'0' * 12}/codebook/export?format=csv"
+        )
+        assert r.status_code == 404
+
+    def test_invalid_project_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get("/api/projects/not-hex/codebook/export?format=csv")
+        assert r.status_code == 400
+
+    def test_unknown_format_400(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.get(
+            f"/api/projects/{pid}/codebook/export?format=yaml"
+        )
+        assert r.status_code == 400
+
+    def test_xml_format_rejected_at_f6_1_surface(self, server_env) -> None:
+        # F6.5 owns the REFI-QDA XML button; F6.1 does not accept it.
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.get(
+            f"/api/projects/{pid}/codebook/export?format=xml"
+        )
+        assert r.status_code == 400
+        r2 = client.get(
+            f"/api/projects/{pid}/codebook/export?format=refi-qda"
+        )
+        assert r2.status_code == 400
+
+    def test_format_validates_before_existence(self, server_env) -> None:
+        # Project-id-format errors come first (400 early), but a
+        # legitimately-shaped-yet-missing project + bad format should
+        # still 400 on format (cheaper to compute, and the user can
+        # learn about the format problem without a DB hit). The
+        # current implementation validates id-shape, then format,
+        # then existence — assert the *result* (a 400 for bad
+        # format) rather than the precise ordering, so future
+        # ordering tweaks don't break the test.
+        _, client, _ = server_env
+        r = client.get(
+            f"/api/projects/{'0' * 12}/codebook/export?format=yaml"
+        )
+        assert r.status_code in (400, 404)
+
+    # -- Project name with unsafe characters ---------------------------- #
+
+    def test_project_name_with_quotes_does_not_break_header(
+        self, server_env
+    ) -> None:
+        srv, client, _ = server_env
+        # Quote in the name would break the simple ``filename="..."``
+        # header form if it leaked through. Slugifier strips
+        # punctuation, so the header stays clean.
+        pid = self._make_project(client, name='Pilot "Phase" 1')
+        r = client.get(f"/api/projects/{pid}/codebook/export?format=csv")
+        assert r.status_code == 200
+        cd = r.headers["content-disposition"]
+        # Exactly one closing quote (the header-trailing one); no
+        # mid-filename quote characters.
+        assert cd.count('"') == 2

@@ -58,7 +58,10 @@ from __future__ import annotations
 import csv
 import io
 import re
-from typing import Iterable, Sequence
+import unicodedata
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Iterable, Sequence
 from xml.etree import ElementTree as ET
 
 from .codes import Code, CodeRelation
@@ -763,3 +766,243 @@ def _indent(elem: ET.Element, level: int = 0) -> None:
     else:
         if level and (not elem.tail or not elem.tail.strip()):
             elem.tail = pad
+
+
+# --------------------------------------------------------------------------- #
+# Format registry + slug + disk-write helpers (F6.1)
+#
+# F2.6 shipped four pure ``codes -> str`` exporters. F6.1 surfaces them
+# behind one common interface so the HTTP endpoint, the CLI, and any
+# future UI button all dispatch through the same code path.
+#
+# What gets added here:
+#
+#  * :data:`EXPORT_FORMATS` — registry of {key -> FormatSpec(extension,
+#    media_type, label)} for the user-facing formats. F6.1 covers CSV,
+#    Markdown, and RTF (= "Word"); REFI-QDA XML is intentionally
+#    omitted so it can grow its own button at F6.5.
+#
+#  * :func:`normalise_format` — accepts the canonical keys plus
+#    ergonomic aliases (``md`` for Markdown; ``word`` / ``doc`` /
+#    ``docx`` for RTF). Raises :class:`ValueError` on anything else.
+#
+#  * :func:`render_codebook` — single-dispatch helper that picks the
+#    right exporter for ``format`` and returns the rendered string.
+#
+#  * :func:`slugify_codebook_filename` — derives an attachment
+#    filename like ``my-project-codebook.csv`` from a project. ASCII-
+#    only, lowercased, dash-separated, NFKD-normalised so accented
+#    project names downgrade gracefully. Falls back to ``codebook.<ext>``
+#    when no project name is available.
+#
+#  * :func:`write_codebook` — atomic disk write through a ``.tmp``
+#    swap so a failed export never leaves a half-written file.
+#
+# All four are pure: they do no validation beyond format-key
+# normalisation. Errors raised: :class:`ValueError` for unknown
+# formats, :class:`OSError` from the filesystem in :func:`write_codebook`.
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class FormatSpec:
+    """Static description of a user-facing codebook export format.
+
+    * ``key`` — canonical lookup key (``csv`` / ``markdown`` / ``rtf``).
+    * ``extension`` — file extension *with* leading dot (``.csv``).
+    * ``media_type`` — IANA media type for HTTP ``Content-Type``;
+      includes ``charset=utf-8`` for the text formats so browsers
+      don't guess Latin-1.
+    * ``label`` — human-readable name for UI buttons / log lines.
+    """
+
+    key: str
+    extension: str
+    media_type: str
+    label: str
+
+
+EXPORT_FORMAT_CSV = "csv"
+EXPORT_FORMAT_MARKDOWN = "markdown"
+EXPORT_FORMAT_RTF = "rtf"
+
+
+# Registry of formats F6.1 surfaces. REFI-QDA XML is deliberately
+# absent — F6.5 owns that button so it can grow its own
+# project-archive metadata, ``<UserCodes>`` per-coder layer, etc.
+EXPORT_FORMATS: dict[str, FormatSpec] = {
+    EXPORT_FORMAT_CSV: FormatSpec(
+        key=EXPORT_FORMAT_CSV,
+        extension=".csv",
+        media_type="text/csv; charset=utf-8",
+        label="CSV",
+    ),
+    EXPORT_FORMAT_MARKDOWN: FormatSpec(
+        key=EXPORT_FORMAT_MARKDOWN,
+        extension=".md",
+        media_type="text/markdown; charset=utf-8",
+        label="Markdown",
+    ),
+    EXPORT_FORMAT_RTF: FormatSpec(
+        key=EXPORT_FORMAT_RTF,
+        # Word and LibreOffice both open ``.rtf`` natively. We deliver
+        # an ``application/rtf`` body — the historical ``text/rtf`` is
+        # accepted but ``application/rtf`` is what Microsoft + the IETF
+        # converged on (RFC 1521 plus subsequent practice).
+        extension=".rtf",
+        media_type="application/rtf",
+        label="RTF (Word)",
+    ),
+}
+
+
+# Aliases the user might type. Resolved before lookup in EXPORT_FORMATS.
+_FORMAT_ALIASES: dict[str, str] = {
+    "md": EXPORT_FORMAT_MARKDOWN,
+    "markdown": EXPORT_FORMAT_MARKDOWN,
+    "csv": EXPORT_FORMAT_CSV,
+    "rtf": EXPORT_FORMAT_RTF,
+    # "Word" routes to RTF — RTF is the format Word opens natively
+    # without a ``.docx`` ZIP ceremony, and F2.6 ships an RTF exporter.
+    # We accept the obvious nicknames so the UX is forgiving.
+    "word": EXPORT_FORMAT_RTF,
+    "doc": EXPORT_FORMAT_RTF,
+    "docx": EXPORT_FORMAT_RTF,
+}
+
+
+def normalise_format(format: str | None) -> str:
+    """Resolve a caller-supplied format string to a canonical key.
+
+    Case-insensitive; trims whitespace; recognises a small handful of
+    aliases (``md`` → ``markdown``; ``word`` / ``doc`` / ``docx`` →
+    ``rtf``). Raises :class:`ValueError` for unknown formats with the
+    list of accepted keys, so the message is actionable.
+    """
+    if format is None:
+        raise ValueError(
+            "Codebook export format is required; expected one of: "
+            f"{sorted(EXPORT_FORMATS.keys())}"
+        )
+    key = str(format).strip().lower()
+    if key in _FORMAT_ALIASES:
+        return _FORMAT_ALIASES[key]
+    raise ValueError(
+        f"Unsupported codebook export format: {format!r}. "
+        f"Expected one of: {sorted(EXPORT_FORMATS.keys())}"
+    )
+
+
+# Map normalised format key → renderer. Populated below the
+# function definitions to avoid forward references.
+_RENDERERS: dict[str, Callable[..., str]] = {}
+
+
+def render_codebook(
+    format: str,
+    codes: Sequence[Code],
+    *,
+    project: Project | None = None,
+) -> str:
+    """Render the codebook in ``format`` and return the string body.
+
+    Dispatches via :func:`normalise_format` so callers can pass the
+    same alias set the HTTP query string accepts. ``project`` is
+    forwarded only to the renderers that use it (Markdown + RTF) — CSV
+    intentionally has no project header so the column shape stays the
+    public contract.
+
+    Empty codebooks are valid input and produce a header-only CSV / a
+    placeholder Markdown / a minimal RTF. Never raises on empty input.
+    """
+    fmt = normalise_format(format)
+    return _RENDERERS[fmt](codes, project=project)
+
+
+def _render_csv(codes: Sequence[Code], *, project: Project | None) -> str:
+    # CSV ignores the project header — schema is the public contract.
+    del project
+    return to_csv(codes)
+
+
+def _render_markdown(codes: Sequence[Code], *, project: Project | None) -> str:
+    return to_markdown(codes, project=project)
+
+
+def _render_rtf(codes: Sequence[Code], *, project: Project | None) -> str:
+    return to_rtf(codes, project=project)
+
+
+_RENDERERS[EXPORT_FORMAT_CSV] = _render_csv
+_RENDERERS[EXPORT_FORMAT_MARKDOWN] = _render_markdown
+_RENDERERS[EXPORT_FORMAT_RTF] = _render_rtf
+
+
+# Slug regex: collapse runs of non-alphanumeric ASCII into a single
+# dash. We NFKD-normalise + strip combining marks first so "Élise"
+# becomes "elise", not the empty string. The result is bounded in
+# length below so runaway project names don't produce 5 KB filenames.
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+_FILENAME_SLUG_MAX = 80
+
+
+def slugify_codebook_filename(
+    project: Project | None, format: str
+) -> str:
+    """Build a download-friendly filename for a codebook export.
+
+    Pattern: ``<project-slug>-codebook<ext>`` if a project name is
+    available; ``codebook<ext>`` otherwise. The slug is ASCII-only,
+    lowercased, dash-separated, and capped at
+    :data:`_FILENAME_SLUG_MAX` characters before the suffix.
+
+    Raises :class:`ValueError` for unknown formats (delegates to
+    :func:`normalise_format`).
+    """
+    fmt = normalise_format(format)
+    spec = EXPORT_FORMATS[fmt]
+    slug = ""
+    if project is not None and project.name and project.name.strip():
+        # NFKD-normalise so combining marks separate from base
+        # characters, then drop anything non-ASCII. This downgrades
+        # "Café" to "cafe" rather than dropping the whole word.
+        ascii_name = (
+            unicodedata.normalize("NFKD", project.name)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
+        slug = _SLUG_RE.sub("-", ascii_name.lower()).strip("-")
+        if len(slug) > _FILENAME_SLUG_MAX:
+            slug = slug[:_FILENAME_SLUG_MAX].rstrip("-")
+    if slug:
+        return f"{slug}-codebook{spec.extension}"
+    return f"codebook{spec.extension}"
+
+
+def write_codebook(
+    path: Path,
+    format: str,
+    codes: Sequence[Code],
+    *,
+    project: Project | None = None,
+) -> Path:
+    """Render the codebook in ``format`` and write it to ``path``.
+
+    Writes are atomic: the body is written to ``<path>.tmp`` first and
+    only ``replace()``-d into place on success, so an interrupted write
+    never leaves a half-finished export visible to other readers.
+    Creates ``path.parent`` if missing.
+
+    Returns ``path`` (as :class:`pathlib.Path`) for chaining convenience.
+    """
+    fmt = normalise_format(format)
+    text = render_codebook(fmt, codes, project=project)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    # Write bytes rather than text so the platform's newline policy
+    # never rewrites the CSV exporter's RFC-4180 ``\r\n`` line endings
+    # into ``\n`` (which would break strict CSV re-importers like
+    # Microsoft Power Query in legacy mode).
+    tmp.write_bytes(text.encode("utf-8"))
+    tmp.replace(target)
+    return target
