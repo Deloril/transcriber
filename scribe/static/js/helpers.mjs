@@ -1371,3 +1371,560 @@ export function buildPromoteMemoPayload({
   }
   return out;
 }
+
+// ---------- F9.9 — per-application provenance display on hover ----------
+//
+// JS mirror of scribe/application_provenance_display.py. The editor's
+// hover tooltip calls these helpers to turn an application + the
+// related entities (code, code-version-at-apply, coder) into a
+// structured display object plus formatters.
+//
+// Field set, vocabularies, and rendering MUST agree with the Python
+// side — tests/js/application-provenance-display.test.mjs and
+// tests/test_application_provenance_display.py share fixtures.
+
+export const PROVENANCE_SOURCE_LABELS = Object.freeze({
+  human: "Human-coded",
+  ai_accepted: "AI-suggested · accepted",
+  ai_modified: "AI-suggested · accepted with edits",
+  imported: "Imported",
+  other: "Other",
+});
+
+export const DEFAULT_PROVENANCE_SOURCE_LABEL = PROVENANCE_SOURCE_LABELS.human;
+
+export const AI_FEATURE_LABELS = Object.freeze({
+  code_suggestion: "Code suggestion",
+  new_code_suggestion: "New code suggestion",
+  quote_similarity: "Quote similarity",
+  transcript_review: "Transcript review",
+  second_coder: "AI second coder",
+  memo_draft: "Memo draft",
+  other: "Other AI",
+});
+
+export const AI_DECISION_LABELS = Object.freeze({
+  pending: "Pending",
+  accepted: "Accepted",
+  modified: "Accepted with edits",
+  rejected: "Rejected",
+});
+
+const _APPLICATION_PROVENANCE_SOURCES = new Set([
+  "human",
+  "ai_accepted",
+  "ai_modified",
+  "imported",
+  "other",
+]);
+
+const _RESERVED_PROVENANCE_KEYS = new Set([
+  "source",
+  "model_id",
+  "embedding_model",
+  "suggestion_id",
+  "accepted_at",
+  "feature",
+  "backend",
+]);
+
+// F2.2's DEFINITION_FIELDS — the closed set of code fields that
+// trigger a new revision when changed.
+const _DEFINITION_FIELDS = [
+  "name",
+  "definition",
+  "inclusion_criteria",
+  "exclusion_criteria",
+  "exemplars",
+  "theoretical_memo",
+  "related_codes",
+];
+
+function _formatConfidence(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return "";
+  return n.toFixed(2);
+}
+
+function _formatAnchor(app) {
+  const s = String(app.anchorStartWordId || app.anchor_start_word_id || "");
+  const e = String(app.anchorEndWordId || app.anchor_end_word_id || "");
+  const startOff = app.startCharOffset ?? app.start_char_offset ?? null;
+  const endOff = app.endCharOffset ?? app.end_char_offset ?? null;
+  if (s === e && startOff === null && endOff === null) return s;
+  return `${s}–${e}`;
+}
+
+function _arraysEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i];
+    if (x && typeof x === "object" && y && typeof y === "object") {
+      if (JSON.stringify(x) !== JSON.stringify(y)) return false;
+    } else if (x !== y) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function _driftedFields(snapshot, current) {
+  // Mirrors scribe.definition_at_apply.drifted_definition_fields:
+  // Either side null/undefined → all fields drifted.
+  if (!snapshot || !current) return _DEFINITION_FIELDS.slice();
+  const out = [];
+  for (const f of _DEFINITION_FIELDS) {
+    let snap = snapshot[f];
+    let cur = current[f];
+    if (f === "exemplars" || f === "related_codes") {
+      if (snap == null) snap = [];
+      if (cur == null) cur = [];
+      if (!_arraysEqual(snap, cur)) out.push(f);
+    } else {
+      // Treat undefined and "" the same as the Python ``or ""`` paths
+      const a = snap == null ? "" : snap;
+      const b = cur == null ? "" : cur;
+      if (a !== b) out.push(f);
+    }
+  }
+  return out;
+}
+
+function _coerceProvenance(p) {
+  if (!p || typeof p !== "object") return {};
+  const out = {};
+  for (const [k, v] of Object.entries(p)) out[String(k)] = String(v);
+  return out;
+}
+
+/**
+ * Build a ProvenanceDisplay-equivalent object from an application + relations.
+ *
+ * Inputs accept either snake_case (matching the Python on-disk JSON) or
+ * camelCase (matching the in-page JS state). All "related" args are
+ * optional; missing ones surface as "(unknown)" / blank fields.
+ *
+ * @param {object} app   Application-shaped object
+ * @param {object} [relations]
+ * @param {object} [relations.code]            current Code-shaped object
+ * @param {object} [relations.codeVersion]     CodeVersion-shaped object (the version-at-apply)
+ * @param {object} [relations.coder]           Coder-shaped object (the application's coder)
+ * @param {object} [relations.decidedByCoder]  Coder-shaped object (the AI-decision actor)
+ * @param {string} [relations.sourceName]      display name for the source
+ * @returns {object}
+ */
+export function buildProvenanceDisplay(app, relations = {}) {
+  if (!app || typeof app !== "object") {
+    throw new Error("buildProvenanceDisplay: app is required");
+  }
+  const {
+    code = null,
+    codeVersion = null,
+    coder = null,
+    decidedByCoder = null,
+    sourceName = "",
+  } = relations;
+
+  const provenance = _coerceProvenance(app.provenance);
+
+  const codeId = String(app.code_id ?? app.codeId ?? "");
+  const sourceId = String(app.source_id ?? app.sourceId ?? "");
+  const coderId = String(app.coder_id ?? app.coderId ?? "");
+  const versionIdAtApply = String(
+    app.definition_version_id_at_apply ?? app.definitionVersionIdAtApply ?? "",
+  );
+
+  // Code (current)
+  let codeName, codeColour, codeStage;
+  if (!code) {
+    codeName = "(unknown)";
+    codeColour = "";
+    codeStage = "";
+  } else {
+    codeName = (code.name || "").trim() || "(unnamed)";
+    codeColour = code.colour || "";
+    codeStage = code.stage || "";
+  }
+
+  // Code version at apply
+  const snapshotMissing = !codeVersion;
+  let versionNumber = "";
+  let versionRecordedAt = "";
+  let versionChangeNote = "";
+  let snapshot = {};
+  let nameAtApply = "";
+  if (codeVersion) {
+    versionNumber = `v${parseInt(codeVersion.version, 10)}`;
+    versionRecordedAt = String(codeVersion.created_at || codeVersion.createdAt || "");
+    versionChangeNote = String(codeVersion.change_note || codeVersion.changeNote || "");
+    snapshot =
+      typeof codeVersion.snapshot === "object" && codeVersion.snapshot
+        ? codeVersion.snapshot
+        : {};
+    nameAtApply = String(snapshot.name || "");
+  }
+
+  // Coder
+  let coderName, coderRole;
+  if (!coder) {
+    coderName = "(unknown)";
+    coderRole = "";
+  } else {
+    coderName = (coder.name || "").trim() || "(unnamed)";
+    coderRole = (coder.role || "").trim();
+  }
+
+  // Provenance source
+  const rawSource = (provenance.source || "").trim();
+  let provenanceSource, provenanceSourceLabel;
+  if (!_APPLICATION_PROVENANCE_SOURCES.has(rawSource)) {
+    provenanceSource = "";
+    provenanceSourceLabel = DEFAULT_PROVENANCE_SOURCE_LABEL;
+  } else {
+    provenanceSource = rawSource;
+    provenanceSourceLabel =
+      PROVENANCE_SOURCE_LABELS[rawSource] || DEFAULT_PROVENANCE_SOURCE_LABEL;
+  }
+
+  // AI provenance
+  const aip = app.ai_provenance ?? app.aiProvenance ?? null;
+  const aiPresent = !!aip;
+  let aiFeature = "";
+  let aiFeatureLabel = "";
+  let aiBackend = "";
+  let aiGenerationModel = "";
+  let aiEmbeddingModel = "";
+  let aiSuggestionId = "";
+  let aiDecision = "";
+  let aiDecisionLabel = "";
+  let aiDecidedByCoderId = "";
+  let aiDecidedByCoderName = "";
+  let aiDecidedAt = "";
+  let aiConfidence = "";
+  let aiPromptHash = "";
+  let aiNotes = "";
+  if (aip) {
+    aiFeature = String(aip.feature || "");
+    aiFeatureLabel = AI_FEATURE_LABELS[aiFeature] || AI_FEATURE_LABELS.other;
+    aiBackend = String(aip.backend || "");
+    aiGenerationModel = String(aip.generation_model || aip.generationModel || "");
+    aiEmbeddingModel = String(aip.embedding_model || aip.embeddingModel || "");
+    aiSuggestionId = String(aip.suggestion_id || aip.suggestionId || "");
+    aiDecision = String(aip.decision || "");
+    aiDecisionLabel = AI_DECISION_LABELS[aiDecision] ?? aiDecision ?? "";
+    aiDecidedByCoderId = String(
+      aip.decided_by_coder_id || aip.decidedByCoderId || "",
+    );
+    if (decidedByCoder) {
+      aiDecidedByCoderName =
+        (decidedByCoder.name || "").trim() || "(unnamed)";
+    } else {
+      aiDecidedByCoderName = aiDecidedByCoderId ? "(unknown)" : "";
+    }
+    aiDecidedAt = String(aip.decided_at || aip.decidedAt || "");
+    aiConfidence = _formatConfidence(aip.confidence);
+    aiPromptHash = String(aip.prompt_hash || aip.promptHash || "");
+    aiNotes = String(aip.notes || "");
+  }
+
+  // Drift relative to current Code
+  const codeMissing = !code;
+  let driftedFields = [];
+  let definitionDrifted = false;
+  if (code && codeVersion) {
+    driftedFields = _driftedFields(snapshot, code);
+    definitionDrifted = driftedFields.length > 0;
+  }
+
+  // Extra free-form provenance keys (sorted, reserved keys filtered out)
+  const extraProvenance = [];
+  const extraKeys = Object.keys(provenance)
+    .filter((k) => !_RESERVED_PROVENANCE_KEYS.has(k))
+    .sort();
+  for (const k of extraKeys) {
+    extraProvenance.push(`${k}: ${provenance[k]}`);
+  }
+
+  return {
+    applicationId: String(app.id || ""),
+    anchorLabel: _formatAnchor(app),
+    createdAt: String(app.created_at || app.createdAt || ""),
+    modifiedAt: String(app.modified_at || app.modifiedAt || ""),
+    confidence: _formatConfidence(app.confidence),
+    note: String(app.note || ""),
+    codeId,
+    codeName,
+    codeColour,
+    codeStage,
+    versionIdAtApply,
+    versionNumberAtApply: versionNumber,
+    versionRecordedAt,
+    versionChangeNote,
+    snapshotMissing,
+    nameAtApply,
+    coderId,
+    coderName,
+    coderRole,
+    sourceId,
+    sourceName: String(sourceName || ""),
+    provenanceSource,
+    provenanceSourceLabel,
+    aiPresent,
+    aiFeature,
+    aiFeatureLabel,
+    aiBackend,
+    aiGenerationModel,
+    aiEmbeddingModel,
+    aiSuggestionId,
+    aiDecision,
+    aiDecisionLabel,
+    aiDecidedByCoderId,
+    aiDecidedByCoderName,
+    aiDecidedAt,
+    aiConfidence,
+    aiPromptHash,
+    aiNotes,
+    codeMissing,
+    definitionDrifted,
+    driftedFields,
+    extraProvenance,
+  };
+}
+
+/**
+ * Compact one-line summary, e.g. "Alex · Human-coded · 2026-04-15".
+ *
+ * Skips empty fields so the order is stable regardless of which
+ * relations the caller hydrated.
+ */
+export function provenanceSummaryLabel(d) {
+  const parts = [];
+  const name = (d.coderName || "").trim();
+  if (name && name !== "(unknown)" && name !== "(unnamed)") {
+    parts.push(name);
+  }
+  parts.push(d.provenanceSourceLabel);
+  const date = (d.createdAt || "").slice(0, 10);
+  if (date) parts.push(date);
+  return parts.join(" · ");
+}
+
+/**
+ * Multi-line plain-text rendering — suitable for an HTML title= attribute.
+ */
+export function formatProvenanceText(d) {
+  const lines = [];
+  let head = `${d.codeName} (${d.codeId})`;
+  if (d.versionNumberAtApply) head += ` · ${d.versionNumberAtApply}`;
+  lines.push(head);
+
+  const meta = [d.provenanceSourceLabel];
+  if (d.createdAt) meta.push(d.createdAt);
+  if (d.confidence) meta.push(`confidence ${d.confidence}`);
+  lines.push(meta.join(" · "));
+
+  const anchor = [`anchor ${d.anchorLabel}`];
+  if (d.sourceName) anchor.push(`source ${d.sourceName}`);
+  else if (d.sourceId) anchor.push(`source ${d.sourceId}`);
+  lines.push(anchor.join(" · "));
+
+  const coder = [`by ${d.coderName || "(unknown)"}`];
+  if (d.coderRole) coder.push(d.coderRole);
+  lines.push(coder.join(" · "));
+
+  if (d.snapshotMissing && d.versionIdAtApply) {
+    lines.push("");
+    lines.push("Definition snapshot at apply not found.");
+  } else if (d.definitionDrifted && !d.codeMissing) {
+    lines.push("");
+    lines.push(
+      `Definition has changed since apply (${d.driftedFields.join(", ")}).`,
+    );
+  }
+
+  if (d.aiPresent) {
+    lines.push("");
+    const aiHead = [
+      d.aiFeatureLabel,
+      d.aiBackend,
+      d.aiGenerationModel,
+      d.aiDecisionLabel,
+    ].filter(Boolean);
+    lines.push("AI: " + aiHead.join(" · "));
+    if (d.aiDecidedByCoderName && d.aiDecidedByCoderName !== "(unknown)") {
+      const extra = [`decided by ${d.aiDecidedByCoderName}`];
+      if (d.aiDecidedAt) extra.push(d.aiDecidedAt);
+      lines.push(extra.join(" · "));
+    } else if (d.aiDecidedAt) {
+      lines.push(`decided at ${d.aiDecidedAt}`);
+    }
+    if (d.aiConfidence) lines.push(`AI confidence ${d.aiConfidence}`);
+    if (d.aiPromptHash) lines.push(`prompt ${d.aiPromptHash}`);
+  }
+
+  if (d.extraProvenance && d.extraProvenance.length) {
+    lines.push("");
+    for (const line of d.extraProvenance) lines.push(line);
+  }
+
+  if (d.note) {
+    lines.push("");
+    lines.push("Note:");
+    const noteLines = d.note.split(/\r?\n/);
+    if (noteLines.length === 0) lines.push(d.note);
+    else for (const ln of noteLines) lines.push(ln);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Compact escaped HTML rendering for a hover popover.
+ *
+ * Returns a single ``<div class="provenance-display">…</div>``. All
+ * user-supplied values are escaped via ``escapeHtml`` so the result
+ * can be written safely into ``innerHTML``.
+ */
+export function formatProvenanceHtml(d) {
+  const parts = [];
+  parts.push('<div class="provenance-display">');
+
+  let title = escapeHtml(d.codeName);
+  if (d.versionNumberAtApply) {
+    title +=
+      ' <span class="provenance-version">' +
+      escapeHtml(d.versionNumberAtApply) +
+      "</span>";
+  }
+  if (d.codeColour) {
+    title =
+      '<span class="provenance-swatch" style="background:' +
+      escapeHtml(d.codeColour) +
+      '"></span>' +
+      title;
+  }
+  parts.push('<div class="provenance-title">' + title + "</div>");
+
+  parts.push(
+    '<div class="provenance-source">' +
+      escapeHtml(d.provenanceSourceLabel) +
+      "</div>",
+  );
+
+  const rows = [];
+  rows.push(["Anchor", escapeHtml(d.anchorLabel)]);
+  if (d.sourceName) rows.push(["Source", escapeHtml(d.sourceName)]);
+  else if (d.sourceId) rows.push(["Source", escapeHtml(d.sourceId)]);
+  if (d.coderName) {
+    let coderHtml = escapeHtml(d.coderName);
+    if (d.coderRole) {
+      coderHtml +=
+        ' <span class="provenance-role">' +
+        escapeHtml(d.coderRole) +
+        "</span>";
+    }
+    rows.push(["By", coderHtml]);
+  }
+  if (d.createdAt) rows.push(["Applied", escapeHtml(d.createdAt)]);
+  if (d.confidence) rows.push(["Confidence", escapeHtml(d.confidence)]);
+
+  if (rows.length) {
+    parts.push('<dl class="provenance-meta">');
+    for (const [k, v] of rows) {
+      parts.push("<dt>" + escapeHtml(k) + "</dt><dd>" + v + "</dd>");
+    }
+    parts.push("</dl>");
+  }
+
+  if (d.snapshotMissing && d.versionIdAtApply) {
+    parts.push(
+      '<div class="provenance-warn">' +
+        escapeHtml("Definition snapshot at apply not found.") +
+        "</div>",
+    );
+  } else if (d.definitionDrifted && !d.codeMissing) {
+    parts.push(
+      '<div class="provenance-drift">' +
+        escapeHtml(
+          "Definition has changed since apply: " +
+            d.driftedFields.join(", "),
+        ) +
+        "</div>",
+    );
+  }
+
+  if (d.aiPresent) {
+    parts.push('<div class="provenance-ai">');
+    parts.push(
+      '<div class="provenance-ai-head">' +
+        escapeHtml("AI: " + d.aiFeatureLabel) +
+        "</div>",
+    );
+    const aiRows = [];
+    if (d.aiBackend) aiRows.push(["Backend", escapeHtml(d.aiBackend)]);
+    if (d.aiGenerationModel)
+      aiRows.push(["Model", escapeHtml(d.aiGenerationModel)]);
+    if (d.aiEmbeddingModel)
+      aiRows.push(["Embeddings", escapeHtml(d.aiEmbeddingModel)]);
+    if (d.aiDecisionLabel)
+      aiRows.push(["Decision", escapeHtml(d.aiDecisionLabel)]);
+    if (d.aiDecidedByCoderName && d.aiDecidedByCoderName !== "(unknown)") {
+      aiRows.push(["Decided by", escapeHtml(d.aiDecidedByCoderName)]);
+    }
+    if (d.aiDecidedAt) aiRows.push(["Decided at", escapeHtml(d.aiDecidedAt)]);
+    if (d.aiConfidence)
+      aiRows.push(["AI confidence", escapeHtml(d.aiConfidence)]);
+    if (d.aiPromptHash) aiRows.push(["Prompt", escapeHtml(d.aiPromptHash)]);
+    if (aiRows.length) {
+      parts.push('<dl class="provenance-meta">');
+      for (const [k, v] of aiRows) {
+        parts.push("<dt>" + escapeHtml(k) + "</dt><dd>" + v + "</dd>");
+      }
+      parts.push("</dl>");
+    }
+    if (d.aiNotes) {
+      parts.push(
+        '<div class="provenance-ai-notes">' +
+          escapeHtml(d.aiNotes) +
+          "</div>",
+      );
+    }
+    parts.push("</div>");
+  }
+
+  if (d.extraProvenance && d.extraProvenance.length) {
+    parts.push('<dl class="provenance-extra">');
+    for (const line of d.extraProvenance) {
+      const idx = line.indexOf(":");
+      if (idx >= 0) {
+        const k = line.slice(0, idx).trim();
+        const v = line.slice(idx + 1).trim();
+        parts.push(
+          "<dt>" + escapeHtml(k) + "</dt><dd>" + escapeHtml(v) + "</dd>",
+        );
+      } else {
+        parts.push("<dt></dt><dd>" + escapeHtml(line) + "</dd>");
+      }
+    }
+    parts.push("</dl>");
+  }
+
+  if (d.note) {
+    parts.push('<div class="provenance-note">');
+    parts.push(
+      '<div class="provenance-note-head">' + escapeHtml("Note") + "</div>",
+    );
+    const noteLines = d.note.split(/\r?\n/).map((ln) => escapeHtml(ln));
+    parts.push(
+      '<div class="provenance-note-body">' +
+        (noteLines.length ? noteLines.join("<br>") : escapeHtml(d.note)) +
+        "</div>",
+    );
+    parts.push("</div>");
+  }
+
+  parts.push("</div>");
+  return parts.join("");
+}
