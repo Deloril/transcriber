@@ -99,11 +99,27 @@
       max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     table.lib tbody td.filename strong { color: var(--text); font-weight: 600; }
+    /* F10.4 — the action cell used to pin `white-space: nowrap` and let
+       the buttons (Open, JSON, SRT, Discard media, Delete) overflow the
+       1180-px max-width container. On a 14" MacBook the rightmost button
+       — Delete — was clipped off the right edge and effectively
+       invisible. The inner `.row-actions` flex container wraps cleanly
+       so every action stays reachable; the media query at 1100 px
+       tightens button padding so buttons usually still fit on one row
+       at typical laptop widths. */
     table.lib tbody td.actions {
-      white-space: nowrap;
+      /* No nowrap: rely on the inner flex container's wrap behaviour. */
+      min-width: 200px;
+    }
+    table.lib tbody td.actions .row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
     }
     table.lib tbody td.actions a, table.lib tbody td.actions button {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
       background: var(--panel-2);
       color: var(--text);
       border: 1px solid var(--border);
@@ -111,13 +127,25 @@
       padding: 5px 10px;
       font-size: 12px;
       text-decoration: none;
-      margin-right: 6px;
       cursor: pointer;
+      /* margin-right is replaced by the parent flex `gap` so wrapped
+         rows don't carry a trailing margin into the next visual line. */
+      margin: 0;
+      white-space: nowrap;
     }
     table.lib tbody td.actions a:hover { border-color: var(--accent); }
     table.lib tbody td.actions .danger:hover { border-color: var(--err); color: var(--err); }
     table.lib tbody td.actions .disabled {
       opacity: .4; pointer-events: none;
+    }
+    @media (max-width: 1100px) {
+      /* Below ~1100 px the table is tighter, so trim button padding
+         and the inter-button gap to keep rows visually compact. The
+         flex container will still wrap to a second line if even this
+         budget is exceeded — never clip. */
+      table.lib tbody td.actions .row-actions { gap: 4px; }
+      table.lib tbody td.actions a,
+      table.lib tbody td.actions button { padding: 5px 7px; font-size: 11px; }
     }
 
     .pill {
@@ -322,10 +350,12 @@
         <td class="numeric" title="${escapeHtml(row.created_at || "")}">${escapeHtml(created)}</td>
         <td><span class="pill status-${status}">${status}</span></td>
         <td class="actions">
-          ${editLink}
-          ${downloads}
-          ${discardBtn}
-          <button class="danger" data-action="delete" data-id="${escapeHtml(row.id)}">Delete</button>
+          <div class="row-actions">
+            ${editLink}
+            ${downloads}
+            ${discardBtn}
+            <button class="danger" data-action="delete" data-id="${escapeHtml(row.id)}">Delete</button>
+          </div>
         </td>
       `;
       return tr;
