@@ -313,12 +313,27 @@ def _normalise_profile(p: dict[str, Any]) -> dict[str, Any]:
 
 @app.get("/api/capabilities")
 async def capabilities() -> JSONResponse:
-    """Report which optional engines are installed; the UI uses this to warn
-    when the user picks Parakeet without NeMo."""
+    """Report which optional engines are installed and which GPU backend is
+    active. The UI uses this to gate model options (e.g. Parakeet/NeMo
+    isn't supported on AMD ROCm) and to surface backend info."""
     from .parakeet import nemo_available
+    from .engine import gpu_backend, _gpu_device_name, _cuda_vram_gb
     parakeet_ok, parakeet_err = nemo_available()
+    backend = gpu_backend()
+    # Parakeet is NVIDIA-only at runtime even if NeMo imports successfully.
+    parakeet_runtime_ok = parakeet_ok and backend in ("cuda", "cpu")
     return JSONResponse({
-        "parakeet": {"available": parakeet_ok, "error": parakeet_err},
+        "parakeet": {
+            "available": parakeet_runtime_ok,
+            "installed": parakeet_ok,
+            "error": parakeet_err,
+            "blocked_by_backend": parakeet_ok and not parakeet_runtime_ok,
+        },
+        "gpu": {
+            "backend": backend,
+            "device_name": _gpu_device_name() or None,
+            "vram_gb": round(_cuda_vram_gb(), 1) if backend in ("cuda", "rocm") else None,
+        },
     })
 
 

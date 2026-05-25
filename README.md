@@ -69,6 +69,37 @@ cd scribe
 SCRIBE_TORCH=cpu ./setup.sh
 ```
 
+### Linux (AMD GPU / ROCm)
+
+The full Whisper + alignment + diarization pipeline runs on AMD GPUs via the
+PyTorch ROCm 6.3 build and CTranslate2 v4.7.0+'s ROCm wheel. **Linux only**;
+RDNA 3 / RDNA 4 (RX 7000, RX 9000) are first-class; RDNA 2 (RX 6000) works
+with auto-applied env-var workarounds; Parakeet (NeMo) is NVIDIA-only and
+will be hidden in the UI.
+
+```bash
+sudo apt install ffmpeg python3.11 python3.11-venv unzip curl
+cd scribe
+./setup.sh              # one-time, installs the CUDA/CPU stack first
+./setup.sh --rocm       # swap in ROCm PyTorch + CTranslate2 ROCm wheel
+```
+
+Verify it took:
+
+```bash
+.venv/bin/python -m scribe.devices    # should show "GPU backend: rocm"
+.venv/bin/python -m scribe.scripts.check_rocm   # smoke-tests the full layer
+```
+
+Caveats:
+- AMD officially supports Ubuntu 22.04/24.04 and RHEL 9.7/10.1 for consumer
+  Radeons. Other distros (Fedora, Arch, Debian) work in practice but aren't in
+  AMD's matrix.
+- RDNA 2 cards may also need `export HSA_OVERRIDE_GFX_VERSION=10.3.0` if they
+  hit allocator faults; Scribe sets `CT2_CUDA_ALLOCATOR=cub_caching` for you.
+- See `docs/research/amd-rocm-research.md` for the full hardware/distro
+  picture and known upstream bugs.
+
 The installer creates a venv, installs PyTorch + WhisperX + FastAPI, then prints the device config it will use. You can rerun that check any time:
 
 ```bash

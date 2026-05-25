@@ -40,6 +40,80 @@ if [ "${1:-}" = "--realign" ]; then
   exit 0
 fi
 
+# --- --rocm: switch an existing venv to AMD ROCm acceleration ---
+# Run AFTER ./setup.sh has created the venv. Replaces the CUDA torch wheels
+# with the ROCm 6.3 build and installs the CTranslate2 ROCm wheel from
+# the v4.7.2 GitHub release (it's not on PyPI). Linux + RDNA 3/4 are
+# first-class; RDNA 2 works with auto-applied env-var workarounds.
+if [ "${1:-}" = "--rocm" ]; then
+  if [ "$OS" != "Linux" ]; then
+    echo "AMD ROCm support is Linux-only at the moment." >&2
+    echo "On Windows AMD, the path forward is whisper.cpp Vulkan, which" >&2
+    echo "Scribe doesn't integrate yet. See docs/research/amd-rocm-research.md." >&2
+    exit 1
+  fi
+  if [ ! -d .venv ]; then
+    echo "No .venv found. Run ./setup.sh first to create it." >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+
+  CT2_VERSION="${SCRIBE_CT2_ROCM_VERSION:-4.7.2}"
+  ROCM_TORCH_INDEX="${SCRIBE_ROCM_TORCH_INDEX:-https://download.pytorch.org/whl/rocm6.3}"
+
+  echo ">> Installing PyTorch ROCm 6.3 wheel (replacing CUDA build)"
+  pip install --upgrade --force-reinstall --index-url "$ROCM_TORCH_INDEX" torch torchaudio
+
+  echo
+  echo ">> Fetching CTranslate2 ROCm wheel v$CT2_VERSION"
+  TMPDIR="$(mktemp -d)"
+  trap 'rm -rf "$TMPDIR"' EXIT
+  WHEEL_ZIP_URL="https://github.com/OpenNMT/CTranslate2/releases/download/v${CT2_VERSION}/rocm-python-wheels-Linux.zip"
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl not found; install it and retry." >&2
+    exit 1
+  fi
+  if ! curl -L --fail -o "$TMPDIR/ct2-rocm.zip" "$WHEEL_ZIP_URL"; then
+    echo "Could not download $WHEEL_ZIP_URL" >&2
+    echo "Check the version (SCRIBE_CT2_ROCM_VERSION) or your network." >&2
+    exit 1
+  fi
+  if ! command -v unzip >/dev/null 2>&1; then
+    echo "unzip not found; install it (e.g. sudo apt install unzip) and retry." >&2
+    exit 1
+  fi
+  unzip -q "$TMPDIR/ct2-rocm.zip" -d "$TMPDIR/ct2"
+  PY_TAG="cp$(python -c 'import sys; print(f"{sys.version_info[0]}{sys.version_info[1]}")')"
+  WHEEL_FILE="$(ls "$TMPDIR/ct2"/ctranslate2-*-${PY_TAG}-*-linux_x86_64.whl 2>/dev/null | head -n1)"
+  if [ -z "$WHEEL_FILE" ]; then
+    echo "Could not find a CT2 ROCm wheel for $PY_TAG in the release zip." >&2
+    echo "Available files:" >&2
+    ls "$TMPDIR/ct2" >&2
+    exit 1
+  fi
+  echo ">> Installing $(basename "$WHEEL_FILE")"
+  pip install --upgrade --force-reinstall --no-deps "$WHEEL_FILE"
+
+  echo
+  echo ">> Verifying device configuration"
+  python -m scribe.devices || true
+
+  cat <<EOF
+
+>> AMD ROCm setup complete.
+>> Tier 1 (RDNA 3/4): you should be ready to go.
+>> Tier 2 (RDNA 2 / RX 6000):  Scribe will auto-apply
+>>   CT2_CUDA_ALLOCATOR=cub_caching for you.
+>>   You may also need:
+>>     export HSA_OVERRIDE_GFX_VERSION=10.3.0
+>>   See docs/research/amd-rocm-research.md for hardware notes.
+>> Run ./run.sh and try a transcription. If you see errors, paste the
+>> output of \`python -m scribe.devices\` plus the failure log.
+EOF
+  exit 0
+fi
+
 echo ">> Detected: $OS $ARCH"
 
 # --- python check ---

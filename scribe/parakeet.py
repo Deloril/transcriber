@@ -101,6 +101,7 @@ def _vad_chunks(audio: np.ndarray, hf_token: str | None, *, vad_onset: float, va
     """
     import whisperx  # type: ignore
     from whisperx.vads import Pyannote  # type: ignore
+    from .engine import _patch_pyannote_lstm_dropout
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     vad = Pyannote(
@@ -109,6 +110,9 @@ def _vad_chunks(audio: np.ndarray, hf_token: str | None, *, vad_onset: float, va
         vad_onset=vad_onset,
         vad_offset=vad_offset,
     )
+    # AMD ROCm: patch out LSTM dropout in pyannote VAD to dodge MIOpen header
+    # bug (#1995). No-op on every other backend.
+    _patch_pyannote_lstm_dropout(getattr(vad, "vad_pipeline", vad))
     waveform = Pyannote.preprocess_audio(audio)
     raw = vad({"waveform": waveform, "sample_rate": 16000})
     segments = Pyannote.merge_chunks(raw, chunk_size, onset=vad_onset, offset=vad_offset)

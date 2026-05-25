@@ -947,7 +947,15 @@
       const hint = $("modelHint");
       const v = ($("model").value || "").toLowerCase();
       const isParakeet = v.includes("parakeet");
-      if (isParakeet && _caps && _caps.parakeet && !_caps.parakeet.available) {
+      const backend = (_caps && _caps.gpu && _caps.gpu.backend) || "";
+      const parakeet = (_caps && _caps.parakeet) || {};
+      if (isParakeet && parakeet.blocked_by_backend) {
+        hint.classList.remove("hidden");
+        hint.style.color = "var(--warn)";
+        hint.innerHTML =
+          "⚠ Parakeet (NVIDIA NeMo) doesn't run on the active <strong>" +
+          backend.toUpperCase() + "</strong> backend. Pick a Whisper model.";
+      } else if (isParakeet && !parakeet.available && !parakeet.installed) {
         hint.classList.remove("hidden");
         hint.style.color = "var(--warn)";
         hint.innerHTML =
@@ -959,6 +967,11 @@
         hint.textContent = "English only · CUDA GPU recommended · ~30× faster than Whisper.";
       } else {
         hint.classList.add("hidden");
+      }
+      // Hide the Parakeet optgroup entirely on AMD ROCm (NeMo isn't an option).
+      const parakeetGroup = $("model").querySelector('optgroup[label*="Parakeet"]');
+      if (parakeetGroup) {
+        parakeetGroup.style.display = (backend === "rocm") ? "none" : "";
       }
     }
     $("model").addEventListener("change", updateModelHint);
@@ -1057,6 +1070,15 @@
           label: "Audio",
           value: a.channels ? `${a.channels} ch` : (a.codec || "—"),
           sub: [a.codec, fmtRate(a.sample_rate), fmtBitrate(a.bit_rate)].filter(s => s && s !== "—").join(" · "),
+        });
+      }
+      // Backend tile — shows whether transcription will run on cuda/rocm/mps/cpu.
+      if (_caps && _caps.gpu) {
+        const g = _caps.gpu;
+        stats.push({
+          label: "Backend",
+          value: (g.backend || "cpu").toUpperCase(),
+          sub: [g.device_name, g.vram_gb ? `${g.vram_gb} GB VRAM` : null].filter(Boolean).join(" · "),
         });
       }
       stats.forEach(s => {

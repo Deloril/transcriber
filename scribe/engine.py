@@ -309,20 +309,71 @@ if (
 # --------------------------------------------------------------------------- #
 # Device selection
 # --------------------------------------------------------------------------- #
+#
+# Backend taxonomy:
+#   "cuda" — NVIDIA CUDA via the official PyTorch wheel
+#   "rocm" — AMD ROCm via the pytorch-rocm wheel. PyTorch's ROCm build aliases
+#            torch.cuda.* to HIP, so torch.cuda.is_available() returns True on
+#            both — torch.version.hip is the discriminator. CTranslate2's
+#            ROCm wheel (v4.7.0+) takes device="cuda" too via its HIP shim.
+#   "mps"  — Apple Silicon Metal Performance Shaders
+#   "cpu"  — fallback
 
 
-def _torch_device() -> str:
+def gpu_backend() -> str:
+    """
+    Canonical four-state backend label. Cheap; safe to call repeatedly.
+    Honours SCRIBE_DEVICE for testing/forcing.
+    """
     forced = os.environ.get("SCRIBE_DEVICE", "").strip().lower()
-    if forced in {"cuda", "mps", "cpu"}:
+    if forced in {"cuda", "rocm", "mps", "cpu"}:
         return forced
     if torch.cuda.is_available():
+        # ROCm wheels populate both torch.version.cuda (compat string) and
+        # torch.version.hip; CUDA wheels leave torch.version.hip as None.
+        if getattr(torch.version, "hip", None):
+            return "rocm"
         return "cuda"
     if torch.backends.mps.is_available():
         return "mps"
     return "cpu"
 
 
+def _gpu_device_name() -> str:
+    """Best-effort GPU model name; safe to call when no GPU."""
+    if not torch.cuda.is_available():
+        return ""
+    try:
+        return torch.cuda.get_device_name(0) or ""
+    except Exception:
+        return ""
+
+
+def _is_rdna2() -> bool:
+    """Detect AMD RDNA 2 (RX 6000-series) via device name. Used to apply the
+    CT2_CUDA_ALLOCATOR=cub_caching workaround (CT2 issue #2012)."""
+    name = _gpu_device_name().lower()
+    return any(tag in name for tag in (
+        "rx 6", "radeon rx 6", "navi 21", "navi 22", "navi 23", "navi 24",
+        "gfx1030", "gfx1031", "gfx1032", "gfx1034",
+    ))
+
+
+def _torch_device() -> str:
+    """
+    PyTorch device string for alignment / pyannote. Note that under ROCm,
+    PyTorch *takes* "cuda" as the device label (its HIP backend aliases the
+    CUDA namespace), so we translate "rocm" → "cuda" at this boundary.
+    """
+    backend = gpu_backend()
+    if backend == "rocm":
+        return "cuda"   # PyTorch ROCm uses the cuda namespace
+    return backend
+
+
 def _cuda_vram_gb() -> float:
+    """VRAM of device 0 in GiB. Works for both CUDA and ROCm because
+    torch.cuda.* is HIP-aliased on the ROCm wheel."""
     if not torch.cuda.is_available():
         return 0.0
     try:
@@ -334,25 +385,39 @@ def _cuda_vram_gb() -> float:
 
 def _diarization_device() -> str:
     """
-    pyannote runs cleanly on CUDA and CPU; on MPS some ops still fall back
-    and the result can be slower than plain CPU. Default to CUDA if present,
-    else CPU. Override with SCRIBE_DIARIZE_DEVICE.
+    pyannote on CUDA/ROCm/CPU. Default to GPU when present, CPU otherwise.
+    On MPS some ops still fall back to CPU and the partial-MPS path is
+    slower than plain CPU, so we skip MPS unless explicitly forced.
     """
     forced = os.environ.get("SCRIBE_DIARIZE_DEVICE", "").strip().lower()
-    if forced in {"cuda", "mps", "cpu"}:
-        return forced
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    if forced in {"cuda", "rocm", "mps", "cpu"}:
+        # Translate rocm → cuda for the actual torch device string.
+        return "cuda" if forced == "rocm" else forced
+    backend = gpu_backend()
+    if backend in ("cuda", "rocm"):
+        return "cuda"
+    return "cpu"
 
 
 def _whisper_device_and_compute() -> tuple[str, str]:
-    """faster-whisper device + compute type. CTranslate2 has no MPS backend."""
+    """
+    faster-whisper device + compute type.
+
+    CTranslate2 has no MPS backend, but on its ROCm wheel (v4.7.0+) the
+    device flag is still "cuda" — same code path as NVIDIA. We auto-pick
+    int8_float16 on smaller VRAM cards to keep large-v3 comfortably under
+    the budget.
+    """
     forced_device = os.environ.get("SCRIBE_WHISPER_DEVICE", "").strip().lower()
     forced_compute = os.environ.get("SCRIBE_COMPUTE_TYPE", "").strip().lower()
 
-    if forced_device in {"cuda", "cpu"}:
-        device = forced_device
+    backend = gpu_backend()
+    if forced_device in {"cuda", "rocm", "cpu"}:
+        device = "cuda" if forced_device in {"cuda", "rocm"} else "cpu"
+    elif backend in ("cuda", "rocm"):
+        device = "cuda"
     else:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cpu"
 
     if forced_compute:
         return device, forced_compute
@@ -361,6 +426,45 @@ def _whisper_device_and_compute() -> tuple[str, str]:
         # large-v3 fp16 wants ~6 GB; int8_float16 brings it under ~4 GB.
         return device, "int8_float16" if _cuda_vram_gb() < 8 else "float16"
     return device, "int8"
+
+
+def _apply_rocm_runtime_workarounds() -> None:
+    """
+    AMD-specific environment fixes that have to be set before CT2 / pyannote
+    load any models. Idempotent and safe to call on non-AMD machines.
+
+    - RDNA 2 (gfx103x): CT2's default MallocAsync allocator crashes on these
+      cards with "illegal memory access." Switch to cub_caching as documented
+      in CT2 issue #2012.
+    """
+    if gpu_backend() != "rocm":
+        return
+    if _is_rdna2() and not os.environ.get("CT2_CUDA_ALLOCATOR"):
+        os.environ["CT2_CUDA_ALLOCATOR"] = "cub_caching"
+
+
+_apply_rocm_runtime_workarounds()
+
+
+def _patch_pyannote_lstm_dropout(pipeline: Any) -> None:
+    """
+    pyannote-audio 3.4's segmentation model uses nn.LSTM(dropout=0.5,...).
+    On ROCm ≥ 6.1.1, MIOpen can't compile the dropout kernel because the
+    hiprand_xorwow.h header was removed (pyannote-audio issue #1995).
+    Workaround: force dropout=0.0 after loading. Inference behaviour is
+    unchanged (dropout is a no-op outside training).
+
+    Idempotent. No-op on non-ROCm machines.
+    """
+    if gpu_backend() != "rocm":
+        return
+    try:
+        import torch.nn as nn
+        for module in pipeline.modules() if hasattr(pipeline, "modules") else []:
+            if isinstance(module, nn.LSTM) and module.dropout:
+                module.dropout = 0.0
+    except Exception as e:  # noqa: BLE001
+        print(f"[scribe] could not patch pyannote LSTM dropout: {e}")
 
 
 # --------------------------------------------------------------------------- #
@@ -730,6 +834,9 @@ def transcribe_diarize(
         diarize_pipeline = DiarizationPipeline(
             use_auth_token=hf_token, device=diarize_device
         )
+    # AMD ROCm: patch out LSTM dropout to dodge MIOpen header bug (#1995).
+    # No-op on every other backend.
+    _patch_pyannote_lstm_dropout(getattr(diarize_pipeline, "model", diarize_pipeline))
 
     progress("Running speaker diarization", 0.82)
     diar_kwargs: dict[str, Any] = {}
