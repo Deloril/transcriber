@@ -1797,6 +1797,7 @@ _ai_backend_transport_override: _ai_backend.Transport | None = None
 
 
 from . import model_tiers as _model_tiers  # noqa: E402
+from . import model_recommendations as _model_recs  # noqa: E402
 
 
 @app.get("/api/system/model-tiers")
@@ -1809,6 +1810,21 @@ async def get_system_model_tiers_endpoint() -> JSONResponse:
     """
     snapshot = _model_tiers_snapshot_override or _model_tiers.detect_hardware()
     return JSONResponse(_model_tiers.summarise(snapshot))
+
+
+@app.get("/api/system/model-recommendations")
+async def get_system_model_recommendations_endpoint() -> JSONResponse:
+    """Return tier picker + concrete model recommendations (F8.12).
+
+    Same hardware-snapshot story as ``/api/system/model-tiers``: pure
+    read, no project context, hardware override hook for tests. The
+    response shape is the F8.11 summary plus ``recommended_models``
+    inside each tier and a top-level ``embedding_models`` array. The
+    UI uses this to populate the model picker with sensible defaults
+    rather than asking the user to hand-type Ollama tags.
+    """
+    snapshot = _model_tiers_snapshot_override or _model_tiers.detect_hardware()
+    return JSONResponse(_model_recs.summarise_recommendations(snapshot))
 
 
 # Test hook: when set, the model-tiers endpoint uses this snapshot

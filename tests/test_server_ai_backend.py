@@ -540,3 +540,110 @@ class TestSystemModelTiersEndpoint:
         assert body["recommended"] in ("small", "mid", "large")
         assert "hardware" in body
         assert "tiers" in body
+
+
+# --------------------------------------------------------------------------- #
+# /api/system/model-recommendations (F8.12)
+# --------------------------------------------------------------------------- #
+
+
+class TestSystemModelRecommendationsEndpoint:
+    """The F8.12 endpoint surfaces concrete per-tier model picks plus
+    embedding-model recommendations alongside the F8.11 hardware fit."""
+
+    def test_returns_full_shape(self, server_env) -> None:
+        srv, client, _ = server_env
+        from scribe.model_tiers import HardwareSnapshot, TIER_LARGE
+
+        srv._model_tiers_snapshot_override = HardwareSnapshot(
+            gpu_backend="cuda",
+            gpu_name="Test GPU",
+            vram_gb=24.0,
+            system_ram_gb=64.0,
+            cpu_count=16,
+        )
+        try:
+            r = client.get("/api/system/model-recommendations")
+            assert r.status_code == 200
+            body = r.json()
+            assert set(body.keys()) == {
+                "hardware",
+                "tiers",
+                "recommended",
+                "embedding_models",
+            }
+            assert body["recommended"] == TIER_LARGE
+            assert len(body["tiers"]) == 3
+        finally:
+            srv._model_tiers_snapshot_override = None
+
+    def test_each_tier_carries_recommended_models(self, server_env) -> None:
+        srv, client, _ = server_env
+        from scribe.model_tiers import HardwareSnapshot
+
+        srv._model_tiers_snapshot_override = HardwareSnapshot(
+            gpu_backend="cuda",
+            gpu_name="GPU",
+            vram_gb=24.0,
+            system_ram_gb=64.0,
+            cpu_count=8,
+        )
+        try:
+            r = client.get("/api/system/model-recommendations")
+            assert r.status_code == 200
+            body = r.json()
+            for entry in body["tiers"]:
+                assert "recommended_models" in entry
+                models = entry["recommended_models"]
+                assert isinstance(models, list)
+                assert len(models) >= 1
+                defaults = [m for m in models if m["is_default"]]
+                assert len(defaults) == 1, entry["id"]
+                # Tier-fit fields from F8.11 still present.
+                assert entry["fit"] in (
+                    "comfortable",
+                    "marginal",
+                    "infeasible",
+                )
+        finally:
+            srv._model_tiers_snapshot_override = None
+
+    def test_spec_models_present(self, server_env) -> None:
+        # The F8.12 spec hard-codes these tags. The endpoint MUST surface
+        # them or downstream UI will silently lose the recommendation.
+        srv, client, _ = server_env
+        from scribe.model_tiers import HardwareSnapshot
+
+        srv._model_tiers_snapshot_override = HardwareSnapshot(
+            gpu_backend="cuda",
+            gpu_name="GPU",
+            vram_gb=24.0,
+            system_ram_gb=64.0,
+            cpu_count=8,
+        )
+        try:
+            r = client.get("/api/system/model-recommendations")
+            body = r.json()
+            tier_models = {
+                t["id"]: {m["tag"] for m in t["recommended_models"]}
+                for t in body["tiers"]
+            }
+            assert "llama3.2:3b" in tier_models["small"]
+            assert "phi3.5:3.8b" in tier_models["small"]
+            assert "phi4:14b" in tier_models["mid"]
+            assert "mistral-nemo:12b" in tier_models["mid"]
+            assert "qwen2.5:32b" in tier_models["large"]
+            assert "llama3.3:70b" in tier_models["large"]
+            embedding_tags = {m["tag"] for m in body["embedding_models"]}
+            assert "bge-m3" in embedding_tags
+            assert "nomic-embed-text:v1.5" in embedding_tags
+        finally:
+            srv._model_tiers_snapshot_override = None
+
+    def test_endpoint_works_with_no_override(self, server_env) -> None:
+        _srv, client, _ = server_env
+        r = client.get("/api/system/model-recommendations")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["recommended"] in ("small", "mid", "large")
+        assert "embedding_models" in body
