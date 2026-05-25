@@ -3,6 +3,16 @@ whisperx==3.4.3
 # Pin both torch and torchaudio below 2.9 until whisperx ships a fix.
 torch>=2.2.0,<2.9
 torchaudio>=2.2.0,<2.9
+# CTranslate2: whisperx pins <4.5.0 in metadata, but that version requires
+# cuDNN 8 which isn't shipped alongside modern torch wheels (cuDNN 9). 4.7.x
+# loads cleanly against torch 2.6+ on Linux/CUDA, and the relevant Whisper
+# APIs are unchanged.
+ctranslate2>=4.6,<4.8
+# huggingface_hub 1.x removed the `use_auth_token` kwarg; pyannote-audio 3.4
+# still passes it. Stay on 0.x until pyannote ships a fix.
+huggingface_hub>=0.30,<1.0
+# transformers 5.x requires huggingface_hub>=1.5; cap at 4.x to coexist.
+transformers>=4.40,<5.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12

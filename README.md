@@ -270,6 +270,10 @@ After processing, you get several files next to the original recording:
 
 **`python -m scribe.devices` says CUDA is not available but I have an NVIDIA GPU.** Your PyTorch was likely installed as the CPU-only build. Wipe the venv and rerun setup with the CUDA index: `rm -rf .venv && SCRIBE_TORCH=cu124 ./setup.sh` (use `cu121` for CUDA 12.1). Then `nvidia-smi` to confirm the driver is loaded.
 
+**`Could not load library libcudnn_ops_infer.so.8` (Linux + CUDA).** ctranslate2 4.4.x links against cuDNN 8, but modern PyTorch wheels ship cuDNN 9. requirements.txt pins ctranslate2 ≥ 4.6 which uses cuDNN 9 — if you have a stale install, run `pip install -U "ctranslate2>=4.6,<4.8"` inside the venv.
+
+**`TypeError: hf_hub_download() got an unexpected keyword argument 'use_auth_token'`.** huggingface_hub 1.x dropped the `use_auth_token` kwarg, but pyannote-audio 3.4 still passes it. requirements.txt pins `huggingface_hub<1.0` and `transformers<5` together to keep both happy. If pip resolved different versions, run `pip install -U -r requirements.txt` to realign.
+
 **`UnpicklingError: Weights only load failed ... Unsupported global: omegaconf.listconfig.ListConfig`.** PyTorch 2.6 flipped the default of `torch.load` to `weights_only=True`, and pyannote / whisperx checkpoints contain config containers that the strict loader rejects. Scribe handles this automatically: it allowlists the known-safe globals via `torch.serialization.add_safe_globals` and falls back to the legacy load path for any remaining cases (the model files come from HuggingFace via verified hashes). To enforce strict mode anyway and surface the failure, set `SCRIBE_STRICT_TORCH_LOAD=1` before launching the server.
 
 **Diarization "permission denied" / 401.** Make sure you accepted the licenses on both pyannote model pages and your `HF_TOKEN` is set in `.env`.
