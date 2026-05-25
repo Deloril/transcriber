@@ -94,6 +94,12 @@ from .codes import (
     list_codes,
     save_code,
 )
+from .source_schema import (
+    SCHEMA_FILENAME,
+    SourceAttributeSchema,
+    load_source_schema,
+    save_source_schema,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +131,10 @@ COMPONENT_SAMPLING_LOG = "sampling_log"
 # F3.1: codebook directory ships under the project root alongside
 # sources/ and participants/. Each code is one JSON file (see F2.1).
 COMPONENT_CODES_DIR = "codes_dir"
+# F3.2: project-level source attribute schema. Single JSON file at
+# the project root; declares the user-defined columns that source
+# ``custom_attributes`` use.
+COMPONENT_SOURCE_SCHEMA = "source_schema"
 
 # Default values for the "components" dict in the manifest. These are
 # relative paths inside the project directory.
@@ -134,6 +144,7 @@ DEFAULT_COMPONENT_PATHS: dict[str, str] = {
     COMPONENT_PARTICIPANTS_DIR: "participants",
     COMPONENT_SAMPLING_LOG: "sampling_log.jsonl",
     COMPONENT_CODES_DIR: "codes",
+    COMPONENT_SOURCE_SCHEMA: SCHEMA_FILENAME,
 }
 
 
@@ -465,6 +476,9 @@ class ProjectBundle:
     participants: list[Participant] = field(default_factory=list)
     sampling_log: list[SamplingEntry] = field(default_factory=list)
     codes: list[Code] = field(default_factory=list)
+    # F3.2: per-project schema declaring user-defined source columns.
+    # Optional — projects without explicit columns still work.
+    source_schema: SourceAttributeSchema | None = None
     manifest: ProjectManifest | None = None
 
     # ------------------------------------------------------------------ #
@@ -527,6 +541,16 @@ class ProjectBundle:
         if len(set(cids)) != len(cids):
             raise ProjectFormatError("Bundle has duplicate code ids")
 
+        # F3.2: optional source attribute schema rides along too.
+        if self.source_schema is not None:
+            self.source_schema.validate()
+            if self.source_schema.project_id != pid:
+                raise ProjectFormatError(
+                    f"SourceAttributeSchema project_id "
+                    f"{self.source_schema.project_id!r} does not match "
+                    f"bundle project {pid!r}"
+                )
+
         if self.manifest is not None:
             self.manifest.validate()
             if self.manifest.project_id != pid:
@@ -560,6 +584,12 @@ def load_project_bundle(
     log = read_sampling_log(projects_root, project_id)
     codes = list_codes(projects_root, project_id)
     try:
+        source_schema: SourceAttributeSchema | None = load_source_schema(
+            projects_root, project_id
+        )
+    except FileNotFoundError:
+        source_schema = None
+    try:
         manifest = read_or_build_manifest(projects_root, project_id)
     except FileNotFoundError:
         manifest = None
@@ -569,6 +599,7 @@ def load_project_bundle(
         participants=participants,
         sampling_log=log,
         codes=codes,
+        source_schema=source_schema,
         manifest=manifest,
     )
     bundle.validate()
@@ -615,6 +646,13 @@ def save_project_bundle(
     # incomplete bundle can't accidentally erase the codebook.
     for c in bundle.codes:
         save_code(projects_root, c)
+
+    # 3c. Source attribute schema (F3.2). Optional; written only when
+    # the bundle carries one. Like codes, *not* deleted when omitted —
+    # callers that want to drop the schema explicitly use
+    # ``delete_source_schema``.
+    if bundle.source_schema is not None:
+        save_source_schema(projects_root, bundle.source_schema)
 
     # 4. Sampling log.
     if replace_sampling_log:

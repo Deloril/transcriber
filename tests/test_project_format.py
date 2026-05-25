@@ -39,6 +39,7 @@ from scribe.project_format import (
     ARCHIVE_SUFFIX,
     ASSET_KIND_TRANSCRIPT,
     COMPONENT_CODES_DIR,
+    COMPONENT_SOURCE_SCHEMA,
     DEFAULT_COMPONENT_PATHS,
     FORMAT_NAME,
     FORMAT_VERSION,
@@ -55,6 +56,14 @@ from scribe.project_format import (
     read_or_build_manifest,
     save_project_bundle,
     write_manifest,
+)
+from scribe.source_schema import (
+    AttributeDefinition,
+    SCHEMA_FILENAME,
+    SourceAttributeSchema,
+    load_source_schema,
+    save_source_schema,
+    source_schema_path,
 )
 
 
@@ -1052,3 +1061,92 @@ class TestProjectSettingsRoundTripThroughBundle:
         target.mkdir()
         bundle = import_project_archive(target, archive)
         assert bundle.project.settings == {"default_coder": "Sam"}
+
+
+# --------------------------------------------------------------------------- #
+# F3.2 — source attribute schema integration
+# --------------------------------------------------------------------------- #
+
+
+class TestSourceSchemaInBundle:
+    def test_default_components_include_source_schema(self) -> None:
+        # The manifest's default-component dict must mention the schema
+        # so external readers know where to find it.
+        assert COMPONENT_SOURCE_SCHEMA == "source_schema"
+        assert (
+            DEFAULT_COMPONENT_PATHS[COMPONENT_SOURCE_SCHEMA]
+            == SCHEMA_FILENAME
+        )
+
+    def test_bundle_load_when_schema_absent(self, tmp_path: Path) -> None:
+        project = _saved_project(tmp_path)
+        bundle = load_project_bundle(tmp_path, project.id)
+        assert bundle.source_schema is None
+
+    def test_bundle_load_when_schema_present(self, tmp_path: Path) -> None:
+        project = _saved_project(tmp_path)
+        schema = SourceAttributeSchema.new(
+            project_id=project.id,
+            attributes=[AttributeDefinition(key="site", label="Site")],
+        )
+        save_source_schema(tmp_path, schema)
+        bundle = load_project_bundle(tmp_path, project.id)
+        assert bundle.source_schema is not None
+        assert [a.key for a in bundle.source_schema.attributes] == ["site"]
+
+    def test_bundle_save_persists_schema(self, tmp_path: Path) -> None:
+        project = Project.new(name="X")
+        schema = SourceAttributeSchema.new(
+            project_id=project.id,
+            attributes=[AttributeDefinition(key="round", type="number")],
+        )
+        bundle = ProjectBundle(project=project, source_schema=schema)
+        save_project_bundle(tmp_path, bundle)
+        # Read back through the source-schema persistence layer too.
+        loaded = load_source_schema(tmp_path, project.id)
+        assert [a.key for a in loaded.attributes] == ["round"]
+
+    def test_bundle_save_omitting_schema_does_not_delete(
+        self, tmp_path: Path
+    ) -> None:
+        # Mirrors the codebook + sampling-log "append-only by default":
+        # an empty bundle must not erase the schema on disk.
+        project = _saved_project(tmp_path)
+        schema = SourceAttributeSchema.new(
+            project_id=project.id,
+            attributes=[AttributeDefinition(key="site")],
+        )
+        save_source_schema(tmp_path, schema)
+        bundle = ProjectBundle(project=project)  # source_schema=None
+        save_project_bundle(tmp_path, bundle)
+        # Schema file still there.
+        assert source_schema_path(tmp_path, project.id).exists()
+
+    def test_bundle_validate_schema_project_id_mismatch(self) -> None:
+        project = Project.new(name="X", project_id="aaaaaaaaaaaa")
+        rogue = SourceAttributeSchema.new(project_id="bbbbbbbbbbbb")
+        bundle = ProjectBundle(project=project, source_schema=rogue)
+        with pytest.raises(ProjectFormatError):
+            bundle.validate()
+
+    def test_archive_round_trip_preserves_schema(
+        self, tmp_path: Path
+    ) -> None:
+        projects_root, project = _build_demo_project_on_disk(tmp_path)
+        schema = SourceAttributeSchema.new(
+            project_id=project.id,
+            attributes=[
+                AttributeDefinition(key="site", type="select",
+                                    options=["A", "B"], required=True),
+                AttributeDefinition(key="round", type="number"),
+            ],
+        )
+        save_source_schema(projects_root, schema)
+        archive = tmp_path / f"{project.id}{ARCHIVE_SUFFIX}"
+        export_project_archive(projects_root, project.id, archive)
+        target = tmp_path / "restored"
+        target.mkdir()
+        bundle = import_project_archive(target, archive)
+        assert bundle.source_schema is not None
+        keys = [a.key for a in bundle.source_schema.attributes]
+        assert keys == ["site", "round"]
