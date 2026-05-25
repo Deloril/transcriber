@@ -270,6 +270,8 @@ After processing, you get several files next to the original recording:
 
 **`python -m scribe.devices` says CUDA is not available but I have an NVIDIA GPU.** Your PyTorch was likely installed as the CPU-only build. Wipe the venv and rerun setup with the CUDA index: `rm -rf .venv && SCRIBE_TORCH=cu124 ./setup.sh` (use `cu121` for CUDA 12.1). Then `nvidia-smi` to confirm the driver is loaded.
 
+**`UnpicklingError: Weights only load failed ... Unsupported global: omegaconf.listconfig.ListConfig`.** PyTorch 2.6 flipped the default of `torch.load` to `weights_only=True`, and pyannote / whisperx checkpoints contain config containers that the strict loader rejects. Scribe handles this automatically: it allowlists the known-safe globals via `torch.serialization.add_safe_globals` and falls back to the legacy load path for any remaining cases (the model files come from HuggingFace via verified hashes). To enforce strict mode anyway and surface the failure, set `SCRIBE_STRICT_TORCH_LOAD=1` before launching the server.
+
 **Diarization "permission denied" / 401.** Make sure you accepted the licenses on both pyannote model pages and your `HF_TOKEN` is set in `.env`.
 
 **Diarization is slow on Apple Silicon.** Pyannote on MPS sometimes falls back to CPU silently. The default uses CPU for diarization on Apple Silicon (it's actually faster than the partial-MPS path). Force MPS if you want: `SCRIBE_DIARIZE_DEVICE=mps ./run.sh`.

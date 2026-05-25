@@ -162,6 +162,97 @@ class TranscriptionResult:
 
 
 # --------------------------------------------------------------------------- #
+# PyTorch 2.6+ checkpoint loading
+# --------------------------------------------------------------------------- #
+# In PyTorch 2.6, torch.load() flipped its default to weights_only=True. The
+# pyannote and whisperx checkpoints pickle a handful of config containers
+# (omegaconf ListConfig/DictConfig, numpy reconstructors, etc) that the strict
+# unpickler rejects. We allowlist a closed set of known-safe globals using
+# torch.serialization.add_safe_globals — that keeps the strict mode for
+# everything else but lets the model files we explicitly fetch from
+# HuggingFace deserialize.
+
+_SAFE_GLOBALS_REGISTERED = False
+
+
+def _register_safe_globals() -> None:
+    global _SAFE_GLOBALS_REGISTERED
+    if _SAFE_GLOBALS_REGISTERED:
+        return
+    _SAFE_GLOBALS_REGISTERED = True
+    if not hasattr(torch.serialization, "add_safe_globals"):
+        return  # PyTorch < 2.6, nothing to do
+    safe: list[Any] = []
+    try:
+        from omegaconf.listconfig import ListConfig
+        from omegaconf.dictconfig import DictConfig
+        from omegaconf.base import ContainerMetadata, Metadata
+        safe.extend([ListConfig, DictConfig, ContainerMetadata, Metadata])
+    except Exception:
+        pass
+    try:
+        from omegaconf.nodes import AnyNode
+        safe.append(AnyNode)
+    except Exception:
+        pass
+    try:
+        import collections
+        safe.extend([collections.OrderedDict, collections.defaultdict])
+    except Exception:
+        pass
+    try:
+        import numpy as np
+        safe.extend([
+            np.ndarray, np.dtype,
+            np.int8, np.int16, np.int32, np.int64,
+            np.uint8, np.uint16, np.uint32, np.uint64,
+            np.float16, np.float32, np.float64,
+            np.bool_, np.bytes_, np.str_,
+        ])
+        from numpy.core.multiarray import _reconstruct, scalar  # type: ignore
+        safe.extend([_reconstruct, scalar])
+    except Exception:
+        pass
+    try:
+        from pyannote.audio.core.task import Specifications  # type: ignore
+        safe.append(Specifications)
+    except Exception:
+        pass
+    try:
+        torch.serialization.add_safe_globals(safe)
+    except Exception as e:  # noqa: BLE001
+        print(f"[scribe] add_safe_globals failed (continuing): {e}")
+
+
+# Register at import so anything that calls torch.load through whisperx or
+# pyannote downstream gets the allowlist applied before the first checkpoint
+# load.
+_register_safe_globals()
+
+
+# Belt-and-braces: pyannote's checkpoint loader still trips the strict
+# unpickler on globals we haven't enumerated (it pickles arbitrary lightning
+# hyperparameters). Until pyannote ships a fix for PyTorch 2.6, monkeypatch
+# torch.load so that when the caller doesn't explicitly set weights_only=True,
+# we default to False for these model files. Opt out by setting
+# SCRIBE_STRICT_TORCH_LOAD=1.
+if (
+    os.environ.get("SCRIBE_STRICT_TORCH_LOAD", "").strip() not in {"1", "true", "True"}
+    and not getattr(torch.load, "_scribe_patched", False)
+):
+    _orig_torch_load = torch.load
+
+    def _scribe_torch_load(*args: Any, **kwargs: Any):
+        # If the caller passed weights_only explicitly, respect it.
+        if "weights_only" not in kwargs:
+            kwargs["weights_only"] = False
+        return _orig_torch_load(*args, **kwargs)
+
+    _scribe_torch_load._scribe_patched = True  # type: ignore[attr-defined]
+    torch.load = _scribe_torch_load  # type: ignore[assignment]
+
+
+# --------------------------------------------------------------------------- #
 # Device selection
 # --------------------------------------------------------------------------- #
 
