@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Scribe — library</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #181b22;
+      --panel-2: #1f232c;
+      --border: #2a2f3a;
+      --text: #e7ebf2;
+      --muted: #8b94a7;
+      --accent: #7aa7ff;
+      --accent-2: #a78bfa;
+      --ok: #5fd49b;
+      --warn: #f5b672;
+      --err: #ff7676;
+      --shadow: 0 8px 30px rgba(0,0,0,.4);
+    }
+    * { box-sizing: border-box; }
+    html, body { background: var(--bg); color: var(--text); margin: 0; height: 100%; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif; }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px 80px; }
+    header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 22px; }
+    h1 { font-size: 22px; margin: 0; letter-spacing: -.01em; }
+    header .sub { color: var(--muted); font-size: 13px; }
+    header .links { margin-left: auto; display: flex; gap: 8px; }
+    header a, header button {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    header a:hover, header button:hover { border-color: var(--accent); }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px 20px;
+      box-shadow: var(--shadow);
+      margin-bottom: 18px;
+    }
+
+    .toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .toolbar input[type="search"] {
+      flex: 1; min-width: 220px;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 11px;
+      font: inherit;
+    }
+    .toolbar input[type="search"]:focus { outline: 2px solid var(--accent); border-color: transparent; }
+    .toolbar .total { color: var(--muted); font-size: 13px; }
+    .toolbar .refresh {
+      background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 12px; font-size: 13px; cursor: pointer; font-weight: 500;
+    }
+    .toolbar .refresh:hover { border-color: var(--accent); }
+
+    table.lib {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    table.lib thead th {
+      text-align: left;
+      font-weight: 600;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel-2);
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }
+    table.lib thead th.sorted-asc::after { content: " ▲"; color: var(--accent); }
+    table.lib thead th.sorted-desc::after { content: " ▼"; color: var(--accent); }
+    table.lib tbody td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    table.lib tbody tr:hover { background: rgba(122,167,255,.04); }
+    table.lib tbody td.numeric { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    table.lib tbody td.filename {
+      max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    table.lib tbody td.filename strong { color: var(--text); font-weight: 600; }
+    table.lib tbody td.actions {
+      white-space: nowrap;
+    }
+    table.lib tbody td.actions a, table.lib tbody td.actions button {
+      display: inline-block;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 5px 10px;
+      font-size: 12px;
+      text-decoration: none;
+      margin-right: 6px;
+      cursor: pointer;
+    }
+    table.lib tbody td.actions a:hover { border-color: var(--accent); }
+    table.lib tbody td.actions .danger:hover { border-color: var(--err); color: var(--err); }
+    table.lib tbody td.actions .disabled {
+      opacity: .4; pointer-events: none;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 999px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .02em;
+      text-transform: uppercase;
+    }
+    .pill.status-done { color: var(--ok); border-color: rgba(95,212,155,.4); }
+    .pill.status-running { color: var(--accent); border-color: rgba(122,167,255,.4); }
+    .pill.status-queued { color: var(--muted); }
+    .pill.status-error { color: var(--err); border-color: rgba(255,118,118,.4); }
+    .pill.mode { text-transform: none; letter-spacing: 0; font-weight: 500; }
+
+    .speakers { color: var(--muted); }
+    .speakers .more { color: var(--accent); }
+
+    .empty {
+      padding: 60px 20px; text-align: center; color: var(--muted);
+    }
+    .empty a { color: var(--accent); }
+
+    .err-banner {
+      background: rgba(255,118,118,.12);
+      border: 1px solid rgba(255,118,118,.4);
+      color: var(--err);
+      border-radius: 10px;
+      padding: 10px 14px;
+      margin-bottom: 14px;
+      font-size: 13px;
+    }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Scribe Library</h1>
+      <span class="sub">All persisted transcriptions on this machine</span>
+      <span class="links">
+        <a href="/" title="Back to upload form">← Upload</a>
+      </span>
+    </header>
+
+    <div class="card">
+      <div class="toolbar">
+        <input id="search" type="search" placeholder="Search filenames or speakers…" autocomplete="off">
+        <button id="refresh" class="refresh" type="button">Refresh</button>
+        <span id="total" class="total"></span>
+      </div>
+    </div>
+
+    <div id="errBanner" class="err-banner hidden"></div>
+
+    <div class="card" style="padding: 0; overflow: hidden;">
+      <table class="lib" id="libTable">
+        <thead>
+          <tr>
+            <th data-sort="input_filename">File</th>
+            <th data-sort="duration_seconds" class="numeric">Duration</th>
+            <th data-sort="mode">Mode</th>
+            <th data-sort="speaker_count" class="numeric">Speakers</th>
+            <th data-sort="language">Lang</th>
+            <th data-sort="created_at" class="numeric sorted-desc">Created</th>
+            <th data-sort="status">Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="libBody"></tbody>
+      </table>
+      <div id="emptyMsg" class="empty hidden">
+        No transcriptions yet. <a href="/">Upload a recording →</a>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import {
+      fmtDuration, escapeHtml,
+      compareLibraryRows, searchLibraryRows, formatLibraryDate,
+      formatLibrarySpeakers,
+    } from "/static/js/helpers.mjs";
+
+    const $ = (id) => document.getElementById(id);
+    const tbody = $("libBody"), emptyMsg = $("emptyMsg"), totalEl = $("total");
+    const searchEl = $("search"), refreshBtn = $("refresh");
+    const errBanner = $("errBanner");
+
+    let allRows = [];
+    let sortKey = "created_at";
+    let sortDir = "desc";
+
+    async function loadLibrary() {
+      try {
+        const r = await fetch("/api/jobs");
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        allRows = Array.isArray(j.jobs) ? j.jobs : [];
+        errBanner.classList.add("hidden");
+      } catch (e) {
+        errBanner.textContent = "Could not load library: " + (e.message || e);
+        errBanner.classList.remove("hidden");
+        allRows = [];
+      }
+      render();
+    }
+
+    function render() {
+      const q = searchEl.value;
+      const filtered = searchLibraryRows(allRows, q);
+      const sorted = filtered.slice().sort((a, b) =>
+        compareLibraryRows(a, b, sortKey, sortDir)
+      );
+      const showing = sorted.length;
+      const total = allRows.length;
+      totalEl.textContent =
+        showing === total
+          ? `${total} ${total === 1 ? "job" : "jobs"}`
+          : `${showing} of ${total}`;
+      // Update sort-arrow indicators on the headers.
+      document.querySelectorAll("table.lib thead th").forEach(th => {
+        th.classList.remove("sorted-asc", "sorted-desc");
+        if (th.dataset.sort === sortKey) {
+          th.classList.add(sortDir === "asc" ? "sorted-asc" : "sorted-desc");
+        }
+      });
+      // Render rows.
+      tbody.innerHTML = "";
+      if (!sorted.length) {
+        emptyMsg.classList.remove("hidden");
+        return;
+      }
+      emptyMsg.classList.add("hidden");
+      const frag = document.createDocumentFragment();
+      sorted.forEach(row => frag.appendChild(renderRow(row)));
+      tbody.appendChild(frag);
+    }
+
+    function renderRow(row) {
+      const tr = document.createElement("tr");
+      tr.dataset.jobId = row.id;
+
+      const filename = escapeHtml(row.input_filename || "(unnamed)");
+      const speakers = formatLibrarySpeakers(row.speakers || []);
+      const created = formatLibraryDate(row.created_at);
+      const duration = fmtDuration(row.duration_seconds || 0);
+      const mode = escapeHtml(row.mode || "");
+      const lang = escapeHtml((row.language || "—").toUpperCase());
+      const status = escapeHtml(row.status || "done");
+
+      const canEdit = row.status === "done";
+      const editLink = canEdit
+        ? `<a href="/edit/${encodeURIComponent(row.id)}">Open</a>`
+        : `<a class="disabled" title="Editor opens once the job finishes">Open</a>`;
+
+      const downloads = (row.has_outputs && canEdit)
+        ? `<a href="/api/job/${encodeURIComponent(row.id)}/download/json" title="Download JSON transcript">JSON</a>` +
+          `<a href="/api/job/${encodeURIComponent(row.id)}/download/srt" title="Download SRT subtitles">SRT</a>`
+        : "";
+
+      tr.innerHTML = `
+        <td class="filename" title="${filename}">
+          <strong>${filename}</strong>
+        </td>
+        <td class="numeric">${duration}</td>
+        <td><span class="pill mode">${mode || "—"}</span></td>
+        <td class="numeric speakers">${row.speaker_count} <span class="more">${escapeHtml(speakers)}</span></td>
+        <td>${lang}</td>
+        <td class="numeric" title="${escapeHtml(row.created_at || "")}">${escapeHtml(created)}</td>
+        <td><span class="pill status-${status}">${status}</span></td>
+        <td class="actions">
+          ${editLink}
+          ${downloads}
+          <button class="danger" data-action="delete" data-id="${escapeHtml(row.id)}">Delete</button>
+        </td>
+      `;
+      return tr;
+    }
+
+    tbody.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-action='delete']");
+      if (!btn) return;
+      const jobId = btn.dataset.id;
+      if (!confirm(`Delete this transcription? This removes the source media and all transcript files. This cannot be undone.`)) return;
+      btn.disabled = true;
+      btn.textContent = "Deleting…";
+      try {
+        const r = await fetch(`/api/job/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        // Drop the row locally for instant feedback; refresh in the background
+        // to confirm the server-side state.
+        allRows = allRows.filter(x => x.id !== jobId);
+        render();
+        loadLibrary();
+      } catch (e2) {
+        btn.disabled = false;
+        btn.textContent = "Delete";
+        errBanner.textContent = "Delete failed: " + (e2.message || e2);
+        errBanner.classList.remove("hidden");
+      }
+    });
+
+    document.querySelectorAll("table.lib thead th[data-sort]").forEach(th => {
+      th.addEventListener("click", () => {
+        const key = th.dataset.sort;
+        if (sortKey === key) {
+          sortDir = sortDir === "asc" ? "desc" : "asc";
+        } else {
+          sortKey = key;
+          sortDir = "asc";
+          // Numeric and date columns default to descending so the
+          // newest/biggest item is at the top.
+          if (["duration_seconds", "created_at", "speaker_count"].includes(key)) {
+            sortDir = "desc";
+          }
+        }
+        render();
+      });
+    });
+
+    let searchTimer = null;
+    searchEl.addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(render, 60);
+    });
+
+    refreshBtn.addEventListener("click", loadLibrary);
+
+    loadLibrary();
+  </script>
+</body>
+</html>

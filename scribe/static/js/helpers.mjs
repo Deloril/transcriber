@@ -55,6 +55,137 @@ export function escapeHtml(s) {
   }[c]));
 }
 
+// ---------- Library view (F10.1) ----------
+
+/**
+ * Case-insensitive substring filter that mirrors
+ * ``scribe.library.matches_query`` server-side. The library page
+ * fetches every job once and then filters locally as the user types,
+ * so this helper has to behave identically — same fields, same
+ * normalisation — to avoid surprises.
+ *
+ * Empty/whitespace queries match everything.
+ *
+ * @param {object} row - a row produced by ``GET /api/jobs``.
+ * @param {string} q
+ * @returns {boolean}
+ */
+export function matchesLibraryQuery(row, q) {
+  const needle = String(q ?? "").trim().toLowerCase();
+  if (!needle) return true;
+  const speakers = Array.isArray(row.speakers) ? row.speakers.join(" ") : "";
+  const haystack = [
+    row.input_filename,
+    row.status,
+    row.mode,
+    row.language,
+    row.model,
+    speakers,
+  ].map(x => String(x ?? "")).join(" ").toLowerCase();
+  return haystack.includes(needle);
+}
+
+/**
+ * Filter library rows. Preserves input order so the caller
+ * controls sort. Mirrors the server's ``filter_rows`` exactly.
+ *
+ * @param {Array<object>} rows
+ * @param {string} q
+ * @returns {Array<object>}
+ */
+export function searchLibraryRows(rows, q) {
+  if (!Array.isArray(rows)) return [];
+  return rows.filter(r => matchesLibraryQuery(r, q));
+}
+
+/**
+ * Compare two library rows by a known sort key for use with
+ * ``Array.prototype.sort``. The keys we currently support are:
+ *
+ *   - ``input_filename`` (string, case-insensitive)
+ *   - ``mode`` (string)
+ *   - ``language`` (string)
+ *   - ``status`` (string)
+ *   - ``duration_seconds`` (numeric, nulls last)
+ *   - ``speaker_count`` (numeric)
+ *   - ``created_at`` (ISO string; lexicographic order matches chronological)
+ *
+ * Unknown keys fall back to ``id`` so the sort is still
+ * deterministic (the table won't shuffle rows around for no
+ * reason). Direction must be ``"asc"`` or ``"desc"``.
+ *
+ * @param {object} a
+ * @param {object} b
+ * @param {string} key
+ * @param {"asc"|"desc"} dir
+ * @returns {number}
+ */
+export function compareLibraryRows(a, b, key, dir) {
+  const sign = dir === "asc" ? 1 : -1;
+  const va = a == null ? undefined : a[key];
+  const vb = b == null ? undefined : b[key];
+  // Nulls / undefineds always sink to the bottom regardless of direction.
+  const aMissing = va === null || va === undefined || va === "";
+  const bMissing = vb === null || vb === undefined || vb === "";
+  if (aMissing && bMissing) {
+    // Tie-break on id ascending so stable across re-sorts.
+    return String(a?.id ?? "").localeCompare(String(b?.id ?? ""));
+  }
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  let cmp;
+  if (typeof va === "number" && typeof vb === "number") {
+    cmp = va - vb;
+  } else {
+    // Strings: case-insensitive natural-ish compare.
+    cmp = String(va).toLowerCase().localeCompare(String(vb).toLowerCase());
+  }
+  if (cmp !== 0) return sign * cmp;
+  // Tie-break on id (always ascending) for determinism.
+  return String(a?.id ?? "").localeCompare(String(b?.id ?? ""));
+}
+
+/**
+ * Format an ISO-8601 timestamp string (e.g. ``2026-05-25T14:30:00Z``)
+ * for the library's "Created" column. Returns the empty string for
+ * blank input and the raw input on parse failure so the user always
+ * sees *something* — never just a silent gap.
+ *
+ * Output shape: ``YYYY-MM-DD HH:MM`` in the browser's local
+ * timezone (no seconds, no timezone suffix). The full ISO string
+ * is preserved on the row's ``title`` for hover.
+ *
+ * @param {string} iso
+ * @returns {string}
+ */
+export function formatLibraryDate(iso) {
+  if (iso == null || iso === "") return "";
+  const s = String(iso);
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return s;
+  const pad = (n) => String(n).padStart(2, "0");
+  const Y = d.getFullYear();
+  const M = pad(d.getMonth() + 1);
+  const D = pad(d.getDate());
+  const h = pad(d.getHours());
+  const m = pad(d.getMinutes());
+  return `${Y}-${M}-${D} ${h}:${m}`;
+}
+
+/**
+ * Render a list of speaker labels for the library row's "Speakers"
+ * column. We always show at most two names; the rest collapse into
+ * a "+N more" suffix so the column stays compact.
+ *
+ * @param {Array<string>} speakers
+ * @returns {string}
+ */
+export function formatLibrarySpeakers(speakers) {
+  if (!Array.isArray(speakers) || speakers.length === 0) return "";
+  if (speakers.length <= 2) return speakers.join(", ");
+  return `${speakers[0]}, ${speakers[1]} +${speakers.length - 2} more`;
+}
+
 // ---------- ETA math ----------
 
 /**

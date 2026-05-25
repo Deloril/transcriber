@@ -216,6 +216,14 @@ async def editor_page(request: Request, job_id: str) -> HTMLResponse:
     )
 
 
+# F10.1 — Library view. The home page is the upload form; ``/library``
+# is a separate page that lists every persisted transcription so the
+# user doesn't have to remember the per-job ``/edit/<id>`` URL.
+@app.get("/library", response_class=HTMLResponse)
+async def library_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "library.html", {})
+
+
 _README_PATH = ROOT / "README.md"
 _README_CACHE: dict[str, Any] = {"mtime": 0.0, "html": ""}
 
@@ -2115,6 +2123,80 @@ def _job_dict(job: Job) -> dict[str, Any]:
         "result": job.result,
         "input_filename": job.input_filename,
     }
+
+
+# --------------------------------------------------------------------------- #
+# F10.1 — Library: list + delete
+#
+# The home-page upload form is unchanged; ``/library`` is a separate
+# page (rendered above) that calls ``GET /api/jobs`` to render every
+# persisted transcription as a sortable, filterable row. Deletion
+# wipes the per-job ``uploads/`` and ``outputs/`` trees in one shot
+# so reclaiming disk space is a single action.
+# --------------------------------------------------------------------------- #
+
+
+from . import library as _library  # noqa: E402  (after module-level state)
+
+
+@app.get("/api/jobs")
+async def list_jobs_endpoint(q: str = "") -> JSONResponse:
+    """Return summary rows for every persisted job, newest first.
+
+    The optional ``q`` query string applies the server-side
+    case-insensitive substring filter (filename / speakers / mode /
+    status / language / model). The client keeps a copy of the full
+    list so live typing into the search box doesn't round-trip.
+    """
+    with JOBS_LOCK:
+        # Snapshot-copy the values so we can release the lock before
+        # building the heavy summary dicts.
+        jobs_snapshot = list(JOBS.values())
+    rows = _library.summarise_jobs(jobs_snapshot)
+    if q:
+        rows = _library.filter_rows(rows, q)
+    return JSONResponse({"jobs": rows, "total": len(rows)})
+
+
+@app.delete("/api/job/{job_id}")
+async def delete_job_endpoint(job_id: str) -> JSONResponse:
+    """Remove a job from the registry and wipe its on-disk artefacts.
+
+    Both the upload directory (``uploads/<id>/``) and the output
+    directory (``outputs/<id>/``) are removed atomically from the
+    user's perspective: the in-memory job is dropped first, then the
+    filesystem is cleaned up best-effort. Errors deleting individual
+    files are *not* surfaced because an interrupted partial delete
+    is preferable to a stale registry entry the user can't act on.
+
+    Returns 404 if no such job is registered.
+    """
+    _check_job_id(job_id)
+    with JOBS_LOCK:
+        job = JOBS.pop(job_id, None)
+        if job is None:
+            raise HTTPException(404, "Job not found")
+        out_dir = job.output_dir.resolve()
+        in_path = job.input_path.resolve()
+    # Both paths must live inside the configured roots — refuse to
+    # touch anything outside them so a hand-edited job.json can't
+    # rm-rf the developer's filesystem.
+    if not _is_under(out_dir, OUTPUT_DIR.resolve()):
+        # Re-instate the job to keep the registry consistent.
+        with JOBS_LOCK:
+            JOBS[job_id] = job
+        raise HTTPException(403, "output_dir escapes OUTPUT_DIR")
+    upload_dir = in_path.parent
+    if upload_dir != UPLOAD_DIR.resolve() and not _is_under(upload_dir, UPLOAD_DIR.resolve()):
+        with JOBS_LOCK:
+            JOBS[job_id] = job
+        raise HTTPException(403, "input_path escapes UPLOAD_DIR")
+    # Delete the per-job upload directory (which holds the source
+    # media file) and the entire outputs tree (sidecars, edits,
+    # waveform cache, error log).
+    shutil.rmtree(upload_dir, ignore_errors=True)
+    shutil.rmtree(out_dir, ignore_errors=True)
+    return JSONResponse({"ok": True, "id": job_id})
 
 
 @app.get("/api/job/{job_id}/error")

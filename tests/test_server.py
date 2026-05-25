@@ -732,6 +732,254 @@ class TestPersistence:
 
 
 # --------------------------------------------------------------------------- #
+# Library — list + delete (F10.1)
+# --------------------------------------------------------------------------- #
+
+
+class TestLibraryAPI:
+    """``GET /api/jobs`` returns the row-shaped summary of every
+    persisted job, sorted newest-first. The endpoint is read-only,
+    so the tests focus on the shape, the sort, and the search filter.
+    Deletion is covered by :class:`TestDeleteJobAPI` below.
+    """
+
+    def test_returns_empty_list_when_no_jobs(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get("/api/jobs")
+        assert r.status_code == 200
+        body = r.json()
+        assert body == {"jobs": [], "total": 0}
+
+    def test_returns_summary_rows_for_existing_jobs(self, server_env) -> None:
+        srv, client, _ = server_env
+        _new_job(
+            srv,
+            id="abc123def456",
+            input_filename="Interview.wav",
+            mode="diarize",
+            language="en",
+            model="large-v3",
+            created_at="2026-05-25T10:00:00Z",
+            result={
+                "language": "en",
+                "mode": "diarize",
+                "speakers": ["Luke", "Maria"],
+                "segments": [
+                    {"start": 0, "end": 60, "speaker": "Luke", "text": "hi", "words": []},
+                ],
+            },
+            output_paths={"json": "outputs/abc123def456/x.json"},
+        )
+        r = client.get("/api/jobs")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total"] == 1
+        row = body["jobs"][0]
+        assert row["id"] == "abc123def456"
+        assert row["input_filename"] == "Interview.wav"
+        assert row["mode"] == "diarize"
+        assert row["language"] == "en"
+        assert row["status"] == "done"
+        assert row["speakers"] == ["Luke", "Maria"]
+        assert row["speaker_count"] == 2
+        assert row["duration_seconds"] == 60
+        assert row["has_outputs"] is True
+
+    def test_sorts_newest_first(self, server_env) -> None:
+        srv, client, _ = server_env
+        # Drop in three jobs out of order; the listing must come back
+        # newest first regardless of dict insertion order.
+        for jid, ts in [
+            ("aaaaaaaaaaaa", "2026-01-01T00:00:00Z"),
+            ("bbbbbbbbbbbb", "2026-05-25T00:00:00Z"),
+            ("cccccccccccc", "2026-03-15T00:00:00Z"),
+        ]:
+            _new_job(
+                srv,
+                id=jid,
+                created_at=ts,
+                out_dir=srv.OUTPUT_DIR / jid,
+            )
+        r = client.get("/api/jobs")
+        ids = [row["id"] for row in r.json()["jobs"]]
+        assert ids == ["bbbbbbbbbbbb", "cccccccccccc", "aaaaaaaaaaaa"]
+
+    def test_includes_running_and_error_jobs(self, server_env) -> None:
+        # Per the F10.1 spec, the library surfaces interrupted-by-restart
+        # jobs (status=error) so the user can clean them up. Also covers
+        # in-progress jobs.
+        srv, client, _ = server_env
+        _new_job(
+            srv,
+            id="aaaaaaaaaaaa",
+            status="error",
+            error="Server restarted while running",
+            out_dir=srv.OUTPUT_DIR / "aaaaaaaaaaaa",
+        )
+        _new_job(
+            srv,
+            id="bbbbbbbbbbbb",
+            status="running",
+            progress=0.5,
+            message="Transcribing…",
+            out_dir=srv.OUTPUT_DIR / "bbbbbbbbbbbb",
+        )
+        r = client.get("/api/jobs")
+        statuses = {row["id"]: row["status"] for row in r.json()["jobs"]}
+        assert statuses == {"aaaaaaaaaaaa": "error", "bbbbbbbbbbbb": "running"}
+
+    def test_filter_query_by_filename(self, server_env) -> None:
+        srv, client, _ = server_env
+        _new_job(
+            srv, id="aaaaaaaaaaaa", input_filename="MariaInterview.wav",
+            out_dir=srv.OUTPUT_DIR / "aaaaaaaaaaaa",
+        )
+        _new_job(
+            srv, id="bbbbbbbbbbbb", input_filename="Standup.wav",
+            out_dir=srv.OUTPUT_DIR / "bbbbbbbbbbbb",
+        )
+        r = client.get("/api/jobs?q=interview")
+        body = r.json()
+        assert body["total"] == 1
+        assert body["jobs"][0]["id"] == "aaaaaaaaaaaa"
+
+    def test_filter_query_by_speaker(self, server_env) -> None:
+        srv, client, _ = server_env
+        _new_job(
+            srv, id="aaaaaaaaaaaa",
+            input_filename="x.wav",
+            result={"speakers": ["Luke", "Maria"], "segments": []},
+            out_dir=srv.OUTPUT_DIR / "aaaaaaaaaaaa",
+        )
+        _new_job(
+            srv, id="bbbbbbbbbbbb",
+            input_filename="y.wav",
+            result={"speakers": ["Bob"], "segments": []},
+            out_dir=srv.OUTPUT_DIR / "bbbbbbbbbbbb",
+        )
+        r = client.get("/api/jobs?q=maria")
+        body = r.json()
+        assert body["total"] == 1
+        assert body["jobs"][0]["id"] == "aaaaaaaaaaaa"
+
+    def test_empty_query_returns_all(self, server_env) -> None:
+        srv, client, _ = server_env
+        _new_job(srv, id="aaaaaaaaaaaa", out_dir=srv.OUTPUT_DIR / "aaaaaaaaaaaa")
+        _new_job(srv, id="bbbbbbbbbbbb", out_dir=srv.OUTPUT_DIR / "bbbbbbbbbbbb")
+        r = client.get("/api/jobs?q=")
+        assert r.json()["total"] == 2
+
+
+class TestLibraryPage:
+    def test_serves_html(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get("/library")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/html")
+        # Sanity check on the template contents — the table header.
+        assert "Library" in r.text or "library" in r.text
+
+
+class TestDeleteJobAPI:
+    """``DELETE /api/job/{id}`` removes the job from the registry and
+    wipes its on-disk artefacts (uploads + outputs). The library row
+    disappears on the next refresh."""
+
+    def test_deletes_known_job(self, server_env) -> None:
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        # Both directories exist after _new_job runs.
+        assert job.input_path.exists()
+        assert job.output_dir.exists()
+
+        r = client.delete(f"/api/job/{job.id}")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "id": job.id}
+
+        # Registry is empty now.
+        assert job.id not in srv.JOBS
+        # Both directories are gone.
+        assert not job.input_path.parent.exists()
+        assert not job.output_dir.exists()
+
+    def test_returns_404_for_unknown_job(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.delete("/api/job/abcdef012345")
+        assert r.status_code == 404
+
+    def test_rejects_invalid_job_id(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.delete("/api/job/not-a-job")
+        # 400 (validator) is the expected response for malformed ids.
+        assert r.status_code == 400
+
+    def test_idempotent_on_missing_files(self, server_env) -> None:
+        # If the directories are already gone (a partial earlier delete),
+        # the endpoint still succeeds: it removes the in-memory record.
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        shutil.rmtree(job.input_path.parent, ignore_errors=True)
+        shutil.rmtree(job.output_dir, ignore_errors=True)
+        r = client.delete(f"/api/job/{job.id}")
+        assert r.status_code == 200
+        assert job.id not in srv.JOBS
+
+    def test_does_not_touch_other_jobs(self, server_env) -> None:
+        srv, client, _ = server_env
+        # The shared `_new_job` helper hardcodes its input path under
+        # `abc123def456`, so two synthetic jobs would share an upload
+        # dir. Build the second job with its own per-id paths so the
+        # delete-isolation assertion actually means something.
+        job_a = _new_job(srv, id="aaaaaaaaaaaa", out_dir=srv.OUTPUT_DIR / "aaaaaaaaaaaa")
+        # Override job_a's input path to its own per-id directory too
+        # so deleting it doesn't touch any other job's uploads.
+        job_a_in_dir = srv.UPLOAD_DIR / "aaaaaaaaaaaa"
+        job_a_in_dir.mkdir(parents=True, exist_ok=True)
+        job_a_in = job_a_in_dir / "in.wav"
+        job_a_in.write_bytes(b"\x00" * 32)
+        job_a.input_path = job_a_in
+
+        job_b_in_dir = srv.UPLOAD_DIR / "bbbbbbbbbbbb"
+        job_b_in_dir.mkdir(parents=True, exist_ok=True)
+        job_b_in = job_b_in_dir / "in.wav"
+        job_b_in.write_bytes(b"\x00" * 32)
+        job_b_out = srv.OUTPUT_DIR / "bbbbbbbbbbbb"
+        job_b_out.mkdir(parents=True, exist_ok=True)
+        job_b = srv.Job(
+            id="bbbbbbbbbbbb",
+            input_path=job_b_in,
+            output_dir=job_b_out,
+            mode="diarize", speakers=None, num_speakers=None,
+            language="en", model="large-v3",
+            created_at="2026-05-25T00:00:00Z",
+            status="done", input_filename="in.wav",
+        )
+        srv.JOBS[job_b.id] = job_b
+
+        client.delete(f"/api/job/{job_a.id}")
+        # Job B's files survive.
+        assert job_b.input_path.exists()
+        assert job_b.output_dir.exists()
+        assert job_b.id in srv.JOBS
+
+    def test_after_delete_get_returns_404(self, server_env) -> None:
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        client.delete(f"/api/job/{job.id}")
+        r = client.get(f"/api/job/{job.id}")
+        assert r.status_code == 404
+
+    def test_after_delete_library_listing_drops_the_row(self, server_env) -> None:
+        srv, client, _ = server_env
+        _new_job(srv, id="aaaaaaaaaaaa", out_dir=srv.OUTPUT_DIR / "aaaaaaaaaaaa")
+        _new_job(srv, id="bbbbbbbbbbbb", out_dir=srv.OUTPUT_DIR / "bbbbbbbbbbbb")
+        client.delete("/api/job/aaaaaaaaaaaa")
+        body = client.get("/api/jobs").json()
+        ids = [r["id"] for r in body["jobs"]]
+        assert ids == ["bbbbbbbbbbbb"]
+
+
+# --------------------------------------------------------------------------- #
 # Projects (F1.1)
 # --------------------------------------------------------------------------- #
 
