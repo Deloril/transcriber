@@ -336,6 +336,68 @@ After processing, you get several files next to the original recording:
 - `<name>.srt` — subtitles
 - `<name>.vtt` — WebVTT subtitles
 
+## Overnight feature-implementation loop
+
+`scripts/feature-loop.sh` works through `PLANNING.md`, picking the next unimplemented F-/G-feature, shipping it end-to-end (test + commit + push), then exiting. The loop reruns it with a fresh Claude context until nothing remains.
+
+### Before bed
+
+```bash
+# 1. Confirm a clean working tree.
+git status
+
+# 2. Confirm both .venv and node_modules exist (the pre-commit hook needs them).
+ls -d .venv node_modules
+
+# 3. Kick off the loop. ~5–15 minutes per feature; ~57 features remaining.
+nohup ./scripts/feature-loop.sh > logs/loop/foreground.log 2>&1 &
+echo $! > .loop-pid     # remember the PID
+```
+
+### While it runs
+
+```bash
+# Live progress summary (one line per iteration).
+tail -f logs/loop/summary.log
+
+# Look at what just landed.
+git log --oneline | head -20
+
+# What the most recent iteration actually said and did.
+ls -t logs/loop/iter-*.log | head -1 | xargs less
+```
+
+### Stop it cleanly
+
+```bash
+# Lets the current iteration finish, then exits the loop.
+touch .loop-abort
+
+# Or hard-kill (won't break anything; commits are atomic).
+kill "$(cat .loop-pid)"
+```
+
+### In the morning
+
+```bash
+# Top-line summary of what landed.
+git log --oneline --since="last night" | head -50
+
+# Anything the loop noted as blocked.
+cat docs/loop-notes.md 2>/dev/null
+
+# Final summary line.
+tail -1 logs/loop/summary.log
+```
+
+The loop has hard safety rails: `--max-iters 200`, `--max-budget-usd 15` per iteration, bails on 3 consecutive failures or 10 total. Per-iteration logs live in `logs/loop/iter-NNNN.log`.
+
+If you want to test a single iteration before the real run:
+
+```bash
+./scripts/feature-loop.sh --dry-run
+```
+
 ## Testing
 
 Scribe has two test suites — a fast Python unit suite and a fast JS unit suite. A pre-commit hook runs both before allowing a commit.
