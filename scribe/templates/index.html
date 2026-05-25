@@ -972,6 +972,7 @@
       if (!chosenFile) return;
       goBtn.disabled = true;
       errBox.classList.add("hidden");
+      errBox.textContent = "";
       resultCard.classList.add("hidden");
       $("statsCard").classList.remove("show");
       progressWrap.classList.remove("hidden");
@@ -1253,6 +1254,10 @@
           es.close();
           stopJobTicker();
           showError(d.error || "Unknown error");
+          // Try to fetch the full traceback for context.
+          fetch(`/api/job/${jobId}/error`).then(r => r.ok ? r.text() : "").then(tb => {
+            if (tb) appendErrorTraceback(tb);
+          }).catch(() => {});
           goBtn.disabled = false;
         }
       };
@@ -1320,8 +1325,21 @@
       }[c]));
     }
 
+    function appendErrorTraceback(tb) {
+      const pre = document.createElement("pre");
+      pre.className = "err-tb";
+      pre.style.cssText = "margin-top:10px;padding:10px 12px;background:var(--panel-2);border:1px solid var(--border);border-radius:8px;color:var(--muted);font-size:11px;line-height:1.45;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;";
+      pre.textContent = tb;
+      // Remove any previously-appended traceback before adding a fresh one.
+      errBox.querySelectorAll("pre.err-tb").forEach(p => p.remove());
+      errBox.appendChild(pre);
+    }
+
     function showError(msg) {
+      // Replace just the message text, keeping any previously-appended pre.err-tb.
+      const existing = Array.from(errBox.querySelectorAll("pre.err-tb"));
       errBox.textContent = msg;
+      existing.forEach(p => errBox.appendChild(p));
       errBox.classList.remove("hidden");
     }
 

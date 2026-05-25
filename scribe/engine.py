@@ -243,6 +243,41 @@ def _register_safe_globals() -> None:
 _register_safe_globals()
 
 
+def _shim_hf_hub_download() -> None:
+    """
+    huggingface_hub 1.0 removed the `use_auth_token` kwarg in favour of `token`,
+    but pyannote-audio 3.4 still passes the old name. requirements.txt pins
+    huggingface_hub<1.0 to avoid this, but if a user's environment ends up on
+    1.x anyway (e.g. another package upgraded it transitively), we translate
+    the old kwarg into the new one transparently. Belt-and-braces.
+    """
+    try:
+        import huggingface_hub as _hf
+    except Exception:
+        return
+    if not hasattr(_hf, "hf_hub_download"):
+        return
+    if getattr(_hf.hf_hub_download, "_scribe_shimmed", False):
+        return
+    _orig = _hf.hf_hub_download
+
+    def _shimmed(*args: Any, **kwargs: Any):
+        if "use_auth_token" in kwargs and "token" not in kwargs:
+            kwargs["token"] = kwargs.pop("use_auth_token")
+        else:
+            kwargs.pop("use_auth_token", None)
+        return _orig(*args, **kwargs)
+
+    _shimmed._scribe_shimmed = True  # type: ignore[attr-defined]
+    _hf.hf_hub_download = _shimmed  # type: ignore[assignment]
+    # Some callers do `from huggingface_hub import hf_hub_download` before our
+    # shim runs; we can't fix those captured references retroactively, but
+    # patching the module attribute covers the common late-import path.
+
+
+_shim_hf_hub_download()
+
+
 # Belt-and-braces: pyannote's checkpoint loader trips the strict loader on
 # globals we can't fully enumerate (lightning hyperparameters with arbitrary
 # user types). Pyannote also calls torch.load(..., weights_only=True)

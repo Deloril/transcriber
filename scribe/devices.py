@@ -33,6 +33,41 @@ def main() -> int:
     print(f"  Whisper (CTranslate2):  device={w_dev:<5} compute={w_compute}")
     print(f"  Alignment (torch):      device={_torch_device()}")
     print(f"  Diarization (pyannote): device={_diarization_device()}")
+
+    # Package versions matter when something breaks; pyannote/whisperx are
+    # particularly sensitive to huggingface_hub and transformers majors.
+    print()
+    print("Package versions:")
+    for name in (
+        "whisperx",
+        "faster_whisper",
+        "ctranslate2",
+        "transformers",
+        "huggingface_hub",
+        "pyannote.audio",
+        "torchaudio",
+        "nemo_toolkit",
+    ):
+        try:
+            from importlib.metadata import version, PackageNotFoundError
+            try:
+                v = version(name)
+            except PackageNotFoundError:
+                v = "(not installed)"
+        except Exception as e:  # noqa: BLE001
+            v = f"(error: {e})"
+        print(f"  {name:<20} {v}")
+
+    # Optional Parakeet engine probe.
+    try:
+        from .parakeet import nemo_available
+        ok, err = nemo_available()
+        print()
+        print(f"Parakeet engine:    {'available' if ok else 'unavailable'}")
+        if not ok and err:
+            print(f"  reason:           {err}")
+    except Exception as e:  # noqa: BLE001
+        print(f"Parakeet engine:    error probing — {e}")
     return 0
 
 

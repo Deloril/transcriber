@@ -501,6 +501,16 @@ def _run_job(job_id: str) -> None:
             job.finished_at = _time.time()
         _persist_job(job)
     except Exception as e:  # noqa: BLE001
+        import traceback as _tb
+        tb_text = _tb.format_exc()
+        # Always print to stdout so the developer sees it without digging into
+        # the persisted state.
+        print(f"[scribe] job {job_id} failed:\n{tb_text}", flush=True)
+        # Persist the full traceback for the UI to fetch via /api/job/{id}/error
+        try:
+            (job.output_dir / "error.log").write_text(tb_text)
+        except Exception:
+            pass
         with JOBS_LOCK:
             job.status = "error"
             job.error = f"{type(e).__name__}: {e}"
@@ -535,6 +545,21 @@ def _job_dict(job: Job) -> dict[str, Any]:
         "result": job.result,
         "input_filename": job.input_filename,
     }
+
+
+@app.get("/api/job/{job_id}/error")
+async def job_error_log(job_id: str) -> Response:
+    """Return the persisted Python traceback from a failed job, if any."""
+    _check_job_id(job_id)
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        log_path = (job.output_dir / "error.log").resolve()
+        out_dir = job.output_dir.resolve()
+    if not _is_under(log_path, out_dir) or not log_path.exists():
+        raise HTTPException(404, "No error log for this job")
+    return Response(content=log_path.read_text(errors="replace"), media_type="text/plain")
 
 
 @app.get("/api/job/{job_id}/events")
