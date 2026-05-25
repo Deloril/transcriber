@@ -1150,3 +1150,138 @@ class TestSourceSchemaInBundle:
         assert bundle.source_schema is not None
         keys = [a.key for a in bundle.source_schema.attributes]
         assert keys == ["site", "round"]
+
+
+# --------------------------------------------------------------------------- #
+# F3.7 — saved queries integration
+# --------------------------------------------------------------------------- #
+
+
+def _make_saved_query(project: Project, *, name: str = "Power quotes"):
+    """Build a tiny F3.7 saved query attached to a project."""
+    from scribe.codes import new_code_id
+    from scribe.query import CodeExpr, CodeFilter, Query
+    from scribe.saved_queries import SavedQuery
+    cid = new_code_id()
+    q = Query(
+        project_id=project.id,
+        name=name,
+        codes=CodeFilter(expr=CodeExpr.code(cid)),
+    )
+    return SavedQuery.new(project_id=project.id, query=q)
+
+
+class TestSavedQueriesInBundle:
+    def test_default_components_include_saved_queries_dir(self) -> None:
+        from scribe.project_format import COMPONENT_SAVED_QUERIES_DIR
+        from scribe.saved_queries import SAVED_QUERIES_DIRNAME
+        assert COMPONENT_SAVED_QUERIES_DIR == "saved_queries_dir"
+        assert (
+            DEFAULT_COMPONENT_PATHS[COMPONENT_SAVED_QUERIES_DIR]
+            == SAVED_QUERIES_DIRNAME
+        )
+
+    def test_bundle_load_when_no_saved_queries(self, tmp_path: Path) -> None:
+        project = _saved_project(tmp_path)
+        bundle = load_project_bundle(tmp_path, project.id)
+        assert bundle.saved_queries == []
+
+    def test_bundle_load_loads_persisted_saved_queries(
+        self, tmp_path: Path
+    ) -> None:
+        from scribe.saved_queries import save_saved_query
+        project = _saved_project(tmp_path)
+        sq = _make_saved_query(project, name="Persisted SQ")
+        save_saved_query(tmp_path, sq)
+        bundle = load_project_bundle(tmp_path, project.id)
+        assert [s.id for s in bundle.saved_queries] == [sq.id]
+        assert [s.name for s in bundle.saved_queries] == ["Persisted SQ"]
+
+    def test_bundle_save_persists_saved_queries(self, tmp_path: Path) -> None:
+        from scribe.saved_queries import list_saved_queries
+        project = Project.new(name="X")
+        sq = _make_saved_query(project, name="Bundle SQ")
+        bundle = ProjectBundle(project=project, saved_queries=[sq])
+        save_project_bundle(tmp_path, bundle)
+        on_disk = list_saved_queries(tmp_path, project.id)
+        assert [s.id for s in on_disk] == [sq.id]
+
+    def test_bundle_save_does_not_clobber_existing_saved_queries(
+        self, tmp_path: Path
+    ) -> None:
+        # An empty bundle.saved_queries must not erase the analytic
+        # library on disk (mirrors the codebook + sampling-log stance).
+        from scribe.saved_queries import save_saved_query, list_saved_queries
+        project = _saved_project(tmp_path)
+        existing = _make_saved_query(project, name="Existing")
+        save_saved_query(tmp_path, existing)
+        bundle = ProjectBundle(project=project, saved_queries=[])
+        save_project_bundle(tmp_path, bundle)
+        on_disk = list_saved_queries(tmp_path, project.id)
+        assert [s.id for s in on_disk] == [existing.id]
+
+    def test_validate_rejects_saved_query_with_wrong_project_id(self) -> None:
+        from scribe.codes import new_code_id
+        from scribe.query import CodeExpr, CodeFilter, Query
+        from scribe.saved_queries import SavedQuery
+        project = Project.new(name="X", project_id="aaaaaaaaaaaa")
+        # Build a saved query whose underlying query points at a
+        # different project — but the wrapper does too, so it self-
+        # validates. Then plant it in the bundle.
+        cid = new_code_id()
+        q = Query(
+            project_id="bbbbbbbbbbbb",
+            name="Other-project SQ",
+            codes=CodeFilter(expr=CodeExpr.code(cid)),
+        )
+        rogue = SavedQuery.new(project_id="bbbbbbbbbbbb", query=q)
+        bundle = ProjectBundle(project=project, saved_queries=[rogue])
+        with pytest.raises(ProjectFormatError):
+            bundle.validate()
+
+    def test_validate_rejects_duplicate_saved_query_ids(self) -> None:
+        from scribe.codes import new_code_id
+        from scribe.query import CodeExpr, CodeFilter, Query
+        from scribe.saved_queries import SavedQuery
+        project = Project.new(name="X")
+        cid = new_code_id()
+        q1 = Query(
+            project_id=project.id,
+            name="A",
+            codes=CodeFilter(expr=CodeExpr.code(cid)),
+        )
+        q2 = Query(
+            project_id=project.id,
+            name="B",
+            codes=CodeFilter(expr=CodeExpr.code(cid)),
+        )
+        sq1 = SavedQuery.new(
+            project_id=project.id,
+            query=q1,
+            saved_query_id="cccccccccccc",
+        )
+        sq2 = SavedQuery.new(
+            project_id=project.id,
+            query=q2,
+            saved_query_id="cccccccccccc",
+        )
+        bundle = ProjectBundle(
+            project=project, saved_queries=[sq1, sq2]
+        )
+        with pytest.raises(ProjectFormatError):
+            bundle.validate()
+
+    def test_archive_round_trip_preserves_saved_queries(
+        self, tmp_path: Path
+    ) -> None:
+        from scribe.saved_queries import save_saved_query
+        projects_root, project = _build_demo_project_on_disk(tmp_path)
+        sq = _make_saved_query(project, name="Archived SQ")
+        save_saved_query(projects_root, sq)
+        archive = tmp_path / f"{project.id}{ARCHIVE_SUFFIX}"
+        export_project_archive(projects_root, project.id, archive)
+        target = tmp_path / "restored"
+        target.mkdir()
+        bundle = import_project_archive(target, archive)
+        assert [s.id for s in bundle.saved_queries] == [sq.id]
+        assert [s.name for s in bundle.saved_queries] == ["Archived SQ"]

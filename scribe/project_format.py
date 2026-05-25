@@ -106,6 +106,12 @@ from .speaker_map import (
     list_speaker_maps,
     save_speaker_map,
 )
+from .saved_queries import (
+    SAVED_QUERIES_DIRNAME,
+    SavedQuery,
+    list_saved_queries,
+    save_saved_query,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -145,6 +151,9 @@ COMPONENT_SOURCE_SCHEMA = "source_schema"
 # mapping its raw transcript speaker labels → role + (optional)
 # participant link.
 COMPONENT_SPEAKER_MAPS_DIR = "speaker_maps_dir"
+# F3.7: saved-queries directory. One JSON file per saved (named, re-
+# runnable) query.
+COMPONENT_SAVED_QUERIES_DIR = "saved_queries_dir"
 
 # Default values for the "components" dict in the manifest. These are
 # relative paths inside the project directory.
@@ -156,6 +165,7 @@ DEFAULT_COMPONENT_PATHS: dict[str, str] = {
     COMPONENT_CODES_DIR: "codes",
     COMPONENT_SOURCE_SCHEMA: SCHEMA_FILENAME,
     COMPONENT_SPEAKER_MAPS_DIR: SPEAKER_MAPS_DIRNAME,
+    COMPONENT_SAVED_QUERIES_DIR: SAVED_QUERIES_DIRNAME,
 }
 
 
@@ -496,6 +506,10 @@ class ProjectBundle:
     # sources not in ``sources`` are tolerated (e.g. import flow lands
     # the map first).
     speaker_maps: list[SpeakerMap] = field(default_factory=list)
+    # F3.7: named, re-runnable queries. One per saved analytic
+    # question; persists with run-tracking so the audit trail survives
+    # bundle export/import.
+    saved_queries: list[SavedQuery] = field(default_factory=list)
     manifest: ProjectManifest | None = None
 
     # ------------------------------------------------------------------ #
@@ -586,6 +600,21 @@ class ProjectBundle:
                 "Bundle has duplicate speaker maps for the same source"
             )
 
+        # F3.7: saved queries. Each self-validates; cross-bundle: the
+        # project_id must match, and saved-query ids must be unique.
+        for sq in self.saved_queries:
+            sq.validate()
+            if sq.project_id != pid:
+                raise ProjectFormatError(
+                    f"SavedQuery {sq.id} project_id {sq.project_id!r} "
+                    f"does not match bundle project {pid!r}"
+                )
+        sqids = [sq.id for sq in self.saved_queries]
+        if len(set(sqids)) != len(sqids):
+            raise ProjectFormatError(
+                "Bundle has duplicate saved-query ids"
+            )
+
         if self.manifest is not None:
             self.manifest.validate()
             if self.manifest.project_id != pid:
@@ -625,6 +654,7 @@ def load_project_bundle(
     except FileNotFoundError:
         source_schema = None
     speaker_maps = list_speaker_maps(projects_root, project_id)
+    saved_queries = list_saved_queries(projects_root, project_id)
     try:
         manifest = read_or_build_manifest(projects_root, project_id)
     except FileNotFoundError:
@@ -637,6 +667,7 @@ def load_project_bundle(
         codes=codes,
         source_schema=source_schema,
         speaker_maps=speaker_maps,
+        saved_queries=saved_queries,
         manifest=manifest,
     )
     bundle.validate()
@@ -696,6 +727,13 @@ def save_project_bundle(
     # bundle save shouldn't erase a researcher's role assignments.
     for m in bundle.speaker_maps:
         save_speaker_map(projects_root, m)
+
+    # 3e. Saved queries (F3.7). Same append/merge stance: the bundle
+    # adds or refreshes queries by id, but existing on-disk queries
+    # not in the bundle are left alone — a partial bundle save
+    # shouldn't erase the analytic library.
+    for sq in bundle.saved_queries:
+        save_saved_query(projects_root, sq)
 
     # 4. Sampling log.
     if replace_sampling_log:
