@@ -22,7 +22,6 @@ cd "$(dirname "$0")/.."
 
 # --- defaults ---
 MAX_ITERS=200
-PER_ITER_BUDGET_USD=15
 DRY_RUN=0
 MODEL="${SCRIBE_LOOP_MODEL:-claude-opus-4-7}"
 PROMPT_FILE="scripts/feature-implementer-prompt.md"
@@ -85,7 +84,7 @@ consecutive_failures=0
 total_failures=0
 start_ts="$(date +%s)"
 
-log "==== feature-loop starting (max-iters=$MAX_ITERS, budget=\$$PER_ITER_BUDGET_USD/iter, model=$MODEL, dry-run=$DRY_RUN) ===="
+log "==== feature-loop starting (max-iters=$MAX_ITERS, model=$MODEL, dry-run=$DRY_RUN) ===="
 log "abort with: touch $ABORT_FLAG"
 
 # --- main loop ---
@@ -107,19 +106,20 @@ while [ "$iter" -lt "$MAX_ITERS" ]; do
   # belt-and-braces flags:
   #   --bare              skip auto-memory / hooks discovery / CLAUDE.md noise
   #   --dangerously-skip-permissions    no human approvals during the loop
-  #   --max-budget-usd    per-iteration safety net
   #   --model             pin so a CLI default flip doesn't surprise us
   #   --output-format text   plain text we can grep
   #
   # We do NOT use --no-session-persistence so each session is recoverable
   # from `~/.claude/projects/.../sessions/*` if needed for debugging.
+  # No --max-budget-usd: budget is unbounded per iteration. Per-iteration
+  # cost is implicitly capped by the prompt's "one feature per iteration"
+  # rule and by claude's own internal turn limits.
   set +e
   claude \
     --print \
     --bare \
     --dangerously-skip-permissions \
     --model "$MODEL" \
-    --max-budget-usd "$PER_ITER_BUDGET_USD" \
     --output-format text \
     "$prompt_body" \
     > "$iter_log" 2>&1
