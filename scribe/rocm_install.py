@@ -14,11 +14,23 @@ of truth* for which version that should be, so:
 
 Implements the "pin a known-good version; surface it in scribe.devices
 so we can spot drift" half of G2.1.
+
+G2.2 — fallback mirrors. The GitHub release URL is the *primary* source
+but it's a single point of failure: a GitHub Releases outage, a corporate
+firewall, or an air-gapped install all break ``setup.sh --rocm`` today.
+The fix is a configurable fallback-URL list (env var
+``SCRIBE_CT2_ROCM_FALLBACK_URLS``, comma-separated) that ``setup.sh``
+walks in order if the primary download fails. We don't ship a default
+mirror in this repo — there's no infrastructure to host one yet — but
+the *mechanism* lets ops, lab admins, or a future Scribe-hosted mirror
+slot in trivially.
 """
 
 from __future__ import annotations
 
+import os
 from importlib.metadata import PackageNotFoundError, version
+from typing import Mapping
 
 
 # The pinned CTranslate2 ROCm wheel version. Bump this in lockstep with
@@ -43,6 +55,56 @@ def rocm_wheel_zip_url(version_str: str | None = None) -> str:
     """Construct the CT2 ROCm wheel-zip URL for the given (or pinned) version."""
     v = version_str or PINNED_CT2_ROCM_VERSION
     return _RELEASE_URL_TEMPLATE.format(version=v)
+
+
+# G2.2 — fallback-URL plumbing.
+#
+# Users override the primary GitHub-release URL with one or more comma-
+# separated mirrors via ``SCRIBE_CT2_ROCM_FALLBACK_URLS``. Empty entries
+# are silently dropped (so trailing commas / whitespace don't bite). The
+# values are taken as full, ready-to-fetch URLs — we don't try to
+# template ``{version}`` for the user; if a mirror is version-specific
+# they can rebuild the env var as part of the same shell invocation.
+ROCM_FALLBACK_ENV_VAR: str = "SCRIBE_CT2_ROCM_FALLBACK_URLS"
+
+
+def _split_fallback_csv(raw: str) -> list[str]:
+    """Split + strip a comma-separated URL string; drop empty entries."""
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def rocm_wheel_fallback_urls(env: Mapping[str, str] | None = None) -> list[str]:
+    """User-configured fallback URLs for the CT2 ROCm wheel zip.
+
+    Reads :data:`ROCM_FALLBACK_ENV_VAR` (``SCRIBE_CT2_ROCM_FALLBACK_URLS``)
+    from the supplied ``env`` mapping (or :data:`os.environ` by default).
+    Returns an empty list when the env var is unset or empty.
+
+    Each entry is treated as a full URL; the GitHub release URL is
+    *not* included here — this is fallbacks only. See
+    :func:`rocm_wheel_zip_urls` for the full ordered list.
+    """
+    e = os.environ if env is None else env
+    return _split_fallback_csv(e.get(ROCM_FALLBACK_ENV_VAR, ""))
+
+
+def rocm_wheel_zip_urls(
+    version_str: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Ordered URL list to try for the CT2 ROCm wheel zip.
+
+    Returns ``[primary_github_url, *user_configured_fallbacks]``. The
+    primary URL is always first — fallbacks only fire when the primary
+    download fails (the actual fall-through is implemented in
+    ``setup.sh --rocm``).
+
+    Tests pass ``env={...}`` to inject a synthetic environment without
+    touching the real :data:`os.environ`.
+    """
+    return [rocm_wheel_zip_url(version_str), *rocm_wheel_fallback_urls(env=env)]
 
 
 def installed_ct2_version() -> str | None:

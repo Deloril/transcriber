@@ -349,3 +349,84 @@ class TestCt2RocmPinReport:
         monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
         out = _run(capsys)
         assert "CT2 ROCm pin:" not in out
+
+
+class TestCt2RocmFallbackUrlsReport:
+    """G2.2: scribe.devices surfaces user-configured CT2 mirror fallbacks."""
+
+    def _stub_rocm_minimal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Same backbone as TestCt2RocmPinReport — keep it minimal here."""
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(
+            devices.torch.cuda, "get_device_name", lambda i: "AMD Radeon RX 7900 XTX"
+        )
+        monkeypatch.setattr(devices, "_cuda_vram_gb", lambda: 24.0)
+        monkeypatch.setattr(devices, "_is_rdna2", lambda: False)
+        monkeypatch.setattr(devices.torch.version, "hip", "6.3", raising=False)
+        monkeypatch.setattr(devices, "gpu_arch_name", lambda: "gfx1100")
+        monkeypatch.setattr(devices, "pinned_ct2_rocm_version", lambda: "4.7.2")
+        monkeypatch.setattr(devices, "installed_ct2_version", lambda: "4.7.2")
+
+    def test_no_mirror_line_when_env_unset(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub_rocm_minimal(monkeypatch)
+        monkeypatch.delenv("SCRIBE_CT2_ROCM_FALLBACK_URLS", raising=False)
+        out = _run(capsys)
+        assert "CT2 wheel mirrors" not in out
+
+    def test_lists_configured_mirror_urls_on_rocm(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub_rocm_minimal(monkeypatch)
+        monkeypatch.setenv(
+            "SCRIBE_CT2_ROCM_FALLBACK_URLS",
+            "https://internal-mirror/a.zip,https://backup-mirror/b.zip",
+        )
+        out = _run(capsys)
+        assert "CT2 wheel mirrors: 2 configured" in out
+        assert "https://internal-mirror/a.zip" in out
+        assert "https://backup-mirror/b.zip" in out
+
+    def test_single_mirror_uses_correct_count(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub_rocm_minimal(monkeypatch)
+        monkeypatch.setenv("SCRIBE_CT2_ROCM_FALLBACK_URLS", "https://only/a.zip")
+        out = _run(capsys)
+        assert "CT2 wheel mirrors: 1 configured" in out
+        assert "https://only/a.zip" in out
+
+    def test_mirror_line_omitted_on_cuda_even_when_env_set(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The fallback list is meaningless without the ROCm install path,
+        # so we keep it inside the `backend == "rocm"` branch. Setting the
+        # env var on a CUDA box shouldn't leak the line.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.cuda, "get_device_name", lambda i: "FakeGPU")
+        monkeypatch.setattr(devices, "_cuda_vram_gb", lambda: 24.0)
+        monkeypatch.setattr(devices.torch.version, "cuda", "12.4", raising=False)
+        monkeypatch.setattr(devices.torch.version, "hip", None, raising=False)
+        monkeypatch.setenv(
+            "SCRIBE_CT2_ROCM_FALLBACK_URLS", "https://internal-mirror/a.zip"
+        )
+        out = _run(capsys)
+        assert "CT2 wheel mirrors" not in out
+        assert "internal-mirror" not in out
+
+    def test_mirror_line_omitted_on_cpu_even_when_env_set(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setenv(
+            "SCRIBE_CT2_ROCM_FALLBACK_URLS", "https://internal-mirror/a.zip"
+        )
+        out = _run(capsys)
+        assert "CT2 wheel mirrors" not in out

@@ -75,14 +75,53 @@ if [ "${1:-}" = "--rocm" ]; then
   echo ">> Fetching CTranslate2 ROCm wheel v$CT2_VERSION"
   TMPDIR="$(mktemp -d)"
   trap 'rm -rf "$TMPDIR"' EXIT
-  WHEEL_ZIP_URL="https://github.com/OpenNMT/CTranslate2/releases/download/v${CT2_VERSION}/rocm-python-wheels-Linux.zip"
   if ! command -v curl >/dev/null 2>&1; then
     echo "curl not found; install it and retry." >&2
     exit 1
   fi
-  if ! curl -L --fail -o "$TMPDIR/ct2-rocm.zip" "$WHEEL_ZIP_URL"; then
-    echo "Could not download $WHEEL_ZIP_URL" >&2
-    echo "Check the version (SCRIBE_CT2_ROCM_VERSION) or your network." >&2
+
+  # G2.2: walk the (primary GitHub URL + any user-configured fallback
+  # mirrors) list in order. Fallbacks come from
+  # SCRIBE_CT2_ROCM_FALLBACK_URLS (comma-separated) and are useful for
+  # corporate mirrors, air-gapped installs, or a GitHub Releases outage.
+  # The Python helper is the single source of truth — same code path the
+  # `scribe.devices` report uses to display configured mirrors.
+  WHEEL_URL_LIST="$TMPDIR/wheel-urls.txt"
+  if ! python -c "
+from scribe.rocm_install import rocm_wheel_zip_urls
+import sys
+for u in rocm_wheel_zip_urls('$CT2_VERSION'):
+    sys.stdout.write(u + '\n')
+" > "$WHEEL_URL_LIST" 2>/dev/null; then
+    # Fallback: if scribe isn't importable for some reason, use the
+    # canonical GitHub-release URL only. This keeps --rocm working on a
+    # half-initialised checkout.
+    echo "https://github.com/OpenNMT/CTranslate2/releases/download/v${CT2_VERSION}/rocm-python-wheels-Linux.zip" > "$WHEEL_URL_LIST"
+  fi
+
+  DOWNLOADED=0
+  ATTEMPTED=0
+  while IFS= read -r URL; do
+    [ -z "$URL" ] && continue
+    ATTEMPTED=$((ATTEMPTED + 1))
+    if [ "$ATTEMPTED" -eq 1 ]; then
+      echo ">> trying primary: $URL"
+    else
+      echo ">> trying fallback ($((ATTEMPTED - 1))): $URL"
+    fi
+    if curl -L --fail -o "$TMPDIR/ct2-rocm.zip" "$URL"; then
+      DOWNLOADED=1
+      break
+    fi
+    echo "   download failed; trying next URL if any"
+  done < "$WHEEL_URL_LIST"
+
+  if [ "$DOWNLOADED" -eq 0 ]; then
+    echo "Could not download the CT2 ROCm wheel from any configured URL." >&2
+    echo "Tried:" >&2
+    cat "$WHEEL_URL_LIST" >&2
+    echo "Check the version (SCRIBE_CT2_ROCM_VERSION), your network, or set" >&2
+    echo "SCRIBE_CT2_ROCM_FALLBACK_URLS=<comma-separated mirror URLs>." >&2
     exit 1
   fi
   if ! command -v unzip >/dev/null 2>&1; then
@@ -114,6 +153,9 @@ if [ "${1:-}" = "--rocm" ]; then
 >>   You may also need:
 >>     export HSA_OVERRIDE_GFX_VERSION=10.3.0
 >>   See docs/research/amd-rocm-research.md for hardware notes.
+>> Air-gapped install or corporate firewall? Set
+>>   export SCRIBE_CT2_ROCM_FALLBACK_URLS=https://your-mirror/wheel.zip
+>> (comma-separated for multiple mirrors) before re-running --rocm.
 >> Run ./run.sh and try a transcription. If you see errors, paste the
 >> output of \`python -m scribe.devices\` plus the failure log.
 EOF

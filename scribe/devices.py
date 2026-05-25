@@ -20,6 +20,7 @@ from .rocm_install import (
     ct2_drift_message,
     installed_ct2_version,
     pinned_ct2_rocm_version,
+    rocm_wheel_fallback_urls,
 )
 
 
@@ -89,6 +90,15 @@ def main() -> int:
             drift = ct2_drift_message(installed=installed, pinned=pinned)
             if drift:
                 print(f"  ⚠  drift:          {drift}")
+            # G2.2: when the user has configured fallback mirrors,
+            # surface them so they can verify their list before re-running
+            # ./setup.sh --rocm. Empty by default; we never ship a default
+            # mirror in this repo (no infrastructure for one yet).
+            fallbacks = rocm_wheel_fallback_urls()
+            if fallbacks:
+                print(f"  CT2 wheel mirrors: {len(fallbacks)} configured (fallbacks)")
+                for u in fallbacks:
+                    print(f"    - {u}")
     print(f"MPS available:      {torch.backends.mps.is_available()}")
 
     w_dev, w_compute = _whisper_device_and_compute()
