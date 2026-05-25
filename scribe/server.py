@@ -17,7 +17,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 import markdown as md
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi import Body, FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -1354,9 +1354,11 @@ async def export_codebook_refi_qda_xml_endpoint(project_id: str) -> Response:
 # REFI-QDA / QDPX project export (F6.4)
 # --------------------------------------------------------------------------- #
 
+from . import anonymise as _anonymise  # noqa: E402
 from . import applications as _applications  # noqa: E402
 from . import coders as _coders  # noqa: E402
 from . import refi_qda_project as _refi_qda_project  # noqa: E402
+from . import speaker_map as _speaker_map  # noqa: E402
 # _sources and _memos are already imported earlier; re-importing is
 # harmless but kept out for clarity.
 
@@ -1453,6 +1455,139 @@ async def export_qdpx_endpoint(project_id: str) -> Response:
         # QDPX is a zip; ``application/x-qdpx`` is the de facto vendor
         # type used by Atlas.ti et al. but ``application/zip`` is the
         # generic fallback most browsers map to a save dialog.
+        media_type="application/x-qdpx",
+        headers=headers,
+    )
+
+
+@app.post("/api/projects/{project_id}/qdpx/anonymised")
+async def export_anonymised_qdpx_endpoint(
+    project_id: str,
+    payload: dict | None = Body(default=None),
+) -> Response:
+    """Download a redacted QDPX archive for the project (F6.7).
+
+    The redaction pass uses every Participant's ``name → pseudonym``
+    mapping, every speaker map's resolved pseudonym, and any custom
+    rules supplied in the request body. Posts a JSON body of shape::
+
+        {
+          "rules": [
+            {"pattern": "Mercy General", "replacement": "[hospital]"},
+            {"pattern": "\\\\d{3}-\\\\d{4}", "replacement": "[phone]",
+             "regex": true}
+          ],
+          "note": "Pre-publication anon pass"
+        }
+
+    Both keys are optional. POST with an empty body relies entirely on
+    the participants' pseudonyms.
+
+    The output zip contains the standard QDPX layout *plus* a
+    ``Redactions/manifest.json`` listing replacements + match counts
+    (never the original identifiers — that would defeat the purpose).
+
+    Status codes:
+      * ``200`` — bundle returned.
+      * ``400`` — invalid rule payload (bad regex, malformed object).
+      * ``404`` — project not found.
+    """
+    _check_project_id(project_id)
+    body = payload or {}
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Body must be a JSON object")
+
+    raw_rules = body.get("rules", [])
+    if raw_rules is None:
+        raw_rules = []
+    if not isinstance(raw_rules, list):
+        raise HTTPException(400, "'rules' must be a list of rule objects")
+    custom_rules: list[_anonymise.RedactionRule] = []
+    for entry in raw_rules:
+        if not isinstance(entry, dict):
+            raise HTTPException(
+                400, "each rule must be an object with 'pattern' + 'replacement'"
+            )
+        try:
+            custom_rules.append(_anonymise.RedactionRule.from_dict(entry))
+        except ValueError as exc:
+            raise HTTPException(400, f"invalid rule: {exc}")
+
+    note = body.get("note") or ""
+    if not isinstance(note, str):
+        raise HTTPException(400, "'note' must be a string")
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        sources = _sources.list_sources(_projects_root(), project_id)
+        codes = _codes.list_codes(_projects_root(), project_id)
+        apps = _applications.list_applications(
+            _projects_root(), project_id
+        )
+        memos = _memos.list_memos(_projects_root(), project_id)
+        coders = _coders.list_coders(_projects_root(), project_id)
+        participants = _participants.list_participants(
+            _projects_root(), project_id
+        )
+        speaker_maps: list[_speaker_map.SpeakerMap] = []
+        for s in sources:
+            try:
+                speaker_maps.append(
+                    _speaker_map.load_speaker_map(
+                        _projects_root(), project_id, s.id
+                    )
+                )
+            except FileNotFoundError:
+                continue
+
+    segments_by_source_id: dict[str, list[dict]] = {}
+    for s in sources:
+        segs = _load_segments_for_source_for_qdpx(s)
+        if segs is None:
+            continue
+        segments_by_source_id[s.id] = segs
+
+    try:
+        bundle = _anonymise.build_anonymised_qdpx(
+            project=project,
+            sources=sources,
+            codes=codes,
+            applications=apps,
+            memos=memos,
+            coders=coders,
+            participants=participants,
+            speaker_maps=speaker_maps,
+            segments_by_source_id=segments_by_source_id,
+            custom_rules=custom_rules,
+            note=note,
+        )
+    except ValueError as exc:
+        # Bad regex pattern caught at compile time inside the builder.
+        raise HTTPException(400, f"invalid rule: {exc}")
+
+    base_filename = _refi_qda_project.slugify_qdpx_filename(project)
+    # Insert "-anon" before the extension for a recognisable filename.
+    if base_filename.endswith(".qdpx"):
+        filename = base_filename[: -len(".qdpx")] + "-anon.qdpx"
+    else:
+        filename = base_filename + "-anon"
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        # Surface the manifest summary in a header for callers that
+        # don't want to unzip just to count substitutions.
+        "X-Scribe-Anon-Substitutions": str(
+            bundle.manifest.get("total_substitutions", 0)
+        ),
+        "X-Scribe-Anon-Rule-Count": str(
+            bundle.manifest.get("rule_count", 0)
+        ),
+    }
+    return Response(
+        content=bundle.archive,
         media_type="application/x-qdpx",
         headers=headers,
     )

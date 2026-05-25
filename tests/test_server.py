@@ -3019,3 +3019,186 @@ class TestExportCodebookRefiQdaXmlAPI:
         )
         assert r1.status_code == 400
         assert r2.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# F6.7 — anonymised QDPX endpoint
+# --------------------------------------------------------------------------- #
+
+
+class TestExportAnonymisedQdpxAPI:
+    """``POST /api/projects/{pid}/qdpx/anonymised``
+
+    F6.7 wires :mod:`scribe.anonymise` to a download endpoint. Returns a
+    redacted QDPX zip plus a Redactions/manifest.json sidecar inside
+    the archive. Custom rules can be supplied in the request body.
+    """
+
+    def _make_project(self, client, name: str = "Pilot") -> str:
+        r = client.post("/api/projects", json={"name": name})
+        assert r.status_code == 201
+        return r.json()["id"]
+
+    def _seed_with_participants(self, srv, pid: str) -> dict:
+        """Seed a project with one participant (with pseudonym), one
+        source linked to a transcript that mentions the participant by
+        name, one code, one memo. Return ids.
+        """
+        from scribe import codes as c_mod
+        from scribe import memos as m_mod
+        from scribe import participants as p_mod
+        from scribe import sources as s_mod
+        from scribe.codes import Code
+        from scribe.memos import Memo
+        from scribe.participants import Participant
+        from scribe.sources import Source
+
+        p = Participant.new(project_id=pid, name="Jane Doe", pseudonym="P01")
+        p_mod.save_participant(srv.PROJECTS_DIR, p)
+
+        c = Code.new(
+            project_id=pid,
+            name="Pacing",
+            definition="Jane Doe described pacing as reactive.",
+        )
+        c_mod.save_code(srv.PROJECTS_DIR, c)
+
+        job_id = "abcdef012345"
+        source = Source.new(
+            project_id=pid,
+            name="Interview with Jane Doe",
+            source_type="transcript",
+            transcript_job_id=job_id,
+        )
+        s_mod.save_source(srv.PROJECTS_DIR, source)
+
+        job_dir = srv.OUTPUT_DIR / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "edited.json").write_text(json.dumps({
+            "segments": [
+                {"speaker": "INTERVIEWER",
+                 "words": [{"text": "Hello"}, {"text": "Jane"}, {"text": "Doe"}]},
+            ],
+        }))
+
+        memo = Memo.new(
+            project_id=pid,
+            type="theoretical",
+            title="On Jane Doe",
+            body="Jane Doe pacing is reactive.",
+        )
+        m_mod.save_memo(srv.PROJECTS_DIR, memo)
+
+        return {
+            "source_id": source.id,
+            "code_id": c.id,
+            "memo_id": memo.id,
+            "participant_id": p.id,
+        }
+
+    # -- Happy paths ---------------------------------------------------- #
+
+    def test_returns_anonymised_zip(self, server_env) -> None:
+        import io
+        import zipfile
+
+        srv, client, _ = server_env
+        pid = self._make_project(client, name="Anon Study")
+        seeds = self._seed_with_participants(srv, pid)
+        r = client.post(f"/api/projects/{pid}/qdpx/anonymised", json={})
+        assert r.status_code == 200
+        assert r.content[:2] == b"PK"
+        assert r.headers["content-type"].startswith("application/x-qdpx")
+        # Content-Disposition uses the project's slug + -anon.qdpx.
+        cd = r.headers["content-disposition"]
+        assert "anon-study-anon.qdpx" in cd
+        # X-Scribe-Anon-Substitutions header surfaces match count.
+        assert int(r.headers["x-scribe-anon-substitutions"]) >= 1
+        # Inside the archive, Jane Doe must NOT appear and P01 must.
+        with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+            names = zf.namelist()
+            assert "project.qde" in names
+            assert "Redactions/manifest.json" in names
+            txt = zf.read(f"Sources/{seeds['source_id']}.txt").decode("utf-8")
+            assert "Jane Doe" not in txt
+            assert "P01" in txt
+            mani = json.loads(zf.read("Redactions/manifest.json"))
+            assert "Jane Doe" not in json.dumps(mani)
+            assert mani["total_substitutions"] >= 1
+
+    def test_custom_rules_layered_in(self, server_env) -> None:
+        import io
+        import zipfile
+
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        self._seed_with_participants(srv, pid)
+        body = {
+            "rules": [
+                {"pattern": "Pacing", "replacement": "Theme01"},
+            ],
+            "note": "Pre-publication anon pass",
+        }
+        r = client.post(f"/api/projects/{pid}/qdpx/anonymised", json=body)
+        assert r.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+            qde = zf.read("project.qde").decode("utf-8")
+            assert "Pacing" not in qde
+            assert "Theme01" in qde
+            mani = json.loads(zf.read("Redactions/manifest.json"))
+            assert mani["note"] == "Pre-publication anon pass"
+
+    def test_empty_project_returns_archive(self, server_env) -> None:
+        import io
+        import zipfile
+
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(f"/api/projects/{pid}/qdpx/anonymised", json={})
+        assert r.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+            assert "project.qde" in zf.namelist()
+            assert "Redactions/manifest.json" in zf.namelist()
+
+    # -- Failure modes -------------------------------------------------- #
+
+    def test_404_when_project_missing(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            f"/api/projects/{'0' * 12}/qdpx/anonymised", json={}
+        )
+        assert r.status_code == 404
+
+    def test_400_on_malformed_project_id(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post("/api/projects/not-hex/qdpx/anonymised", json={})
+        assert r.status_code == 400
+
+    def test_400_on_invalid_rules_shape(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/qdpx/anonymised",
+            json={"rules": "not a list"},
+        )
+        assert r.status_code == 400
+
+    def test_400_on_missing_required_rule_keys(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/qdpx/anonymised",
+            json={"rules": [{"pattern": "x"}]},
+        )
+        assert r.status_code == 400
+
+    def test_400_on_invalid_regex(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/qdpx/anonymised",
+            json={"rules": [
+                {"pattern": "(unclosed", "replacement": "x", "regex": True}
+            ]},
+        )
+        assert r.status_code == 400
