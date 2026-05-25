@@ -106,10 +106,17 @@ Today, every transcription job creates `outputs/<job_id>/` and `uploads/<job_id>
   - Treat the import as a finished job: skip the engine entirely, populate `result` directly from the parsed transcript, write the standard sidecars (`.txt/.srt/.vtt/.json`), assign a normal job id, set `status=done`, jump straight to the editor on success.
   - Word-level timestamps when missing (TXT, SRT, VTT) are synthesised proportionally across each segment span using the same `spreadTokensAcrossSpan` helper the editor already uses for resync after edits.
 
+- **F10.4** Fix the library-row action overflow. On a 14" MacBook (and any window narrower than ~1180 px), the third action button — **Delete** — gets clipped off the right edge because `td.actions` has `white-space: nowrap` and no width budgeting. The Delete button is functionally invisible to the user. Fix:
+  - **Primary**: shrink the action labels and let the column wrap on narrow viewports. `td.actions` should keep buttons readable but allow `white-space: normal` below ~1100 px, or condense labels to icons + tooltip (▶ Open · 🗑 Discard media · ✕ Delete) to keep them on one line.
+  - **Stretch**: collapse secondary actions into a per-row `⋮` dropdown when the table doesn't fit. Open stays as a primary button; Discard media + Delete move into the dropdown. Mirrors the editor's F11.1 inline-button + dropdown pattern.
+  - **Test**: a pytest assertion that the rendered library row does not depend on horizontal overflow to display every action — i.e. the `<td class="actions">` doesn't have `white-space: nowrap` once viewport-aware CSS lands. Alternatively a Vitest+jsdom test for the action layout if we extract the row into a helper.
+  - Files: `scribe/templates/library.html` only. No backend change.
+
 ## Phasing
 
 - **Phase A — Library + delete source** (F10.1, F10.2). Needs only persistence + UI work; no parsing.
 - **Phase B — Import** (F10.3). Builds on F10.2's `media_discarded` flag for the no-media path.
+- **Phase C — Library polish** (F10.4). Pure CSS / layout fix for the action-button cutoff on 14" screens.
 
 ---
 
