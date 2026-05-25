@@ -911,6 +911,105 @@ class TestLibraryAPI:
         assert r.json()["total"] == 2
 
 
+class TestMediaDiscardedReconciliation:
+    """Filesystem-truth reconciliation for the ``media_discarded`` flag.
+
+    A row should report ``media_discarded=True`` only when the upload
+    directory is genuinely gone. A stale flag (from a hand-edited
+    ``job.json``, an old serialiser bug, or an interrupted discard
+    that left the dir behind) gets corrected by both ``GET /api/jobs``
+    and ``GET /api/job/<id>`` so the editor and the library agree.
+    """
+
+    def test_jobs_list_corrects_stale_true(self, server_env) -> None:
+        srv, client, _ = server_env
+        # A job whose persisted state claims media is discarded, but
+        # whose uploads/<id>/<file> still exists on disk. _new_job's
+        # default writes a 64-byte .wav into the upload dir.
+        _new_job(srv, id="abc123def456")
+        srv.JOBS["abc123def456"].media_discarded = True
+        r = client.get("/api/jobs")
+        assert r.status_code == 200
+        rows = r.json()["jobs"]
+        assert rows
+        assert rows[0]["id"] == "abc123def456"
+        # File is still there → discarded should report False even though
+        # the in-memory flag says True.
+        assert rows[0]["media_discarded"] is False, (
+            "expected reconciliation to correct stale True"
+        )
+
+    def test_jobs_list_keeps_real_true(self, server_env) -> None:
+        srv, client, _ = server_env
+        _new_job(srv, id="abc123def456")
+        # Wipe the upload dir to simulate a real discard.
+        upload_dir = srv.JOBS["abc123def456"].input_path.parent
+        import shutil
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        srv.JOBS["abc123def456"].media_discarded = True
+        r = client.get("/api/jobs")
+        rows = r.json()["jobs"]
+        assert rows[0]["media_discarded"] is True
+
+    def test_job_status_corrects_stale_true(self, server_env) -> None:
+        srv, client, _ = server_env
+        _new_job(srv, id="abc123def456")
+        srv.JOBS["abc123def456"].media_discarded = True
+        # Source media is still on disk; per-job status should reflect that
+        # so the editor doesn't hide the player by mistake.
+        r = client.get("/api/job/abc123def456")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["media_discarded"] is False
+
+    def test_job_status_keeps_real_true(self, server_env) -> None:
+        srv, client, _ = server_env
+        _new_job(srv, id="abc123def456")
+        upload_dir = srv.JOBS["abc123def456"].input_path.parent
+        import shutil
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        srv.JOBS["abc123def456"].media_discarded = True
+        r = client.get("/api/job/abc123def456")
+        body = r.json()
+        assert body["media_discarded"] is True
+
+
+class TestPersistedJobBoolCoercion:
+    """``Job.from_state`` no longer mistakes the literal string ``"false"``
+    for True. Mirrors the library helper but covers the dataclass loader
+    that ``_load_jobs_from_disk`` calls at startup."""
+
+    def test_from_state_handles_string_false(self) -> None:
+        from scribe.server import Job
+        d = {
+            "id": "abc123def456",
+            "input_path": "/tmp/x",
+            "output_dir": "/tmp/o",
+            "mode": "diarize",
+            "language": "en",
+            "model": "large-v3",
+            "created_at": "2026-01-01",
+            "media_discarded": "false",
+        }
+        j = Job.from_state(d)
+        assert j.media_discarded is False
+
+    def test_from_state_handles_real_true(self) -> None:
+        from scribe.server import Job
+        d = {
+            "id": "abc123def456",
+            "input_path": "/tmp/x",
+            "output_dir": "/tmp/o",
+            "mode": "diarize",
+            "language": "en",
+            "model": "large-v3",
+            "created_at": "2026-01-01",
+            "media_discarded": True,
+        }
+        j = Job.from_state(d)
+        assert j.media_discarded is True
+
+
 class TestLibraryPage:
     def test_serves_html(self, server_env) -> None:
         _, client, _ = server_env

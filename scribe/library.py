@@ -44,6 +44,30 @@ _FIELD_CAP = 4000
 JOB_STATUSES: tuple[str, ...] = ("queued", "running", "done", "error")
 
 
+# Strings users / hand-edited config / older serialisers might write for a
+# falsy boolean. Plain ``bool("false")`` returns ``True`` because the string
+# is non-empty — exactly the bug we hit on a real user's library where rows
+# rendered as "media discarded" even though the source media was still on
+# disk. Any other truthy *string* (e.g. "true", "yes", "1") still goes
+# through ``bool()`` so we don't change behaviour for those.
+_FALSY_STRINGS = {"", "false", "no", "0", "off", "none", "null"}
+
+
+def _to_bool(value: Any) -> bool:
+    """Coerce arbitrary persisted values into a Python bool.
+
+    Handles the ``"false"``-string footgun: ``bool("false")`` is True.
+    For anything that *looks* like a stringified false (case-insensitive,
+    whitespace-trimmed) we return False. Everything else falls through
+    to Python's normal truthiness rules, so ``1``, ``"yes"``, ``[1]`` —
+    anything genuinely truthy — still resolves True.
+    """
+    if isinstance(value, str):
+        if value.strip().lower() in _FALSY_STRINGS:
+            return False
+    return bool(value)
+
+
 def _job_state(job: Any) -> dict[str, Any]:
     """Coerce a Job-shaped input into a plain dict.
 
@@ -178,7 +202,7 @@ def summarise_job(job: Any) -> dict[str, Any]:
         "speaker_count": len(speakers),
         "duration_seconds": _duration_from_result(result),
         "has_outputs": bool(d.get("output_paths")),
-        "media_discarded": bool(d.get("media_discarded", False)),
+        "media_discarded": _to_bool(d.get("media_discarded", False)),
         "error": d.get("error"),
     }
 

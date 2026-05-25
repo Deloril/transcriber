@@ -39,6 +39,24 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
+def _to_bool_persisted(value: Any) -> bool:
+    """Tolerant bool coercion for fields read off disk.
+
+    Handles the ``bool("false") is True`` footgun: an older or
+    hand-edited ``job.json`` may carry the literal string ``"false"``
+    for a boolean-shaped field, and Python's plain ``bool()`` would
+    flip that to True. Treat the usual stringified-false vocabulary
+    as False; everything else falls through to ``bool()``.
+
+    Mirrors :func:`scribe.library._to_bool`. Duplicated rather than
+    imported so the dataclass loader has no module-load dependency.
+    """
+    if isinstance(value, str):
+        if value.strip().lower() in {"", "false", "no", "0", "off", "none", "null"}:
+            return False
+    return bool(value)
+
+
 @dataclass
 class Job:
     id: str
@@ -102,7 +120,7 @@ class Job:
             batch_size=int(d.get("batch_size", 8) or 8),
             started_at=d.get("started_at"),
             finished_at=d.get("finished_at"),
-            media_discarded=bool(d.get("media_discarded", False)),
+            media_discarded=_to_bool_persisted(d.get("media_discarded", False)),
         )
 
 
@@ -2409,6 +2427,17 @@ async def job_status(job_id: str) -> JSONResponse:
 
 
 def _job_dict(job: Job) -> dict[str, Any]:
+    # Cross-check the persisted media_discarded flag against the
+    # filesystem so a stale True (from a partial discard, hand-edit,
+    # or old serialiser bug) doesn't mislead the editor into hiding
+    # the player when the source media is actually still there.
+    discarded = bool(job.media_discarded)
+    try:
+        upload_dir = job.input_path.parent
+        if upload_dir.exists() and any(upload_dir.iterdir()):
+            discarded = False
+    except Exception:
+        pass
     return {
         "id": job.id,
         "status": job.status,
@@ -2423,7 +2452,7 @@ def _job_dict(job: Job) -> dict[str, Any]:
         "output_paths": job.output_paths,
         "result": job.result,
         "input_filename": job.input_filename,
-        "media_discarded": bool(job.media_discarded),
+        "media_discarded": discarded,
     }
 
 
@@ -2452,9 +2481,36 @@ async def list_jobs_endpoint(q: str = "") -> JSONResponse:
     """
     with JOBS_LOCK:
         # Snapshot-copy the values so we can release the lock before
-        # building the heavy summary dicts.
+        # building the heavy summary dicts. Pair each Job with a
+        # filesystem-truth fingerprint so we can correct any stale
+        # ``media_discarded`` flags below without re-querying JOBS.
         jobs_snapshot = list(JOBS.values())
+        fs_truth: dict[str, bool] = {}
+        for j in jobs_snapshot:
+            try:
+                # The source media lives under uploads/<id>/. The flag is
+                # True ⇔ that directory should be gone. If the path or its
+                # parent still exists with files in it, the flag is stale.
+                upload_dir = j.input_path.parent
+                fs_truth[j.id] = (
+                    not upload_dir.exists()
+                    or not any(upload_dir.iterdir())
+                )
+            except Exception:
+                # If we can't probe (permission error, parent vanished),
+                # trust the persisted flag rather than guess.
+                fs_truth[j.id] = bool(getattr(j, "media_discarded", False))
     rows = _library.summarise_jobs(jobs_snapshot)
+    # Reconcile: a row claiming media_discarded=True while the upload
+    # directory still has files means the persisted flag is stale —
+    # likely a hand-edit, an older serialiser that wrote a stringified
+    # false, or an interrupted discard that left the dir behind. Trust
+    # the filesystem; correct the row in-place. The persisted job.json
+    # gets corrected lazily next time the user runs an action that
+    # triggers ``_persist_job``.
+    for r in rows:
+        actual_discarded = fs_truth.get(r.get("id"), r.get("media_discarded", False))
+        r["media_discarded"] = bool(actual_discarded)
     if q:
         rows = _library.filter_rows(rows, q)
     return JSONResponse({"jobs": rows, "total": len(rows)})

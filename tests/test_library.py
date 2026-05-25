@@ -240,6 +240,18 @@ class TestSummariseJobMediaDiscarded:
         row = library.summarise_job(d)
         assert row["media_discarded"] is False
 
+    def test_string_false_resolves_to_false(self) -> None:
+        # Regression: ``bool("false")`` is True in Python because the
+        # string is non-empty. An older serialiser or hand-edit could
+        # leave a row that read as True even though the user clearly
+        # intended False. The _to_bool helper handles the canonical
+        # falsy strings explicitly.
+        for raw in ("false", "FALSE", "False", " false ", "no", "0", "off", "null"):
+            row = library.summarise_job(_job_state(media_discarded=raw))
+            assert row["media_discarded"] is False, (
+                f"expected {raw!r} to coerce to False"
+            )
+
 
 class TestSummariseJobAcceptsLiveJob:
     """Pure-Python check that summarise_job works on a live Job instance
