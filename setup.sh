@@ -8,28 +8,53 @@ ARCH="$(uname -m)"
 echo ">> Detected: $OS $ARCH"
 
 # --- python check ---
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "python3 not found." >&2
+# WhisperX requires Python 3.10 or 3.11. If a venv already exists we honor its
+# interpreter; otherwise we hunt for a supported python3.X on PATH.
+pick_python() {
+  for candidate in python3.11 python3.10; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+print_python_install_hint() {
   case "$OS" in
-    Darwin) echo "  Install: brew install python@3.11" >&2 ;;
-    Linux)  echo "  Install: sudo apt install python3.11 python3.11-venv  (Debian/Ubuntu)" >&2
-            echo "       or: sudo dnf install python3.11                    (Fedora/RHEL)" >&2 ;;
+    Darwin) echo "  brew install python@3.11" >&2 ;;
+    Linux)  echo "  sudo apt install python3.11 python3.11-venv  (Debian/Ubuntu)" >&2
+            echo "  sudo dnf install python3.11                    (Fedora/RHEL)" >&2 ;;
   esac
-  exit 1
+}
+
+if [ -d .venv ]; then
+  PYTHON=.venv/bin/python
+else
+  if PYTHON=$(pick_python); then
+    :
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON=python3
+  else
+    echo "python3 not found." >&2
+    print_python_install_hint
+    exit 1
+  fi
 fi
 
-PYV=$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
+PYV=$("$PYTHON" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
 case "$PYV" in
   3.10|3.11) ;;
   *)
-    echo "Python $PYV detected. WhisperX is happiest on Python 3.10 or 3.11." >&2
-    echo "If install fails, install 3.11 and rerun against it:" >&2
-    case "$OS" in
-      Darwin) echo "  brew install python@3.11" >&2
-              echo "  /opt/homebrew/bin/python3.11 -m venv .venv && ./setup.sh" >&2 ;;
-      Linux)  echo "  sudo apt install python3.11 python3.11-venv" >&2
-              echo "  python3.11 -m venv .venv && ./setup.sh" >&2 ;;
-    esac
+    echo "Python $PYV detected ($PYTHON). WhisperX requires Python 3.10 or 3.11." >&2
+    if [ -d .venv ]; then
+      echo "Your existing .venv was built with $PYV. Delete it and rerun:" >&2
+      echo "  rm -rf .venv && ./setup.sh" >&2
+    else
+      echo "Install a supported Python and rerun:" >&2
+      print_python_install_hint
+    fi
+    exit 1
     ;;
 esac
 
@@ -46,8 +71,8 @@ fi
 
 # --- venv ---
 if [ ! -d .venv ]; then
-  echo ">> Creating venv"
-  python3 -m venv .venv
+  echo ">> Creating venv with $PYTHON (Python $PYV)"
+  "$PYTHON" -m venv .venv
 fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
