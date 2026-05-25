@@ -171,13 +171,18 @@ class TestPackageReexports:
 
 
 class TestTorchDevice:
-    def test_rocm_translates_to_cuda(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # PyTorch ROCm uses the cuda namespace, so the actual torch device is "cuda".
-        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
-        assert engine._torch_device() == "cuda"
+    """G1.2: helpers return the honest 4-state user-facing label.
+    Translation to the actual torch/CT2 device-arg string happens at the
+    library boundary via :func:`_to_torch_device_arg`."""
 
-    def test_other_backends_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for b in ("cuda", "mps", "cpu"):
+    def test_rocm_returns_rocm_label(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # G1.2: helper exposes "rocm" honestly so the UI / logs / support
+        # output don't claim the user has CUDA when they don't.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        assert engine._torch_device() == "rocm"
+
+    def test_all_backends_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for b in ("cuda", "rocm", "mps", "cpu"):
             monkeypatch.setattr(engine, "gpu_backend", lambda b=b: b)
             assert engine._torch_device() == b
 
@@ -186,8 +191,10 @@ class TestDiarizationDevice:
     def test_default_uses_gpu_when_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")
         assert engine._diarization_device() == "cuda"
+        # G1.2: the honest "rocm" label is preserved; translation to the
+        # CUDA-namespace device arg happens at the call site, not here.
         monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
-        assert engine._diarization_device() == "cuda"  # rocm → cuda namespace
+        assert engine._diarization_device() == "rocm"
         monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
         assert engine._diarization_device() == "cpu"
 
@@ -201,9 +208,16 @@ class TestDiarizationDevice:
         monkeypatch.setenv("SCRIBE_DIARIZE_DEVICE", "mps")
         assert engine._diarization_device() == "mps"
 
-    def test_force_rocm_yields_cuda(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_force_rocm_returns_rocm_label(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # G1.2: forcing rocm via env var keeps the honest label; the call
+        # site applies _to_torch_device_arg before handing to pyannote.
         monkeypatch.setenv("SCRIBE_DIARIZE_DEVICE", "rocm")
-        assert engine._diarization_device() == "cuda"
+        assert engine._diarization_device() == "rocm"
+
+    def test_force_cpu_overrides_gpu(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")
+        monkeypatch.setenv("SCRIBE_DIARIZE_DEVICE", "cpu")
+        assert engine._diarization_device() == "cpu"
 
 
 class TestWhisperDeviceAndCompute:
@@ -227,13 +241,24 @@ class TestWhisperDeviceAndCompute:
         assert dev == "cuda"
         assert compute == "int8_float16"
 
-    def test_rocm_uses_cuda_label(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # CT2's ROCm wheel takes device="cuda" via its HIP shim.
+    def test_rocm_returns_rocm_label_with_compute_type(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # G1.2: returns the honest "rocm" label. The compute-type tiering
+        # mirrors CUDA (CT2 ROCm wheel uses the same fp16 / int8_float16
+        # kernels); translation to device="cuda" happens at the call site.
         monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
         monkeypatch.setattr(engine, "_cuda_vram_gb", lambda: 16.0)
         dev, compute = engine._whisper_device_and_compute()
-        assert dev == "cuda"
+        assert dev == "rocm"
         assert compute == "float16"
+
+    def test_rocm_low_vram_picks_int8_float16(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_cuda_vram_gb", lambda: 6.0)
+        dev, compute = engine._whisper_device_and_compute()
+        assert dev == "rocm"
+        assert compute == "int8_float16"
 
     def test_force_compute_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
@@ -247,11 +272,32 @@ class TestWhisperDeviceAndCompute:
         dev, _ = engine._whisper_device_and_compute()
         assert dev == "cpu"
 
-    def test_force_device_rocm_translates_to_cuda(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_force_device_rocm_keeps_rocm_label(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # G1.2: SCRIBE_WHISPER_DEVICE=rocm yields the honest "rocm" label
+        # so logs / UI / support output match what the user asked for.
         monkeypatch.setattr(engine, "_cuda_vram_gb", lambda: 16.0)
         monkeypatch.setenv("SCRIBE_WHISPER_DEVICE", "rocm")
         dev, compute = engine._whisper_device_and_compute()
-        assert dev == "cuda"
+        assert dev == "rocm"
+        assert compute == "float16"
+
+
+class TestToTorchDeviceArg:
+    """G1.2: translate the user-facing backend label to the literal device
+    string the torch / CT2 / pyannote APIs accept."""
+
+    def test_rocm_collapses_to_cuda(self) -> None:
+        # PyTorch ROCm and CTranslate2 ROCm both shim onto the CUDA
+        # namespace, so the actual device-arg string is "cuda".
+        assert engine._to_torch_device_arg("rocm") == "cuda"
+
+    @pytest.mark.parametrize("label", ["cuda", "mps", "cpu"])
+    def test_other_labels_passthrough(self, label: str) -> None:
+        assert engine._to_torch_device_arg(label) == label
+
+    def test_idempotent_on_cuda(self) -> None:
+        # Calling the translator on an already-translated value is safe.
+        assert engine._to_torch_device_arg(engine._to_torch_device_arg("rocm")) == "cuda"
 
 
 class TestIsRdna2:

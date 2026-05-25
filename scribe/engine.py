@@ -421,14 +421,17 @@ def _is_rdna2() -> bool:
 
 def _torch_device() -> str:
     """
-    PyTorch device string for alignment / pyannote. Note that under ROCm,
-    PyTorch *takes* "cuda" as the device label (its HIP backend aliases the
-    CUDA namespace), so we translate "rocm" → "cuda" at this boundary.
+    User-facing device label for alignment / pyannote: one of
+    ``cuda`` / ``rocm`` / ``mps`` / ``cpu``.
+
+    G1.2: this returns the honest four-state label so logs, the
+    Recording-details card, and support output show the *real* backend
+    rather than the CUDA-shim namespace. PyTorch's ROCm wheel still wants
+    the literal string ``"cuda"`` at the actual device-arg boundary —
+    callers wrap with :func:`_to_torch_device_arg` before handing the
+    value to torch / whisperx / pyannote.
     """
-    backend = gpu_backend()
-    if backend == "rocm":
-        return "cuda"   # PyTorch ROCm uses the cuda namespace
-    return backend
+    return gpu_backend()
 
 
 def _cuda_vram_gb() -> float:
@@ -445,47 +448,71 @@ def _cuda_vram_gb() -> float:
 
 def _diarization_device() -> str:
     """
-    pyannote on CUDA/ROCm/CPU. Default to GPU when present, CPU otherwise.
-    On MPS some ops still fall back to CPU and the partial-MPS path is
-    slower than plain CPU, so we skip MPS unless explicitly forced.
+    User-facing device label for pyannote diarization: one of
+    ``cuda`` / ``rocm`` / ``mps`` / ``cpu``.
+
+    Default to the active GPU backend when present, CPU otherwise. On MPS
+    some ops still fall back to CPU and the partial-MPS path is slower
+    than plain CPU, so we skip MPS unless ``SCRIBE_DIARIZE_DEVICE=mps`` is
+    explicitly set.
+
+    G1.2: this returns the honest four-state label, including ``"rocm"``
+    on AMD. Callers translate to the actual torch device argument with
+    :func:`_to_torch_device_arg` immediately before the pyannote load.
     """
     forced = os.environ.get("SCRIBE_DIARIZE_DEVICE", "").strip().lower()
     if forced in {"cuda", "rocm", "mps", "cpu"}:
-        # Translate rocm → cuda for the actual torch device string.
-        return "cuda" if forced == "rocm" else forced
+        return forced
     backend = gpu_backend()
     if backend in ("cuda", "rocm"):
-        return "cuda"
+        return backend
     return "cpu"
 
 
 def _whisper_device_and_compute() -> tuple[str, str]:
     """
-    faster-whisper device + compute type.
+    faster-whisper device label + compute type.
 
-    CTranslate2 has no MPS backend, but on its ROCm wheel (v4.7.0+) the
-    device flag is still "cuda" — same code path as NVIDIA. We auto-pick
-    int8_float16 on smaller VRAM cards to keep large-v3 comfortably under
-    the budget.
+    Returns the honest four-state label (``cuda`` / ``rocm`` / ``mps`` /
+    ``cpu``) plus a CT2 compute type. CTranslate2 has no MPS backend, and
+    its ROCm wheel (v4.7.0+) still takes the literal string ``"cuda"`` as
+    the device flag because of HIP's CUDA-namespace shim — call sites
+    translate with :func:`_to_torch_device_arg` at the model load.
+
+    We auto-pick ``int8_float16`` on smaller VRAM cards to keep large-v3
+    comfortably under the budget.
     """
     forced_device = os.environ.get("SCRIBE_WHISPER_DEVICE", "").strip().lower()
     forced_compute = os.environ.get("SCRIBE_COMPUTE_TYPE", "").strip().lower()
 
     backend = gpu_backend()
     if forced_device in {"cuda", "rocm", "cpu"}:
-        device = "cuda" if forced_device in {"cuda", "rocm"} else "cpu"
+        device = forced_device
     elif backend in ("cuda", "rocm"):
-        device = "cuda"
+        device = backend
     else:
         device = "cpu"
 
     if forced_compute:
         return device, forced_compute
 
-    if device == "cuda":
+    if device in ("cuda", "rocm"):
         # large-v3 fp16 wants ~6 GB; int8_float16 brings it under ~4 GB.
         return device, "int8_float16" if _cuda_vram_gb() < 8 else "float16"
     return device, "int8"
+
+
+def _to_torch_device_arg(label: str) -> str:
+    """Translate a user-facing backend label into the literal device string
+    accepted by torch / CTranslate2 / pyannote.
+
+    PyTorch's ROCm wheel and CTranslate2's ROCm wheel both shim onto the
+    CUDA namespace (``torch.cuda.*`` and ``device="cuda"`` respectively),
+    so ``"rocm"`` collapses to ``"cuda"`` at the API boundary. Every other
+    label passes through unchanged. Idempotent and safe to call on values
+    that are already device-arg strings.
+    """
+    return "cuda" if label == "rocm" else label
 
 
 def _apply_rocm_runtime_workarounds() -> None:
@@ -664,7 +691,9 @@ def _transcribe_with_alignment(
         asr = _safe_load_model(
             whisperx,
             model_name=model_name,
-            device=device,
+            # CT2's ROCm wheel still takes device="cuda" — translate the
+            # honest "rocm" label at the library boundary (G1.2).
+            device=_to_torch_device_arg(device),
             compute_type=compute_type,
             language=language,
             asr_options=options.asr_options(),
@@ -699,7 +728,9 @@ def _transcribe_with_alignment(
             torch.cuda.empty_cache()
 
     progress("Loading alignment model", progress_base + 0.55 * progress_span)
-    align_device = _torch_device()
+    # _torch_device() returns the honest backend label (cuda/rocm/mps/cpu);
+    # PyTorch ROCm uses the cuda namespace, so we translate at the boundary.
+    align_device = _to_torch_device_arg(_torch_device())
     align_model, metadata = whisperx.load_align_model(
         language_code=detected_lang,
         device=align_device,
@@ -881,7 +912,9 @@ def transcribe_diarize(
     )
 
     whisperx = _load_whisperx()
-    diarize_device = _diarization_device()
+    # _diarization_device() returns the honest backend label
+    # (cuda/rocm/mps/cpu); pyannote/torch take device="cuda" on ROCm.
+    diarize_device = _to_torch_device_arg(_diarization_device())
 
     progress("Loading diarization model", 0.78)
     # whisperx renamed this between versions; handle both.

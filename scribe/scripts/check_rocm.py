@@ -34,6 +34,7 @@ def _make_silent_wav(path: Path, seconds: float = 5.0, sr: int = 16000) -> None:
 
 def main() -> int:
     from scribe.engine import (
+        _to_torch_device_arg,
         _whisper_device_and_compute,
         _torch_device,
         gpu_backend,
@@ -55,7 +56,9 @@ def main() -> int:
             import whisperx
             asr = whisperx.load_model(
                 "tiny",
-                device=w_dev,
+                # CT2 ROCm wheel still wants device="cuda" — translate
+                # the honest "rocm" label at the library boundary.
+                device=_to_torch_device_arg(w_dev),
                 compute_type=w_compute,
                 language="en",
             )
@@ -79,7 +82,10 @@ def main() -> int:
         print(">> Loading wav2vec2 alignment model …")
         t0 = time.time()
         try:
-            am, meta = whisperx.load_align_model(language_code="en", device=_torch_device())
+            am, meta = whisperx.load_align_model(
+                language_code="en",
+                device=_to_torch_device_arg(_torch_device()),
+            )
         except Exception as e:  # noqa: BLE001
             print(f"FAILED to load alignment model: {type(e).__name__}: {e}")
             return 4
