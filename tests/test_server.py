@@ -1201,3 +1201,311 @@ class TestSourcesAPI:
         r = client.delete(f"/api/projects/{pid}")
         assert r.status_code == 200
         assert not (srv.PROJECTS_DIR / pid).exists()
+
+
+# --------------------------------------------------------------------------- #
+# Participants (F1.3)
+# --------------------------------------------------------------------------- #
+
+
+class TestParticipantsAPI:
+    def _make_project(self, client) -> str:
+        r = client.post("/api/projects", json={"name": "Holder"})
+        assert r.status_code == 201
+        return r.json()["id"]
+
+    def test_list_empty(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.get(f"/api/projects/{pid}/participants")
+        assert r.status_code == 200
+        assert r.json() == {"participants": []}
+
+    def test_list_404_when_project_missing(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.get("/api/projects/aaaaaaaaaaaa/participants")
+        assert r.status_code == 404
+
+    def test_create_minimal(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/participants", json={"name": "P01"}
+        )
+        assert r.status_code == 201
+        body = r.json()
+        assert body["name"] == "P01"
+        assert body["project_id"] == pid
+        assert body["pseudonym"] == ""
+        assert body["demographics"] == {}
+        assert body["source_ids"] == []
+        assert body["created_at"] and body["modified_at"]
+
+    def test_create_with_full_fields(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/participants",
+            json={
+                "name": "P03",
+                "pseudonym": "Anon C",
+                "demographics": {"role": "consultant", "age band": "40-49"},
+                "notes": "Senior clinician.",
+                "source_ids": ["0123456789ab"],
+            },
+        )
+        assert r.status_code == 201
+        body = r.json()
+        assert body["pseudonym"] == "Anon C"
+        assert body["demographics"] == {
+            "role": "consultant",
+            "age band": "40-49",
+        }
+        assert body["notes"] == "Senior clinician."
+        assert body["source_ids"] == ["0123456789ab"]
+
+    def test_create_persists_to_disk(self, server_env) -> None:
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/participants",
+            json={"name": "On disk"},
+        )
+        part_id = r.json()["id"]
+        on_disk = json.loads(
+            (srv.PROJECTS_DIR / pid / "participants" / f"{part_id}.json").read_text()
+        )
+        assert on_disk["name"] == "On disk"
+        assert on_disk["project_id"] == pid
+
+    def test_create_blank_name_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/participants", json={"name": "  "}
+        )
+        assert r.status_code == 400
+
+    def test_create_bad_demographics_key_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/participants",
+            json={"name": "ok", "demographics": {"1bad": "v"}},
+        )
+        assert r.status_code == 400
+
+    def test_create_bad_source_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/participants",
+            json={"name": "ok", "source_ids": ["BADBAD"]},
+        )
+        assert r.status_code == 400
+
+    def test_create_unknown_project_404(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            "/api/projects/aaaaaaaaaaaa/participants",
+            json={"name": "Orphan"},
+        )
+        assert r.status_code == 404
+
+    def test_create_invalid_project_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        r = client.post(
+            "/api/projects/BAD/participants",
+            json={"name": "Orphan"},
+        )
+        assert r.status_code == 400
+
+    def test_create_non_object_body_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/participants",
+            json=["not", "an", "object"],
+        )
+        assert r.status_code == 400
+
+    def test_create_invalid_json_body_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/participants",
+            content=b"not json",
+            headers={"content-type": "application/json"},
+        )
+        assert r.status_code == 400
+
+    def test_get_by_id(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        part_id = client.post(
+            f"/api/projects/{pid}/participants", json={"name": "Fetch"}
+        ).json()["id"]
+        r = client.get(f"/api/projects/{pid}/participants/{part_id}")
+        assert r.status_code == 200
+        assert r.json()["name"] == "Fetch"
+
+    def test_get_missing_404(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.get(f"/api/projects/{pid}/participants/aaaaaaaaaaaa")
+        assert r.status_code == 404
+
+    def test_get_invalid_participant_id_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        for bad in ("BAD", "x" * 12, "../escape"):
+            r = client.get(f"/api/projects/{pid}/participants/{bad}")
+            assert r.status_code in (400, 404), (bad, r.status_code)
+
+    def test_list_returns_created(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        client.post(f"/api/projects/{pid}/participants", json={"name": "A"})
+        client.post(f"/api/projects/{pid}/participants", json={"name": "B"})
+        names = sorted(
+            p["name"]
+            for p in client.get(
+                f"/api/projects/{pid}/participants"
+            ).json()["participants"]
+        )
+        assert names == ["A", "B"]
+
+    def test_list_only_returns_own_project_participants(self, server_env) -> None:
+        # Two projects; participants don't leak across.
+        _, client, _ = server_env
+        a = self._make_project(client)
+        b = client.post("/api/projects", json={"name": "Other"}).json()["id"]
+        client.post(f"/api/projects/{a}/participants", json={"name": "A1"})
+        client.post(f"/api/projects/{b}/participants", json={"name": "B1"})
+        a_names = [
+            p["name"]
+            for p in client.get(f"/api/projects/{a}/participants").json()["participants"]
+        ]
+        b_names = [
+            p["name"]
+            for p in client.get(f"/api/projects/{b}/participants").json()["participants"]
+        ]
+        assert a_names == ["A1"]
+        assert b_names == ["B1"]
+
+    def test_patch_updates_fields(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        part_id = client.post(
+            f"/api/projects/{pid}/participants", json={"name": "Old"}
+        ).json()["id"]
+        r = client.patch(
+            f"/api/projects/{pid}/participants/{part_id}",
+            json={"name": "New", "pseudonym": "Anon"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["name"] == "New"
+        assert body["pseudonym"] == "Anon"
+        # Persisted on disk.
+        again = client.get(f"/api/projects/{pid}/participants/{part_id}").json()
+        assert again["name"] == "New"
+
+    def test_patch_advances_modified_at(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        created = client.post(
+            f"/api/projects/{pid}/participants", json={"name": "Time"}
+        ).json()
+        part_id = created["id"]
+        original = created["modified_at"]
+        import time
+        time.sleep(0.005)
+        updated = client.patch(
+            f"/api/projects/{pid}/participants/{part_id}",
+            json={"name": "Time2"},
+        ).json()
+        assert updated["created_at"] == created["created_at"]
+        assert updated["modified_at"] >= original
+
+    def test_patch_unknown_field_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        part_id = client.post(
+            f"/api/projects/{pid}/participants", json={"name": "ok"}
+        ).json()["id"]
+        r = client.patch(
+            f"/api/projects/{pid}/participants/{part_id}",
+            json={"haxx": True},
+        )
+        assert r.status_code == 400
+
+    def test_patch_invalid_value_400(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        part_id = client.post(
+            f"/api/projects/{pid}/participants", json={"name": "ok"}
+        ).json()["id"]
+        r = client.patch(
+            f"/api/projects/{pid}/participants/{part_id}",
+            json={"source_ids": ["BADBAD"]},
+        )
+        assert r.status_code == 400
+
+    def test_patch_id_in_body_ignored(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        part_id = client.post(
+            f"/api/projects/{pid}/participants", json={"name": "ok"}
+        ).json()["id"]
+        r = client.patch(
+            f"/api/projects/{pid}/participants/{part_id}",
+            json={
+                "id": "ffffffffffff",
+                "project_id": "ffffffffffff",
+                "name": "renamed",
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["id"] == part_id
+        assert body["project_id"] == pid
+
+    def test_patch_missing_404(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.patch(
+            f"/api/projects/{pid}/participants/aaaaaaaaaaaa",
+            json={"name": "x"},
+        )
+        assert r.status_code == 404
+
+    def test_delete(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        part_id = client.post(
+            f"/api/projects/{pid}/participants", json={"name": "Doomed"}
+        ).json()["id"]
+        r = client.delete(f"/api/projects/{pid}/participants/{part_id}")
+        assert r.status_code == 200
+        assert (
+            client.get(f"/api/projects/{pid}/participants/{part_id}").status_code
+            == 404
+        )
+
+    def test_delete_missing_404(self, server_env) -> None:
+        _, client, _ = server_env
+        pid = self._make_project(client)
+        r = client.delete(f"/api/projects/{pid}/participants/aaaaaaaaaaaa")
+        assert r.status_code == 404
+
+    def test_delete_project_cascades_participants(self, server_env) -> None:
+        # Cleanup contract: deleting a project removes its participants.
+        srv, client, _ = server_env
+        pid = self._make_project(client)
+        client.post(f"/api/projects/{pid}/participants", json={"name": "P1"})
+        client.post(f"/api/projects/{pid}/participants", json={"name": "P2"})
+        assert (srv.PROJECTS_DIR / pid / "participants").exists()
+        r = client.delete(f"/api/projects/{pid}")
+        assert r.status_code == 200
+        assert not (srv.PROJECTS_DIR / pid).exists()

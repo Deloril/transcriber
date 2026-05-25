@@ -606,6 +606,129 @@ async def delete_source_endpoint(project_id: str, source_id: str) -> JSONRespons
 
 
 # --------------------------------------------------------------------------- #
+# Participants (F1.3) — humans behind one or more sources
+#
+# A participant carries the project-defined demographic columns and a
+# list of source IDs they appear in. Storage:
+# ``PROJECTS_DIR/<pid>/participants/<part_id>.json``. Like sources,
+# participants are wiped when the parent project is deleted because
+# they live inside the project directory.
+# --------------------------------------------------------------------------- #
+
+from . import participants as _participants  # noqa: E402  (after module-level state)
+
+
+def _check_participant_id(participant_id: str) -> None:
+    if not _participants.PARTICIPANT_ID_RE.match(participant_id):
+        raise HTTPException(400, "Invalid participant id")
+
+
+@app.get("/api/projects/{project_id}/participants")
+async def list_participants_endpoint(project_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        out = [
+            p.to_dict()
+            for p in _participants.list_participants(_projects_root(), project_id)
+        ]
+    return JSONResponse({"participants": out})
+
+
+@app.post("/api/projects/{project_id}/participants")
+async def create_participant_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            participant = _participants.Participant.new(
+                project_id=project_id,
+                name=str(body.get("name", "")),
+                pseudonym=str(body.get("pseudonym", "") or ""),
+                demographics=body.get("demographics") or {},
+                notes=str(body.get("notes", "") or ""),
+                source_ids=body.get("source_ids") or [],
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid participant payload: {e}")
+        _participants.save_participant(_projects_root(), participant)
+    return JSONResponse(participant.to_dict(), status_code=201)
+
+
+@app.get("/api/projects/{project_id}/participants/{participant_id}")
+async def get_participant_endpoint(
+    project_id: str, participant_id: str
+) -> JSONResponse:
+    _check_project_id(project_id)
+    _check_participant_id(participant_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            participant = _participants.load_participant(
+                _projects_root(), project_id, participant_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Participant not found")
+    return JSONResponse(participant.to_dict())
+
+
+@app.patch("/api/projects/{project_id}/participants/{participant_id}")
+async def patch_participant_endpoint(
+    project_id: str, participant_id: str, request: Request
+) -> JSONResponse:
+    _check_project_id(project_id)
+    _check_participant_id(participant_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            participant = _participants.load_participant(
+                _projects_root(), project_id, participant_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Participant not found")
+        try:
+            participant.apply_update(body)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _participants.save_participant(_projects_root(), participant)
+    return JSONResponse(participant.to_dict())
+
+
+@app.delete("/api/projects/{project_id}/participants/{participant_id}")
+async def delete_participant_endpoint(
+    project_id: str, participant_id: str
+) -> JSONResponse:
+    _check_project_id(project_id)
+    _check_participant_id(participant_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        ok = _participants.delete_participant(
+            _projects_root(), project_id, participant_id
+        )
+    if not ok:
+        raise HTTPException(404, "Participant not found")
+    return JSONResponse({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 
