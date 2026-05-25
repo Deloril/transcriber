@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import gc
 import os
+import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -337,6 +339,60 @@ def _load_whisperx():
     return whisperx
 
 
+class _ProgressCapture:
+    """
+    File-like object that pretends to be stdout. WhisperX prints progress as
+    'Progress: 42.31%...' when its `print_progress=True` flag is set; we
+    intercept that, parse the percent, and forward it to our own callback —
+    while still letting any other prints through to the real stdout so we
+    don't swallow useful diagnostics.
+    """
+
+    _re = re.compile(r"Progress:\s*([\d.]+)\s*%")
+
+    def __init__(self, label: str, on_pct: Callable[[str, float], None]) -> None:
+        self.label = label
+        self.on_pct = on_pct
+        self._buf = ""
+        self._real = sys.stdout
+
+    def write(self, s: str) -> int:
+        if not s:
+            return 0
+        self._buf += s
+        # process complete lines
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            m = self._re.search(line)
+            if m:
+                try:
+                    pct = float(m.group(1)) / 100.0
+                except ValueError:
+                    pct = None
+                if pct is not None:
+                    self.on_pct(self.label, max(0.0, min(1.0, pct)))
+                continue
+            # not a progress line — let it through to the real stdout
+            self._real.write(line + "\n")
+        return len(s)
+
+    def flush(self) -> None:
+        if self._buf:
+            self._real.write(self._buf)
+            self._buf = ""
+        self._real.flush()
+
+    def __enter__(self) -> "_ProgressCapture":
+        sys.stdout = self
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        try:
+            self.flush()
+        finally:
+            sys.stdout = self._real
+
+
 def _safe_load_model(whisperx, *, model_name, device, compute_type, language, asr_options, vad_options):
     """
     Call whisperx.load_model defensively — older/newer versions accept different
@@ -397,13 +453,23 @@ def _transcribe_with_alignment(
 
     audio = whisperx.load_audio(str(audio_path))
 
-    progress("Transcribing audio", progress_base + 0.1 * progress_span)
-    asr_result = asr.transcribe(
-        audio,
-        batch_size=batch_size,
-        language=None if language == "auto" else language,
-        chunk_size=int(options.chunk_size),
-    )
+    # Streaming progress for the long transcribe loop. WhisperX's per-chunk
+    # ratio gets remapped into our [0.10..0.55] slice of progress_span.
+    transcribe_lo = 0.10
+    transcribe_hi = 0.55
+
+    def _on_transcribe_pct(label: str, pct: float) -> None:
+        progress(label, progress_base + (transcribe_lo + pct * (transcribe_hi - transcribe_lo)) * progress_span)
+
+    progress("Transcribing audio", progress_base + transcribe_lo * progress_span)
+    with _ProgressCapture("Transcribing audio", _on_transcribe_pct):
+        asr_result = asr.transcribe(
+            audio,
+            batch_size=batch_size,
+            language=None if language == "auto" else language,
+            chunk_size=int(options.chunk_size),
+            print_progress=True,
+        )
     detected_lang = asr_result.get("language") or language or "en"
 
     # Free Whisper before loading alignment model — keeps memory low.
@@ -419,6 +485,10 @@ def _transcribe_with_alignment(
         device=align_device,
     )
 
+    # WhisperX's align() only emits progress during a fast preprocessing pass,
+    # not the slower GPU forced-alignment pass — instrumenting it would mislead
+    # users into thinking we're nearly done when we aren't. Just announce the
+    # phase and let the bar move on completion.
     progress("Aligning words", progress_base + 0.65 * progress_span)
     aligned = whisperx.align(
         asr_result["segments"],
