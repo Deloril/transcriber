@@ -258,6 +258,106 @@
     .profile-msg.ok { color: var(--ok); }
     .profile-msg.err { color: var(--err); }
 
+    /* Stats card */
+    .stats-card { display: none; }
+    .stats-card.show { display: block; }
+    .stats-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 12px; margin-bottom: 12px;
+    }
+    .stats-head h2 { margin: 0; font-size: 16px; }
+    .stats-head .name {
+      color: var(--muted);
+      font-size: 13px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      max-width: 60%;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px 18px;
+      margin-bottom: 14px;
+    }
+    .stat {
+      display: flex; flex-direction: column; gap: 2px;
+      padding: 8px 12px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      min-width: 0;
+    }
+    .stat .label {
+      font-size: 11px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .04em;
+    }
+    .stat .value {
+      font-size: 14px; font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .stat .sub { font-size: 11px; color: var(--muted); }
+    .stream-list { margin: 0; padding: 0; list-style: none; }
+    .stream-list li {
+      padding: 8px 12px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      margin-bottom: 6px;
+      font-size: 13px;
+      display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    }
+    .stream-list .pill {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+    .stream-list .stream-title { font-weight: 600; }
+
+    .waveform-wrap {
+      margin-top: 8px;
+      padding: 14px 16px 10px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .waveform-wrap .wf-head {
+      display: flex; justify-content: space-between; align-items: baseline;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .waveform-wrap .wf-head .scrub-time {
+      font-variant-numeric: tabular-nums;
+      color: var(--text);
+      font-weight: 600;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    .waveform {
+      width: 100%; height: 96px; display: block;
+    }
+    .waveform .bar { fill: url(#wf-grad); }
+    .waveform .axis { stroke: var(--border); stroke-width: 1; }
+    .waveform .cursor { stroke: var(--accent); stroke-width: 2; opacity: .85; }
+    .waveform-loading {
+      display: flex; align-items: center; justify-content: center;
+      height: 96px; color: var(--muted); font-size: 12px;
+    }
+    .waveform-loading .spin {
+      width: 14px; height: 14px;
+      border: 2px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; margin-right: 8px;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
     /* Header docs button */
     .doc-btn {
       margin-left: auto;
@@ -539,6 +639,24 @@
       </div>
     </aside>
 
+    <div id="statsCard" class="card stats-card">
+      <div class="stats-head">
+        <h2>Recording details</h2>
+        <span id="statsName" class="name"></span>
+      </div>
+      <div id="statsGrid" class="stats-grid"></div>
+      <div id="streamList"></div>
+      <div class="waveform-wrap">
+        <div class="wf-head">
+          <span>Audio waveform</span>
+          <span id="wfTime" class="scrub-time">—</span>
+        </div>
+        <div id="wfHost">
+          <div class="waveform-loading"><span class="spin"></span>Computing waveform…</div>
+        </div>
+      </div>
+    </div>
+
     <div id="resultCard" class="card hidden">
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 12px;">
         <h2 style="margin:0;font-size:16px;">Transcript</h2>
@@ -813,6 +931,7 @@
       goBtn.disabled = true;
       errBox.classList.add("hidden");
       resultCard.classList.add("hidden");
+      $("statsCard").classList.remove("show");
       progressWrap.classList.remove("hidden");
       bar.style.width = "1%";
       progressMsg.textContent = "Uploading…";
@@ -839,8 +958,171 @@
       }
       const j = await resp.json();
       statusEl.textContent = `Job ${j.job_id} · ${j.audio_streams} audio stream${j.audio_streams===1?"":"s"} detected`;
+      renderStats(j.media_info);
+      loadWaveform(j.job_id);
       streamProgress(j.job_id);
     });
+
+    // ---- Stats card + waveform ----
+    function fmtBytes(n) {
+      if (!isFinite(n) || n < 0) return "—";
+      const u = ["B", "KB", "MB", "GB", "TB"];
+      let i = 0;
+      while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+      return `${n.toFixed(n >= 100 || i === 0 ? 0 : (n >= 10 ? 1 : 2))} ${u[i]}`;
+    }
+    function fmtDuration(s) {
+      if (!isFinite(s) || s <= 0) return "—";
+      const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = Math.floor(s%60);
+      return h ? `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`
+              : `${m}:${String(sec).padStart(2,"0")}`;
+    }
+    function fmtBitrate(b) {
+      if (!isFinite(b) || b <= 0) return "—";
+      if (b >= 1_000_000) return `${(b/1_000_000).toFixed(1)} Mbps`;
+      return `${Math.round(b/1000)} kbps`;
+    }
+    function fmtRate(r) {
+      if (!isFinite(r) || r <= 0) return "—";
+      return r >= 1000 ? `${(r/1000).toFixed(1)} kHz` : `${r} Hz`;
+    }
+    function fmtFps(f) { return isFinite(f) && f > 0 ? `${f.toFixed(2)} fps` : "—"; }
+
+    function renderStats(info) {
+      if (!info) return;
+      _wfDuration = info.duration_seconds || 0;
+      const grid = $("statsGrid");
+      grid.innerHTML = "";
+      $("statsName").textContent = info.filename || "";
+      const stats = [
+        { label: "Duration",     value: fmtDuration(info.duration_seconds) },
+        { label: "File size",    value: fmtBytes(info.size_bytes) },
+        { label: "Container",    value: info.format_name || "—" },
+        { label: "Bitrate",      value: fmtBitrate(info.bit_rate) },
+      ];
+      const v = (info.video || [])[0];
+      if (v) {
+        stats.push({
+          label: "Video",
+          value: v.width && v.height ? `${v.width}×${v.height}` : (v.codec || "—"),
+          sub: [v.codec, fmtFps(v.fps), v.pix_fmt].filter(Boolean).join(" · "),
+        });
+      }
+      const a = (info.audio || [])[0];
+      if (a) {
+        stats.push({
+          label: "Audio",
+          value: a.channels ? `${a.channels} ch` : (a.codec || "—"),
+          sub: [a.codec, fmtRate(a.sample_rate), fmtBitrate(a.bit_rate)].filter(s => s && s !== "—").join(" · "),
+        });
+      }
+      stats.forEach(s => {
+        const el = document.createElement("div");
+        el.className = "stat";
+        el.innerHTML = `<span class="label">${escapeHtml(s.label)}</span>` +
+                       `<span class="value">${escapeHtml(s.value)}</span>` +
+                       (s.sub ? `<span class="sub">${escapeHtml(s.sub)}</span>` : "");
+        grid.appendChild(el);
+      });
+
+      // Per-track audio list (only if multiple)
+      const list = $("streamList");
+      list.innerHTML = "";
+      const audios = info.audio || [];
+      if (audios.length > 1) {
+        const ul = document.createElement("ul");
+        ul.className = "stream-list";
+        audios.forEach((s, i) => {
+          const li = document.createElement("li");
+          const pieces = [
+            `<span class="stream-title">Track ${i + 1}</span>`,
+            s.title ? escapeHtml(s.title) : "",
+            `<span class="pill">${escapeHtml(s.codec || "?")}</span>`,
+            `<span class="pill">${s.channels || "?"} ch</span>`,
+            `<span class="pill">${fmtRate(s.sample_rate)}</span>`,
+            s.language ? `<span class="pill">${escapeHtml(s.language)}</span>` : "",
+          ].filter(Boolean);
+          li.innerHTML = pieces.join(" ");
+          ul.appendChild(li);
+        });
+        list.appendChild(ul);
+      }
+
+      $("statsCard").classList.add("show");
+    }
+
+    let _wfDuration = 0;
+    async function loadWaveform(jobId) {
+      const host = $("wfHost");
+      try {
+        const r = await fetch(`/api/job/${jobId}/waveform?bins=1000`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        renderWaveform(host, data.peaks || []);
+      } catch (e) {
+        host.innerHTML = `<div class="waveform-loading" style="color:var(--err)">Couldn't load waveform: ${escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    function renderWaveform(host, peaks) {
+      host.innerHTML = "";
+      if (!peaks.length) {
+        host.innerHTML = `<div class="waveform-loading">No samples</div>`;
+        return;
+      }
+      const W = 1000, H = 96, mid = H / 2, bw = W / peaks.length;
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("class", "waveform");
+      svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+      svg.setAttribute("preserveAspectRatio", "none");
+      svg.innerHTML = `
+        <defs>
+          <linearGradient id="wf-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#7aa7ff" stop-opacity="0.95" />
+            <stop offset="0.5" stop-color="#a78bfa" stop-opacity="0.85" />
+            <stop offset="1" stop-color="#7aa7ff" stop-opacity="0.95" />
+          </linearGradient>
+        </defs>
+        <line class="axis" x1="0" y1="${mid}" x2="${W}" y2="${mid}" />
+      `;
+      // build a single path with two bars per peak (above + below midline)
+      let d = "";
+      const minH = 0.6;
+      peaks.forEach((p, i) => {
+        const h = Math.max(minH, p * (H * 0.46));
+        const x = i * bw;
+        d += `M${x.toFixed(2)} ${mid - h} h${Math.max(0.5, bw - 0.4).toFixed(2)} v${h * 2} h-${Math.max(0.5, bw - 0.4).toFixed(2)} z `;
+      });
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("class", "bar");
+      path.setAttribute("d", d);
+      svg.appendChild(path);
+
+      const cursor = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      cursor.setAttribute("class", "cursor");
+      cursor.setAttribute("x1", "-10");
+      cursor.setAttribute("x2", "-10");
+      cursor.setAttribute("y1", "0");
+      cursor.setAttribute("y2", String(H));
+      svg.appendChild(cursor);
+
+      svg.addEventListener("mousemove", (e) => {
+        const rect = svg.getBoundingClientRect();
+        const xRatio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const x = xRatio * W;
+        cursor.setAttribute("x1", String(x));
+        cursor.setAttribute("x2", String(x));
+        const t = xRatio * (_wfDuration || 0);
+        $("wfTime").textContent = _wfDuration > 0 ? fmtDuration(t) : "—";
+      });
+      svg.addEventListener("mouseleave", () => {
+        cursor.setAttribute("x1", "-10");
+        cursor.setAttribute("x2", "-10");
+        $("wfTime").textContent = _wfDuration > 0 ? fmtDuration(_wfDuration) : "—";
+      });
+
+      host.appendChild(svg);
+    }
 
     function streamProgress(jobId) {
       const es = new EventSource(`/api/job/${jobId}/events`);

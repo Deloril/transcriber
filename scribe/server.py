@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .audio import probe_audio_streams
+from .audio import compute_waveform, probe_audio_streams, probe_media_info
 from .engine import AdvancedOptions, Segment, TranscriptionResult, Word, transcribe
 from .writers import write_all, write_json, write_srt, write_txt, write_vtt
 
@@ -400,6 +400,11 @@ async def upload(
     if not streams:
         raise HTTPException(400, "No audio streams found in this file.")
 
+    try:
+        media_info = probe_media_info(input_path)
+    except Exception:
+        media_info = None
+
     job = Job(
         id=job_id,
         input_path=input_path,
@@ -426,6 +431,7 @@ async def upload(
             "job_id": job_id,
             "audio_streams": len(streams),
             "stream_titles": [s.title or f"track {i+1}" for i, s in enumerate(streams)],
+            "media_info": media_info,
         }
     )
 
@@ -647,6 +653,65 @@ _JOB_ID_RE = re.compile(r"^[a-f0-9]{12}$")
 def _check_job_id(job_id: str) -> None:
     if not _JOB_ID_RE.match(job_id):
         raise HTTPException(400, "Invalid job id")
+
+
+@app.get("/api/job/{job_id}/info")
+async def job_info(job_id: str) -> JSONResponse:
+    """Return media info (duration, codecs, etc) for a job."""
+    _check_job_id(job_id)
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        path = job.input_path.resolve()
+    if not _is_under(path, UPLOAD_DIR):
+        raise HTTPException(403, "Forbidden")
+    if not path.exists():
+        raise HTTPException(404, "Source file is missing on disk")
+    try:
+        return JSONResponse(probe_media_info(path))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Could not probe media: {e}")
+
+
+@app.get("/api/job/{job_id}/waveform")
+async def job_waveform(job_id: str, bins: int = 1000) -> JSONResponse:
+    """
+    Compute (and cache) a peak-amplitude waveform for the input audio.
+    Cached on disk so the upload page can re-fetch instantly on reload.
+    """
+    _check_job_id(job_id)
+    bins = max(50, min(4000, int(bins)))
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        path = job.input_path.resolve()
+        out_dir = job.output_dir.resolve()
+    if not _is_under(path, UPLOAD_DIR) or not _is_under(out_dir, OUTPUT_DIR):
+        raise HTTPException(403, "Forbidden")
+    if not path.exists():
+        raise HTTPException(404, "Source file is missing on disk")
+
+    cache = out_dir / f"waveform_{bins}.json"
+    if cache.exists():
+        try:
+            return JSONResponse(json.loads(cache.read_text()))
+        except Exception:
+            cache.unlink(missing_ok=True)
+
+    try:
+        peaks = compute_waveform(path, bins=bins)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Could not compute waveform: {e}")
+
+    payload = {"bins": bins, "peaks": peaks}
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(payload))
+    except Exception:
+        pass
+    return JSONResponse(payload)
 
 
 @app.get("/api/job/{job_id}/media")
