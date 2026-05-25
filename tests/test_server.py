@@ -193,6 +193,27 @@ class TestEditorPage:
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
 
+    def test_inline_split_and_annotate_buttons_rendered(self, server_env) -> None:
+        """F11.1 — split-at-cursor and add-annotation are inline icon
+        buttons on every segment, not buried in the ⋮ dropdown."""
+        srv, client, _ = server_env
+        _new_job(srv, status="done")
+        r = client.get("/edit/abc123def456")
+        assert r.status_code == 200
+        body = r.text
+        # The action stack and its three buttons exist in the rendered template.
+        assert "seg-actions" in body
+        assert "seg-split-btn" in body
+        assert "seg-note-btn" in body
+        assert "seg-menu-btn" in body
+        # The split / annotate menu items have been removed from the dropdown
+        # (they were `data-act="split"` and `data-act="add-note"`).
+        assert 'data-act="split"' not in body
+        assert 'data-act="add-note"' not in body
+        # The remaining dropdown items are still present.
+        for act in ("merge-prev", "merge-next", "insert-after", "reassign", "delete"):
+            assert f'data-act="{act}"' in body
+
 
 # --------------------------------------------------------------------------- #
 # README / docs endpoints

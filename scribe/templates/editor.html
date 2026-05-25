@@ -167,7 +167,7 @@
     .segment {
       position: relative;
       display: grid;
-      grid-template-columns: 110px 1fr 26px;
+      grid-template-columns: 110px 1fr 60px;
       gap: 12px;
       padding: 10px 8px 12px;
       border-radius: 10px;
@@ -228,23 +228,36 @@
     /* Notes (annotations) — stored as inline italic [bracket] in segment text */
     .note { color: var(--accent-2); font-style: italic; }
 
-    /* Segment menu */
-    .seg-menu-btn {
+    /* Segment actions — inline icon buttons + dropdown trigger */
+    .seg-actions {
+      display: flex;
+      align-items: flex-start;
+      gap: 2px;
+      align-self: start;
+      padding-top: 1px;
+    }
+    .seg-actions button {
       visibility: hidden;
       background: transparent;
       border: 0;
       color: var(--muted);
       cursor: pointer;
-      font-size: 18px;
-      align-self: start;
-      padding: 0 4px;
+      font-size: 14px;
+      padding: 2px 5px;
+      border-radius: 4px;
+      line-height: 1;
     }
-    .segment:hover .seg-menu-btn,
-    .segment.menu-open .seg-menu-btn { visibility: visible; }
-    .seg-menu-btn:hover { color: var(--text); }
+    .seg-actions .seg-menu-btn { font-size: 18px; padding: 0 4px; }
+    .segment:hover .seg-actions button,
+    .segment.menu-open .seg-actions button,
+    .segment .seg-text:focus-within ~ .seg-actions button,
+    .seg-actions button:focus { visibility: visible; }
+    .seg-actions button:hover { color: var(--text); background: var(--panel-2); }
+    .seg-actions .seg-split-btn:hover { color: var(--accent); }
+    .seg-actions .seg-note-btn:hover { color: var(--accent-2); }
     .seg-menu {
       position: absolute;
-      right: 8px; top: 32px;
+      right: 8px; top: 36px;
       background: var(--panel-2);
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -814,26 +827,73 @@ import { spreadTokensAcrossSpan, escapeHtml } from "/static/js/helpers.mjs";
     text.addEventListener("keydown", (e) => onSegmentKeydown(e, idx, text));
     div.appendChild(text);
 
-    // menu
+    // actions column: inline split + annotate + dropdown trigger.
+    // F11.1 promotes the two high-frequency ops (split-at-cursor and
+    // add-annotation) to inline icon buttons; the rest stays in the
+    // ⋮ dropdown so the row doesn't become a button-festival.
+    const actions = document.createElement("div");
+    actions.className = "seg-actions";
+
+    const splitBtn = document.createElement("button");
+    splitBtn.className = "seg-split-btn";
+    splitBtn.type = "button";
+    splitBtn.title = "Split at cursor (Shift+Enter)";
+    splitBtn.setAttribute("aria-label", "Split at cursor");
+    splitBtn.textContent = "✂";
+    splitBtn.addEventListener("mousedown", (e) => {
+      // mousedown fires before the contenteditable blurs, so the caret
+      // position is still meaningful by the time we read it.
+      e.preventDefault();
+    });
+    splitBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      // The caret comes from whatever has focus right now. If the segment
+      // text isn't focused, the user can't usefully "split at cursor" —
+      // route to the same Shift+Enter affordance they already know.
+      const focused = document.activeElement;
+      const target = (focused === text) ? text : text;
+      // Ensure focus before split so the cursor offset is read correctly.
+      if (focused !== text) text.focus();
+      handleSegmentAction(idx, "split", target);
+    });
+    actions.appendChild(splitBtn);
+
+    const noteBtn = document.createElement("button");
+    noteBtn.className = "seg-note-btn";
+    noteBtn.type = "button";
+    noteBtn.title = "Add annotation [ ]";
+    noteBtn.setAttribute("aria-label", "Add annotation");
+    noteBtn.textContent = "＋";
+    noteBtn.addEventListener("mousedown", (e) => e.preventDefault());
+    noteBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      handleSegmentAction(idx, "add-note", text);
+    });
+    actions.appendChild(noteBtn);
+
     const menuBtn = document.createElement("button");
     menuBtn.className = "seg-menu-btn";
-    menuBtn.title = "Segment menu";
-    menuBtn.innerHTML = "⋮";
+    menuBtn.type = "button";
+    menuBtn.title = "More actions";
+    menuBtn.setAttribute("aria-label", "More actions");
+    menuBtn.textContent = "⋮";
+    menuBtn.addEventListener("mousedown", (e) => e.preventDefault());
     menuBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       document.querySelectorAll(".segment.menu-open").forEach(s => { if (s !== div) s.classList.remove("menu-open"); });
       div.classList.toggle("menu-open");
     });
-    div.appendChild(menuBtn);
+    actions.appendChild(menuBtn);
+
+    div.appendChild(actions);
 
     const menu = document.createElement("div");
     menu.className = "seg-menu";
+    // Split + add-note now have inline buttons (F11.1); keep the rest here.
     menu.innerHTML = `
-      <button data-act="split">Split at cursor</button>
       <button data-act="merge-prev">Merge with previous</button>
       <button data-act="merge-next">Merge with next</button>
       <button data-act="insert-after">Insert segment after</button>
-      <button data-act="add-note">Add annotation [ ]</button>
       <button data-act="reassign">Reassign speaker</button>
       <button data-act="delete" class="danger">Delete segment</button>
     `;
