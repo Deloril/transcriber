@@ -464,11 +464,19 @@
         <div>
           <label>Model</label>
           <select id="model">
-            <option value="large-v3" selected>large-v3 (best)</option>
-            <option value="large-v2">large-v2</option>
-            <option value="medium.en">medium.en (faster)</option>
-            <option value="distil-large-v3">distil-large-v3 (fastest, EN only)</option>
+            <optgroup label="Whisper (multilingual)">
+              <option value="large-v3" selected>large-v3 (best accuracy)</option>
+              <option value="large-v3-turbo">large-v3-turbo (~8× faster, ~same accuracy)</option>
+              <option value="large-v2">large-v2</option>
+              <option value="medium.en">medium.en (faster, EN)</option>
+              <option value="distil-large-v3">distil-large-v3 (fastest Whisper, EN)</option>
+            </optgroup>
+            <optgroup label="NVIDIA Parakeet (English only, GPU)">
+              <option value="nvidia/parakeet-tdt-0.6b-v2">parakeet-tdt-0.6b-v2 (~30× faster, very accurate)</option>
+              <option value="nvidia/parakeet-tdt-0.6b-v3">parakeet-tdt-0.6b-v3 (newer)</option>
+            </optgroup>
           </select>
+          <p id="modelHint" class="hint hidden" style="margin-top:6px;"></p>
         </div>
       </div>
 
@@ -926,9 +934,39 @@
       }
     });
 
+    // -------- Capabilities (Parakeet availability) --------
+    let _caps = null;
+    async function fetchCapabilities() {
+      try {
+        const r = await fetch("/api/capabilities");
+        if (r.ok) _caps = await r.json();
+      } catch {}
+      updateModelHint();
+    }
+    function updateModelHint() {
+      const hint = $("modelHint");
+      const v = ($("model").value || "").toLowerCase();
+      const isParakeet = v.includes("parakeet");
+      if (isParakeet && _caps && _caps.parakeet && !_caps.parakeet.available) {
+        hint.classList.remove("hidden");
+        hint.style.color = "var(--warn)";
+        hint.innerHTML =
+          "⚠ NVIDIA NeMo isn't installed. Install it with " +
+          "<code>pip install -r requirements-parakeet.txt</code> in your venv, then reload.";
+      } else if (isParakeet) {
+        hint.classList.remove("hidden");
+        hint.style.color = "var(--muted)";
+        hint.textContent = "English only · CUDA GPU recommended · ~30× faster than Whisper.";
+      } else {
+        hint.classList.add("hidden");
+      }
+    }
+    $("model").addEventListener("change", updateModelHint);
+
     // Initial load
     loadPersistedSettings();
     fetchProfiles();
+    fetchCapabilities();
 
     goBtn.addEventListener("click", async () => {
       if (!chosenFile) return;

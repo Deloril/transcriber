@@ -122,4 +122,9 @@ cat <<EOF
 >> Run with: ./run.sh
 >> Then open http://localhost:8765
 >> Check device config any time with: source .venv/bin/activate && python -m scribe.devices
+
+Optional: enable NVIDIA Parakeet (English-only, ~30× faster than Whisper):
+  source .venv/bin/activate
+  pip install -r requirements-parakeet.txt
+Then select a parakeet-* model in the UI's model dropdown.
 EOF

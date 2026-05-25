@@ -120,6 +120,51 @@ Outputs land next to the input file as `<name>.json`, `<name>.srt`, `<name>.txt`
 
 ---
 
+## Choosing a model
+
+The model dropdown groups two engine families.
+
+### Whisper (multilingual, default)
+
+The path this project was built around. Best general-purpose accuracy, multilingual.
+
+| Option | When to use |
+|---|---|
+| `large-v3` | Best raw accuracy. Default. |
+| `large-v3-turbo` | Same accuracy as large-v3, **~8× faster**. Free upgrade for English-heavy or single-language work; recommended on most hardware. |
+| `large-v2` | Older. Use only if you have specific accuracy regressions on v3. |
+| `medium.en` | Faster, English-only, slightly lower accuracy. |
+| `distil-large-v3` | A distilled student of large-v3. ~6× faster, ~2% WER worse on English. EN only. |
+
+### NVIDIA Parakeet (English-only, GPU)
+
+Optional engine path. For English-only recordings on a CUDA GPU, Parakeet TDT 0.6B is materially faster than Whisper and competitive on accuracy (top of the Hugging Face Open ASR leaderboard at the time of writing).
+
+| Option | Notes |
+|---|---|
+| `parakeet-tdt-0.6b-v2` | Stable, ~30× faster than Whisper large-v3 on RTX cards. **English only.** |
+| `parakeet-tdt-0.6b-v3` | Newer, marginal improvements. |
+
+**Install** (one-time, separate from main install):
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-parakeet.txt    # ~4 GB of NVIDIA NeMo
+```
+
+The first run will download Parakeet weights (~2.4 GB) from Hugging Face. After that it's offline like everything else.
+
+**Pipeline.** Parakeet replaces only the *transcription* step. Voice-activity chunking (pyannote VAD), word-level forced alignment (wav2vec2), and speaker diarization (pyannote) are all unchanged — so word highlighting in the editor and multi-track / diarize modes work identically. The long-monologue fix carries over.
+
+**Trade-offs:**
+
+- English only. Pick a Whisper model for any other language.
+- Requires CUDA. CPU-only Parakeet is technically possible but extremely slow, not worth it.
+- Slightly more VRAM than int8-quantized Whisper. The 6 GB RTX 1000 used for testing this comfortably runs Parakeet TDT 0.6B alongside the alignment + diarization models loaded sequentially.
+- NeMo carries large transitive dependencies (PyTorch Lightning's full ecosystem, Numba, Hydra, etc.), which is why the install is opt-in.
+
+---
+
 ## OBS setup for perfect speaker identification
 
 This is the highest-leverage change you can make. With per-speaker audio tracks, AI diarization is unnecessary — each track is one speaker, and the result is essentially perfect.

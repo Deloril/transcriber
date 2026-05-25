@@ -1,0 +1,7 @@
+# Optional: NVIDIA Parakeet (NeMo) backend for English transcription.
+# Install separately so users sticking with Whisper don't pay the ~4 GB cost.
+#
+#   .venv/bin/pip install -r requirements-parakeet.txt
+#
+# Then select a parakeet-* model in the UI.
+nemo_toolkit[asr]>=2.0

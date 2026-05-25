@@ -431,52 +431,73 @@ def _transcribe_with_alignment(
     progress: ProgressFn,
     progress_base: float,
     progress_span: float,
+    hf_token: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """
-    Run WhisperX transcription + word-level alignment on a single audio file.
-
-    Returns (aligned_segments, detected_language).
+    Run transcription (Whisper or Parakeet) + word-level alignment on a single
+    audio file. Returns (aligned_segments, detected_language).
     """
     whisperx = _load_whisperx()
-    device, compute_type = _whisper_device_and_compute()
 
-    progress("Loading Whisper model", progress_base + 0.0 * progress_span)
-    asr = _safe_load_model(
-        whisperx,
-        model_name=model_name,
-        device=device,
-        compute_type=compute_type,
-        language=language,
-        asr_options=options.asr_options(),
-        vad_options=options.vad_options(),
-    )
-
-    audio = whisperx.load_audio(str(audio_path))
-
-    # Streaming progress for the long transcribe loop. WhisperX's per-chunk
-    # ratio gets remapped into our [0.10..0.55] slice of progress_span.
-    transcribe_lo = 0.10
-    transcribe_hi = 0.55
-
-    def _on_transcribe_pct(label: str, pct: float) -> None:
-        progress(label, progress_base + (transcribe_lo + pct * (transcribe_hi - transcribe_lo)) * progress_span)
-
-    progress("Transcribing audio", progress_base + transcribe_lo * progress_span)
-    with _ProgressCapture("Transcribing audio", _on_transcribe_pct):
-        asr_result = asr.transcribe(
-            audio,
-            batch_size=batch_size,
-            language=None if language == "auto" else language,
-            chunk_size=int(options.chunk_size),
-            print_progress=True,
+    # Parakeet path: NeMo TDT model, English only, native transcription.
+    # Returns the same {"start", "end", "text"} shape Whisper does, so the
+    # alignment+diarization tail of this function works unchanged.
+    from .parakeet import is_parakeet_model
+    if is_parakeet_model(model_name):
+        from .parakeet import transcribe_with_parakeet
+        # Reserve [0.00..0.55] for transcription, leave [0.55..1.00] for
+        # the shared alignment phase below.
+        seg_dicts, detected_lang = transcribe_with_parakeet(
+            audio_path,
+            model_name=model_name,
+            hf_token=hf_token,
+            options=options,
+            progress=progress,
+            progress_base=progress_base,
+            progress_span=progress_span * 0.55,
         )
-    detected_lang = asr_result.get("language") or language or "en"
+        asr_result = {"segments": seg_dicts, "language": detected_lang}
+        audio = whisperx.load_audio(str(audio_path))
+    else:
+        device, compute_type = _whisper_device_and_compute()
 
-    # Free Whisper before loading alignment model — keeps memory low.
-    del asr
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        progress("Loading Whisper model", progress_base + 0.0 * progress_span)
+        asr = _safe_load_model(
+            whisperx,
+            model_name=model_name,
+            device=device,
+            compute_type=compute_type,
+            language=language,
+            asr_options=options.asr_options(),
+            vad_options=options.vad_options(),
+        )
+
+        audio = whisperx.load_audio(str(audio_path))
+
+        # Streaming progress for the long transcribe loop. WhisperX's per-chunk
+        # ratio gets remapped into our [0.10..0.55] slice of progress_span.
+        transcribe_lo = 0.10
+        transcribe_hi = 0.55
+
+        def _on_transcribe_pct(label: str, pct: float) -> None:
+            progress(label, progress_base + (transcribe_lo + pct * (transcribe_hi - transcribe_lo)) * progress_span)
+
+        progress("Transcribing audio", progress_base + transcribe_lo * progress_span)
+        with _ProgressCapture("Transcribing audio", _on_transcribe_pct):
+            asr_result = asr.transcribe(
+                audio,
+                batch_size=batch_size,
+                language=None if language == "auto" else language,
+                chunk_size=int(options.chunk_size),
+                print_progress=True,
+            )
+        detected_lang = asr_result.get("language") or language or "en"
+
+        # Free Whisper before loading alignment model — keeps memory low.
+        del asr
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     progress("Loading alignment model", progress_base + 0.55 * progress_span)
     align_device = _torch_device()
@@ -574,6 +595,7 @@ def transcribe_multi_track(
             progress=progress,
             progress_base=i / n,
             progress_span=1.0 / n,
+            hf_token=os.environ.get("HF_TOKEN"),
         )
         used_language = detected
 
@@ -656,6 +678,7 @@ def transcribe_diarize(
         progress=progress,
         progress_base=0.05,
         progress_span=0.7,
+        hf_token=hf_token,
     )
 
     whisperx = _load_whisperx()

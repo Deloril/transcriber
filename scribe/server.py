@@ -311,6 +311,17 @@ def _normalise_profile(p: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@app.get("/api/capabilities")
+async def capabilities() -> JSONResponse:
+    """Report which optional engines are installed; the UI uses this to warn
+    when the user picks Parakeet without NeMo."""
+    from .parakeet import nemo_available
+    parakeet_ok, parakeet_err = nemo_available()
+    return JSONResponse({
+        "parakeet": {"available": parakeet_ok, "error": parakeet_err},
+    })
+
+
 @app.get("/api/profiles")
 async def list_profiles() -> JSONResponse:
     with PROFILES_LOCK:
