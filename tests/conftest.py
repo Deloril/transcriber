@@ -85,5 +85,9 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "SCRIBE_DIARIZE_DEVICE",
         "SCRIBE_COMPUTE_TYPE",
         "SCRIBE_STRICT_TORCH_LOAD",
+        # CT2_CUDA_ALLOCATOR is set by _apply_rocm_runtime_workarounds at
+        # import time on real AMD systems; clear it during tests so the
+        # AMD-specific tests can assert on its absence.
+        "CT2_CUDA_ALLOCATOR",
     ):
         monkeypatch.delenv(var, raising=False)
