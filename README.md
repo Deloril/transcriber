@@ -363,6 +363,16 @@ npm run test:coverage
 
 JS tests live in `tests/js/**/*.test.mjs` and exercise the pure helpers in `scribe/static/js/helpers.mjs` (formatters, ETA math, word-highlight search, etc).
 
+### Pre-commit hook
+
+After cloning, install the pre-commit hook so tests run before every commit:
+
+```bash
+./scripts/install-hooks.sh
+```
+
+It runs the fast pytest suite + Vitest. If either fails, the commit is blocked. Bypass with `git commit --no-verify` if you must, but the suite is fast enough (~5s for both) that there's rarely a reason to.
+
 ## Troubleshooting
 
 **Slow on first run.** First time WhisperX runs it downloads ~3 GB of weights. Subsequent runs are offline.
