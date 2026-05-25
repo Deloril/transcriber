@@ -282,9 +282,12 @@
     </aside>
 
     <div id="resultCard" class="card hidden">
-      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 12px;">
         <h2 style="margin:0;font-size:16px;">Transcript</h2>
-        <div id="meta" class="hint"></div>
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <a id="openEditor" href="#" style="display:inline-block;padding:7px 14px;background:linear-gradient(180deg,var(--accent),#5b87e6);color:#0b1020;border-radius:8px;text-decoration:none;font-weight:600;font-size:13px;">Open in editor →</a>
+          <div id="meta" class="hint"></div>
+        </div>
       </div>
       <div class="downloads" id="downloads"></div>
       <div class="transcript" id="transcript"></div>
@@ -402,6 +405,7 @@
       // meta
       const r2 = data.result;
       metaEl.textContent = `${r2.mode} · ${r2.language} · ${r2.speakers.length} speaker${r2.speakers.length===1?"":"s"}`;
+      $("openEditor").href = `/edit/${jobId}`;
 
       // transcript: group consecutive same-speaker segments
       transcriptEl.innerHTML = "";

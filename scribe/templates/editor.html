@@ -1,0 +1,1431 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ input_filename }} — Scribe Editor</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #181b22;
+      --panel-2: #1f232c;
+      --panel-3: #262b36;
+      --border: #2a2f3a;
+      --text: #e7ebf2;
+      --muted: #8b94a7;
+      --accent: #7aa7ff;
+      --accent-2: #a78bfa;
+      --hl: #fde68a;       /* current word */
+      --hl-bg: rgba(253,230,138,.15);
+      --ok: #5fd49b;
+      --err: #ff7676;
+      --warn: #ffb86c;
+      --shadow: 0 8px 30px rgba(0,0,0,.4);
+    }
+    * { box-sizing: border-box; }
+    html, body { background: var(--bg); color: var(--text); margin: 0; height: 100%; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif; font-size: 14px; }
+
+    /* Layout */
+    .app { display: grid; grid-template-rows: auto 1fr auto; min-height: 100vh; }
+
+    /* Top bar */
+    .topbar {
+      position: sticky; top: 0; z-index: 30;
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 18px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      box-shadow: 0 4px 20px rgba(0,0,0,.25);
+    }
+    .topbar a, .topbar button {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 6px 11px;
+      font-size: 13px;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .topbar a:hover, .topbar button:hover { border-color: var(--accent); }
+    .title { font-size: 14px; color: var(--muted); margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .title strong { color: var(--text); }
+    .save-status { font-size: 12px; color: var(--muted); padding: 4px 10px; }
+    .save-status.dirty { color: var(--warn); }
+    .save-status.saved { color: var(--ok); }
+    .save-status.saving { color: var(--accent); }
+    .save-status.error { color: var(--err); }
+
+    /* Media player (sticky below topbar) */
+    .media-wrap {
+      position: sticky; top: 51px; z-index: 25;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 18px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+    }
+    .media-wrap video, .media-wrap audio {
+      width: 100%;
+      max-height: 240px;
+      background: #000;
+      border-radius: 8px;
+      outline: none;
+    }
+    .media-wrap.audio-only video { display: none; }
+    .controls {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      align-items: stretch;
+      min-width: 220px;
+    }
+    .controls .row { display: flex; gap: 6px; align-items: center; }
+    .ctrl-btn {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 6px 10px;
+      font-size: 13px;
+      cursor: pointer;
+      min-width: 38px;
+    }
+    .ctrl-btn:hover { border-color: var(--accent); }
+    .ctrl-btn.active { border-color: var(--accent); color: var(--accent); }
+    .clock { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; min-width: 110px; text-align: right; }
+    .speed { font-size: 12px; color: var(--muted); }
+    .speed select {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 6px;
+      font: inherit;
+    }
+
+    /* Main editor area */
+    main { padding: 22px 28px 200px; max-width: 1100px; width: 100%; margin: 0 auto; }
+    .hint-bar { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+    .hint-bar kbd {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-bottom-width: 2px;
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-size: 11px;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+
+    /* Speakers bar */
+    .speakers-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 12px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 18px;
+      align-items: center;
+    }
+    .speakers-bar .label { color: var(--muted); font-size: 12px; margin-right: 6px; }
+    .speaker-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .speaker-chip:hover { border-color: var(--accent); }
+    .speaker-chip .swatch {
+      width: 10px; height: 10px; border-radius: 50%;
+    }
+
+    /* Segments */
+    .segment {
+      position: relative;
+      display: grid;
+      grid-template-columns: 110px 1fr 26px;
+      gap: 12px;
+      padding: 10px 8px 12px;
+      border-radius: 10px;
+      margin-bottom: 4px;
+    }
+    .segment.current { background: rgba(122,167,255,.06); }
+    .segment .meta {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 4px;
+      padding-top: 1px;
+    }
+    .seg-time {
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      font-size: 12px;
+      cursor: pointer;
+      background: transparent;
+      border: 0;
+      padding: 0;
+      text-align: left;
+    }
+    .seg-time:hover { color: var(--accent); }
+    .seg-speaker {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent);
+      cursor: pointer;
+      background: transparent;
+      border: 0;
+      padding: 0;
+      text-align: left;
+    }
+    .seg-speaker .swatch { width: 8px; height: 8px; border-radius: 50%; }
+    .seg-speaker:hover { text-decoration: underline; }
+    .seg-text {
+      outline: none;
+      line-height: 1.65;
+      padding: 4px 8px;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .seg-text:focus { border-color: var(--border); background: var(--panel); }
+    .seg-text:hover { background: rgba(255,255,255,.02); }
+
+    /* Word highlighting */
+    .word { padding: 0 1px; border-radius: 3px; cursor: pointer; transition: background-color .08s; }
+    .word:hover { background: rgba(255,255,255,.06); }
+    .word.active {
+      background: var(--hl-bg);
+      box-shadow: inset 0 -2px 0 var(--hl);
+    }
+
+    /* Notes (annotations) — stored as inline italic [bracket] in segment text */
+    .note { color: var(--accent-2); font-style: italic; }
+
+    /* Segment menu */
+    .seg-menu-btn {
+      visibility: hidden;
+      background: transparent;
+      border: 0;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 18px;
+      align-self: start;
+      padding: 0 4px;
+    }
+    .segment:hover .seg-menu-btn,
+    .segment.menu-open .seg-menu-btn { visibility: visible; }
+    .seg-menu-btn:hover { color: var(--text); }
+    .seg-menu {
+      position: absolute;
+      right: 8px; top: 32px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 4px;
+      z-index: 10;
+      display: none;
+      min-width: 170px;
+    }
+    .segment.menu-open .seg-menu { display: block; }
+    .seg-menu button {
+      display: block; width: 100%;
+      background: transparent; color: var(--text);
+      border: 0; padding: 7px 10px;
+      text-align: left;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .seg-menu button:hover { background: var(--panel-3); }
+    .seg-menu .danger { color: var(--err); }
+
+    /* Modals */
+    .modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(8,10,14,.55);
+      backdrop-filter: blur(2px);
+      display: none;
+      align-items: center; justify-content: center;
+      z-index: 80;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 18px 20px;
+      width: min(420px, 92vw);
+    }
+    .modal h3 { margin: 0 0 12px; font-size: 15px; }
+    .modal label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .modal input, .modal select, .modal textarea {
+      width: 100%;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 8px 10px;
+      font: inherit;
+    }
+    .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+    .modal .actions button {
+      background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 7px;
+      padding: 7px 12px; cursor: pointer; font-size: 13px;
+    }
+    .modal .actions .primary {
+      background: linear-gradient(180deg, var(--accent), #5b87e6);
+      color: #0b1020;
+      border: 0; font-weight: 600;
+    }
+
+    /* Search */
+    .search-bar {
+      position: sticky; top: calc(51px + var(--media-h, 0px));
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 10px;
+      margin-bottom: 14px;
+      display: none;
+      gap: 8px;
+      align-items: center;
+    }
+    .search-bar.open { display: flex; }
+    .search-bar input {
+      flex: 1;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 8px;
+      font: inherit;
+    }
+    .search-bar .count { color: var(--muted); font-size: 12px; min-width: 60px; }
+    .search-hit { background: rgba(253,230,138,.25); border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(253,230,138,.4); }
+    .search-hit.current { background: var(--hl); color: #1a1a1a; box-shadow: inset 0 0 0 2px var(--hl); }
+
+    /* Speaker color map */
+    .sp-0 { color: #7aa7ff; } .sw-0 { background: #7aa7ff; }
+    .sp-1 { color: #a78bfa; } .sw-1 { background: #a78bfa; }
+    .sp-2 { color: #5fd49b; } .sw-2 { background: #5fd49b; }
+    .sp-3 { color: #ffb86c; } .sw-3 { background: #ffb86c; }
+    .sp-4 { color: #ff79c6; } .sw-4 { background: #ff79c6; }
+    .sp-5 { color: #8be9fd; } .sw-5 { background: #8be9fd; }
+    .sp-6 { color: #ff7676; } .sw-6 { background: #ff7676; }
+    .sp-7 { color: #fde68a; } .sw-7 { background: #fde68a; }
+
+    /* Toast */
+    .toast {
+      position: fixed; left: 50%; transform: translateX(-50%);
+      bottom: 24px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 13px;
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transition: opacity .15s;
+      pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <a href="/">← Back</a>
+    <span class="title">Editing <strong>{{ input_filename }}</strong></span>
+    <span id="saveStatus" class="save-status">No changes</span>
+    <button id="searchBtn" title="Search (⌘F / Ctrl+F)">🔍</button>
+    <button id="undoBtn" title="Undo (⌘Z)">↶</button>
+    <button id="redoBtn" title="Redo (⇧⌘Z)">↷</button>
+    <button id="exportBtn" title="Export">Export ▾</button>
+    <button id="helpBtn" title="Keyboard shortcuts (?)">?</button>
+  </div>
+
+  <div id="mediaWrap" class="media-wrap">
+    <video id="player" controls preload="metadata"></video>
+    <div class="controls">
+      <div class="row">
+        <button id="rew5" class="ctrl-btn" title="Skip back 5s (Ctrl+←)">−5s</button>
+        <button id="playPause" class="ctrl-btn" title="Play/Pause (Space)">▶</button>
+        <button id="fwd5" class="ctrl-btn" title="Skip forward 5s (Ctrl+→)">+5s</button>
+        <span class="clock"><span id="curTime">0:00</span> / <span id="durTime">0:00</span></span>
+      </div>
+      <div class="row">
+        <span class="speed">Speed</span>
+        <select id="speedSel" class="speed">
+          <option value="0.5">0.5×</option>
+          <option value="0.75">0.75×</option>
+          <option value="1" selected>1×</option>
+          <option value="1.25">1.25×</option>
+          <option value="1.5">1.5×</option>
+          <option value="2">2×</option>
+        </select>
+        <button id="autoScroll" class="ctrl-btn active" title="Auto-scroll to current word">Follow</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="searchBar" class="search-bar">
+    <input id="searchInput" type="text" placeholder="Search transcript… (Enter for next, Shift+Enter for previous)">
+    <span id="searchCount" class="count">0 / 0</span>
+    <button id="searchClose" class="ctrl-btn">✕</button>
+  </div>
+
+  <main>
+    <div class="hint-bar">
+      <kbd>Space</kbd> play/pause · <kbd>Ctrl</kbd>+<kbd>←</kbd>/<kbd>→</kbd> skip 5s ·
+      <kbd>Ctrl</kbd>+<kbd>1-9</kbd> set speaker · <kbd>Shift</kbd>+<kbd>Enter</kbd> split at cursor ·
+      Click any word to jump · <kbd>Esc</kbd> stop · <kbd>?</kbd> shortcuts
+    </div>
+
+    <div id="speakersBar" class="speakers-bar">
+      <span class="label">Speakers:</span>
+      <span id="speakersList" style="display:contents"></span>
+      <button id="addSpeakerBtn" class="ctrl-btn" style="font-size:12px">+ Add</button>
+    </div>
+
+    <div id="segments"></div>
+  </main>
+
+  <div id="toast" class="toast"></div>
+</div>
+
+<!-- Speaker rename modal -->
+<div id="speakerModal" class="modal-overlay">
+  <div class="modal">
+    <h3 id="speakerModalTitle">Rename speaker</h3>
+    <label>Display name</label>
+    <input id="speakerModalInput" type="text" autocomplete="off">
+    <div class="actions">
+      <button id="speakerModalCancel">Cancel</button>
+      <button id="speakerModalSave" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Speaker assign modal -->
+<div id="assignModal" class="modal-overlay">
+  <div class="modal">
+    <h3>Set speaker for this segment</h3>
+    <label>Speaker</label>
+    <select id="assignSelect"></select>
+    <div class="actions">
+      <button id="assignCancel">Cancel</button>
+      <button id="assignSave" class="primary">Apply</button>
+    </div>
+  </div>
+</div>
+
+<!-- Insert segment modal -->
+<div id="insertModal" class="modal-overlay">
+  <div class="modal">
+    <h3>Insert new segment</h3>
+    <label>At time (seconds, e.g. 12.4)</label>
+    <input id="insertTime" type="text" inputmode="decimal">
+    <label style="margin-top:10px;">Speaker</label>
+    <select id="insertSpeaker"></select>
+    <label style="margin-top:10px;">Text</label>
+    <textarea id="insertText" rows="3"></textarea>
+    <div class="actions">
+      <button id="insertCancel">Cancel</button>
+      <button id="insertSave" class="primary">Insert</button>
+    </div>
+  </div>
+</div>
+
+<!-- Note (annotation) modal -->
+<div id="noteModal" class="modal-overlay">
+  <div class="modal">
+    <h3>Add annotation</h3>
+    <label>Annotations are inserted in [brackets] at the cursor position.</label>
+    <input id="noteText" type="text" placeholder="e.g. laughs, sighs, [unintelligible]">
+    <div class="actions">
+      <button id="noteCancel">Cancel</button>
+      <button id="noteSave" class="primary">Insert</button>
+    </div>
+  </div>
+</div>
+
+<!-- Help modal -->
+<div id="helpModal" class="modal-overlay">
+  <div class="modal" style="width:min(560px,92vw);">
+    <h3>Keyboard shortcuts</h3>
+    <table style="width:100%; font-size:13px; line-height:1.7;">
+      <tr><td><kbd>Space</kbd></td><td>Play / pause</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>→</kbd></td><td>Skip 5 seconds</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>Pause and blur</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>1</kbd>–<kbd>9</kbd></td><td>Assign speaker N to focused segment</td></tr>
+      <tr><td><kbd>Shift</kbd>+<kbd>Enter</kbd></td><td>Split segment at cursor</td></tr>
+      <tr><td><kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Search</td></tr>
+      <tr><td><kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>Undo</td></tr>
+      <tr><td><kbd>⇧</kbd>+<kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>Redo</td></tr>
+      <tr><td><kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Save now</td></tr>
+      <tr><td>Click word</td><td>Jump playback</td></tr>
+      <tr><td>Click timestamp</td><td>Jump to start of segment</td></tr>
+      <tr><td>Click speaker label</td><td>Reassign segment speaker</td></tr>
+    </table>
+    <div class="actions">
+      <button id="helpClose" class="primary">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Export menu -->
+<div id="exportModal" class="modal-overlay">
+  <div class="modal">
+    <h3>Export transcript</h3>
+    <label>Saved edits regenerate all formats automatically. Download:</label>
+    <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:8px; margin-top:10px;">
+      <a id="dlTxt" class="ctrl-btn" download>.txt</a>
+      <a id="dlSrt" class="ctrl-btn" download>.srt</a>
+      <a id="dlVtt" class="ctrl-btn" download>.vtt</a>
+      <a id="dlJson" class="ctrl-btn" download>.json</a>
+    </div>
+    <div class="actions">
+      <button id="exportCloseBtn" class="primary">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const JOB_ID = {{ job_id | tojson }};
+  const $ = (id) => document.getElementById(id);
+
+  // ---- State ----
+  /**
+   * transcript = {
+   *   language, mode, speakers: [string],   // canonical ordered list of speaker IDs
+   *   speaker_names: {SPEAKER_00: "Luke"},   // optional rename map
+   *   segments: [{ start, end, speaker, text, words: [{text,start,end,speaker,score}] }]
+   * }
+   */
+  let state = null;
+  const undoStack = [];
+  const redoStack = [];
+  let dirty = false;
+  let saving = false;
+  let saveTimer = null;
+  let lastSavedSnapshot = "";
+
+  // ---- Util ----
+  const fmtClock = (s) => {
+    if (!isFinite(s) || s < 0) s = 0;
+    const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = Math.floor(s%60);
+    return h ? `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`
+            : `${m}:${String(sec).padStart(2,"0")}`;
+  };
+  const fmtBracket = (s) => `[${fmtClock(s)}]`;
+  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+  }[c]));
+  const speakerIdx = (sp) => state.speakers.indexOf(sp);
+  const speakerLabel = (sp) => (state.speaker_names && state.speaker_names[sp]) || sp;
+  const speakerClass = (sp) => `sp-${(Math.max(0, speakerIdx(sp))) % 8}`;
+  const swatchClass = (sp) => `sw-${(Math.max(0, speakerIdx(sp))) % 8}`;
+  const snapshot = () => JSON.stringify(state);
+  const load = (snap) => { state = JSON.parse(snap); render(); markDirty(); };
+
+  function pushUndo() {
+    undoStack.push(snapshot());
+    if (undoStack.length > 80) undoStack.shift();
+    redoStack.length = 0;
+  }
+  function undo() {
+    if (!undoStack.length) return;
+    redoStack.push(snapshot());
+    state = JSON.parse(undoStack.pop());
+    render(); reconcileDirty();
+  }
+  function redo() {
+    if (!redoStack.length) return;
+    undoStack.push(snapshot());
+    state = JSON.parse(redoStack.pop());
+    render(); reconcileDirty();
+  }
+
+  function markDirty() {
+    dirty = true;
+    setSaveStatus("dirty", "Unsaved changes");
+    scheduleSave();
+  }
+
+  function reconcileDirty() {
+    // If undo/redo lands us back at the last saved snapshot, drop the dirty flag.
+    if (snapshot() === lastSavedSnapshot) {
+      dirty = false;
+      setSaveStatus("saved", "Saved");
+    } else {
+      markDirty();
+    }
+  }
+  function setSaveStatus(cls, msg) {
+    const el = $("saveStatus");
+    el.className = "save-status " + cls;
+    el.textContent = msg;
+  }
+
+  function scheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => save().catch(() => {}), 1500);
+  }
+
+  let saveAgain = false;
+  async function save() {
+    if (!state) return;
+    if (saving) { saveAgain = true; return; }
+    const snap = snapshot();
+    if (snap === lastSavedSnapshot) {
+      dirty = false;
+      setSaveStatus("saved", "Saved");
+      return;
+    }
+    saving = true;
+    setSaveStatus("saving", "Saving…");
+    try {
+      const r = await fetch(`/api/job/${JOB_ID}/transcript`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: snap,
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        throw new Error(`HTTP ${r.status}: ${t}`);
+      }
+      lastSavedSnapshot = snap;
+      // If state has drifted while the request was in flight, we're not
+      // actually saved — leave dirty=true and trigger another save.
+      if (snapshot() !== lastSavedSnapshot) {
+        setSaveStatus("dirty", "Unsaved changes");
+      } else {
+        dirty = false;
+        setSaveStatus("saved", "Saved");
+      }
+    } catch (e) {
+      setSaveStatus("error", "Save failed: " + e.message);
+    } finally {
+      saving = false;
+      if (saveAgain) {
+        saveAgain = false;
+        save();
+      }
+    }
+  }
+
+  window.addEventListener("beforeunload", (e) => {
+    if (dirty) { e.preventDefault(); e.returnValue = ""; }
+  });
+
+  // ---- Toast ----
+  let toastTimer = null;
+  function toast(msg) {
+    const t = $("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 1600);
+  }
+
+  // ---- Init / load ----
+  async function bootstrap() {
+    const r = await fetch(`/api/job/${JOB_ID}/transcript`);
+    if (!r.ok) {
+      document.body.innerHTML = `<div style="padding:40px">Could not load transcript: ${r.status}</div>`;
+      return;
+    }
+    state = await r.json();
+    if (!state.speakers || !state.speakers.length) {
+      const seen = [];
+      for (const s of state.segments || []) if (!seen.includes(s.speaker)) seen.push(s.speaker);
+      state.speakers = seen;
+    }
+    if (!state.speaker_names) state.speaker_names = {};
+    lastSavedSnapshot = snapshot();
+    render();
+
+    // Attach media
+    const player = $("player");
+    player.src = `/api/job/${JOB_ID}/media`;
+
+    // Detect audio-only after metadata loads
+    player.addEventListener("loadedmetadata", () => {
+      $("durTime").textContent = fmtClock(player.duration);
+      const audioOnly = !player.videoWidth;
+      if (audioOnly) {
+        $("mediaWrap").classList.add("audio-only");
+        // swap to <audio> control look — keep <video controls> but it'll show black
+        // simplest: hide the video and add an <audio> sibling
+        if (!document.getElementById("audioFallback")) {
+          const a = document.createElement("audio");
+          a.id = "audioFallback";
+          a.controls = true;
+          a.style.width = "100%";
+          a.src = player.src;
+          // Sync events two ways minimally
+          a.addEventListener("play", () => player.play());
+          a.addEventListener("pause", () => player.pause());
+          a.addEventListener("seeked", () => { player.currentTime = a.currentTime; });
+          player.addEventListener("timeupdate", () => {
+            if (Math.abs(a.currentTime - player.currentTime) > 0.25) a.currentTime = player.currentTime;
+          });
+          player.parentNode.insertBefore(a, player);
+          player.style.display = "none";
+        }
+      }
+      // Update sticky offset for search bar
+      document.documentElement.style.setProperty("--media-h", $("mediaWrap").offsetHeight + "px");
+    });
+  }
+
+  // ---- Rendering ----
+  function render() {
+    renderSpeakersBar();
+    renderSegments();
+    rebindWordHighlight();
+  }
+
+  function renderSpeakersBar() {
+    const list = $("speakersList");
+    list.innerHTML = "";
+    state.speakers.forEach((sp, i) => {
+      const chip = document.createElement("button");
+      chip.className = "speaker-chip";
+      chip.dataset.speaker = sp;
+      chip.innerHTML = `<span class="swatch ${swatchClass(sp)}"></span><span>${escapeHtml(speakerLabel(sp))}</span>`;
+      chip.title = "Click to rename";
+      chip.addEventListener("click", () => openSpeakerRename(sp));
+      list.appendChild(chip);
+    });
+  }
+
+  function renderSegments() {
+    const root = $("segments");
+    root.innerHTML = "";
+    state.segments.forEach((seg, idx) => {
+      root.appendChild(renderSegment(seg, idx));
+    });
+  }
+
+  function renderSegment(seg, idx) {
+    const div = document.createElement("div");
+    div.className = "segment";
+    div.dataset.idx = idx;
+
+    // meta column
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const t = document.createElement("button");
+    t.className = "seg-time";
+    t.textContent = fmtBracket(seg.start);
+    t.title = "Click to play from here";
+    t.addEventListener("click", () => seekTo(seg.start, true));
+    const sp = document.createElement("button");
+    sp.className = `seg-speaker ${speakerClass(seg.speaker)}`;
+    sp.innerHTML = `<span class="swatch ${swatchClass(seg.speaker)}"></span>${escapeHtml(speakerLabel(seg.speaker))}`;
+    sp.title = "Click to reassign speaker";
+    sp.addEventListener("click", () => openAssign(idx));
+    meta.appendChild(t);
+    meta.appendChild(sp);
+    div.appendChild(meta);
+
+    // text column
+    const text = document.createElement("div");
+    text.className = "seg-text";
+    text.contentEditable = "true";
+    text.spellcheck = true;
+    text.dataset.idx = idx;
+    populateSegmentText(text, seg);
+    text.addEventListener("focus", () => {
+      div.classList.add("current");
+    });
+    text.addEventListener("blur", () => {
+      onSegmentBlur(idx, text);
+      div.classList.remove("current");
+    });
+    text.addEventListener("input", () => {
+      // clear cached words on input — they're stale. We'll resync on blur.
+      div._dirtyText = true;
+    });
+    text.addEventListener("keydown", (e) => onSegmentKeydown(e, idx, text));
+    div.appendChild(text);
+
+    // menu
+    const menuBtn = document.createElement("button");
+    menuBtn.className = "seg-menu-btn";
+    menuBtn.title = "Segment menu";
+    menuBtn.innerHTML = "⋮";
+    menuBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      document.querySelectorAll(".segment.menu-open").forEach(s => { if (s !== div) s.classList.remove("menu-open"); });
+      div.classList.toggle("menu-open");
+    });
+    div.appendChild(menuBtn);
+
+    const menu = document.createElement("div");
+    menu.className = "seg-menu";
+    menu.innerHTML = `
+      <button data-act="split">Split at cursor</button>
+      <button data-act="merge-prev">Merge with previous</button>
+      <button data-act="merge-next">Merge with next</button>
+      <button data-act="insert-after">Insert segment after</button>
+      <button data-act="add-note">Add annotation [ ]</button>
+      <button data-act="reassign">Reassign speaker</button>
+      <button data-act="delete" class="danger">Delete segment</button>
+    `;
+    menu.addEventListener("click", (e) => {
+      const btn = e.target.closest("button"); if (!btn) return;
+      div.classList.remove("menu-open");
+      handleSegmentAction(idx, btn.dataset.act, text);
+    });
+    div.appendChild(menu);
+
+    return div;
+  }
+
+  function populateSegmentText(node, seg) {
+    node.innerHTML = "";
+    if (seg.words && seg.words.length) {
+      seg.words.forEach((w, i) => {
+        if (i > 0) node.appendChild(document.createTextNode(" "));
+        const span = document.createElement("span");
+        span.className = "word";
+        span.dataset.start = w.start;
+        span.dataset.end = w.end;
+        span.textContent = w.text;
+        span.addEventListener("click", (e) => {
+          // Don't seek if user is editing — only when not focused
+          if (document.activeElement !== node) {
+            e.preventDefault();
+            seekTo(w.start, true);
+          }
+        });
+        node.appendChild(span);
+      });
+    } else {
+      node.textContent = seg.text || "";
+    }
+  }
+
+  function onSegmentBlur(idx, node) {
+    // Resync text + words from edited content.
+    const seg = state.segments[idx];
+    const oldText = (seg.text || "").replace(/\s+/g, " ").trim();
+    // Pull words from the DOM (each .word span); free-typed text becomes "untimed" words spread across segment span.
+    const wordSpans = Array.from(node.querySelectorAll(".word"));
+    let newText;
+    let newWords;
+
+    if (wordSpans.length) {
+      newWords = wordSpans.map(span => ({
+        text: span.textContent,
+        start: parseFloat(span.dataset.start),
+        end: parseFloat(span.dataset.end),
+        speaker: seg.speaker,
+        score: null,
+      }));
+      // Plus any plain-text fragments inserted between spans become untimed words.
+      // To keep it simple, we treat the visible whitespace-trimmed text as the truth.
+      newText = node.textContent.replace(/\s+/g, " ").trim();
+      // If user added text outside the spans, regenerate word list from scratch
+      // by tokenising and spreading timestamps.
+      const tokens = newText.split(/\s+/).filter(Boolean);
+      if (tokens.length !== wordSpans.length || tokens.some((t, i) => t !== wordSpans[i].textContent)) {
+        newWords = spreadTokensAcrossSpan(tokens, seg.start, seg.end, seg.speaker);
+      }
+    } else {
+      newText = node.textContent.replace(/\s+/g, " ").trim();
+      const tokens = newText.split(/\s+/).filter(Boolean);
+      newWords = spreadTokensAcrossSpan(tokens, seg.start, seg.end, seg.speaker);
+    }
+
+    if (newText === oldText && JSON.stringify(newWords) === JSON.stringify(seg.words)) return;
+
+    pushUndo();
+    seg.text = newText;
+    seg.words = newWords;
+    populateSegmentText(node, seg); // re-render so spans match the new word list
+    markDirty();
+  }
+
+  function spreadTokensAcrossSpan(tokens, start, end, speaker) {
+    if (!tokens.length) return [];
+    const span = Math.max(0.05, end - start);
+    const per = span / tokens.length;
+    return tokens.map((tok, i) => ({
+      text: tok,
+      start: start + i * per,
+      end: start + (i + 1) * per,
+      speaker,
+      score: null,
+    }));
+  }
+
+  // ---- Word highlighting on timeupdate ----
+  let wordSpans = [];   // [{el, start, end, segIdx}]
+  let lastActive = -1;
+  function rebindWordHighlight() {
+    wordSpans = [];
+    document.querySelectorAll(".segment").forEach(seg => {
+      const idx = parseInt(seg.dataset.idx, 10);
+      seg.querySelectorAll(".word").forEach(el => {
+        const s = parseFloat(el.dataset.start);
+        const e = parseFloat(el.dataset.end);
+        if (isFinite(s) && isFinite(e)) wordSpans.push({el, start: s, end: e, segIdx: idx});
+      });
+    });
+    wordSpans.sort((a, b) => a.start - b.start);
+    lastActive = -1;
+  }
+
+  function findActiveWord(t) {
+    // Linear from lastActive — fast for monotonic playback. Falls back to binary search on jumps.
+    const GAP = 0.05;
+    if (lastActive >= 0 && lastActive < wordSpans.length) {
+      const w = wordSpans[lastActive];
+      if (t >= w.start - 0.02 && t <= w.end + GAP) return lastActive;
+      // try next few
+      for (let i = lastActive + 1; i < Math.min(lastActive + 6, wordSpans.length); i++) {
+        if (t < wordSpans[i].start) {
+          // we're in a gap — only stay on the previous word if t is within its end+GAP
+          const prev = wordSpans[i - 1];
+          if (prev && t <= prev.end + GAP) return i - 1;
+          return -1;
+        }
+        if (t <= wordSpans[i].end + GAP) return i;
+      }
+    }
+    // binary search for the largest word with start <= t
+    let lo = 0, hi = wordSpans.length - 1, best = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (wordSpans[mid].start <= t) { best = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    if (best === -1) return -1;
+    if (t > wordSpans[best].end + GAP) return -1;
+    return best;
+  }
+
+  function onTimeUpdate() {
+    const player = mediaEl();
+    const t = player.currentTime;
+    $("curTime").textContent = fmtClock(t);
+    if (!wordSpans.length) return;
+    const idx = findActiveWord(t);
+    if (idx === lastActive) return;
+    if (lastActive >= 0 && wordSpans[lastActive]) wordSpans[lastActive].el.classList.remove("active");
+    if (idx >= 0) {
+      const w = wordSpans[idx];
+      w.el.classList.add("active");
+      // mark current segment
+      document.querySelectorAll(".segment.current").forEach(s => s.classList.remove("current"));
+      const seg = document.querySelector(`.segment[data-idx="${w.segIdx}"]`);
+      if (seg) seg.classList.add("current");
+      if (autoScroll && document.activeElement.tagName !== "INPUT" && !isElementEditable(document.activeElement)) {
+        scrollWordIntoView(w.el);
+      }
+    }
+    lastActive = idx;
+  }
+
+  function scrollWordIntoView(el) {
+    const rect = el.getBoundingClientRect();
+    const fromTop = rect.top;
+    const fromBottom = window.innerHeight - rect.bottom;
+    const margin = 200;
+    if (fromTop < margin || fromBottom < 60) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
+
+  function isElementEditable(el) {
+    if (!el) return false;
+    if (el.isContentEditable) return true;
+    const tag = (el.tagName || "").toUpperCase();
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  }
+
+  // ---- Player ----
+  function mediaEl() {
+    return document.getElementById("audioFallback") || $("player");
+  }
+  function seekTo(t, andPlay) {
+    const m = mediaEl();
+    m.currentTime = Math.max(0, t);
+    if (andPlay) m.play().catch(()=>{});
+  }
+  let autoScroll = true;
+  $("player").addEventListener("timeupdate", onTimeUpdate);
+  $("player").addEventListener("play", () => { $("playPause").textContent = "⏸"; });
+  $("player").addEventListener("pause", () => { $("playPause").textContent = "▶"; });
+  $("player").addEventListener("loadedmetadata", () => {
+    $("durTime").textContent = fmtClock($("player").duration);
+  });
+  $("playPause").addEventListener("click", () => {
+    const m = mediaEl();
+    if (m.paused) m.play(); else m.pause();
+  });
+  $("rew5").addEventListener("click", () => { const m = mediaEl(); m.currentTime = Math.max(0, m.currentTime - 5); });
+  $("fwd5").addEventListener("click", () => { const m = mediaEl(); m.currentTime = m.currentTime + 5; });
+  $("speedSel").addEventListener("change", (e) => { mediaEl().playbackRate = parseFloat(e.target.value); $("player").playbackRate = parseFloat(e.target.value); });
+  $("autoScroll").addEventListener("click", () => {
+    autoScroll = !autoScroll;
+    $("autoScroll").classList.toggle("active", autoScroll);
+  });
+
+  // ---- Segment actions ----
+  function handleSegmentAction(idx, act, textNode) {
+    const seg = state.segments[idx];
+    if (!seg) return;
+    if (act === "split") return splitAtCursor(idx, textNode);
+    if (act === "merge-prev") return mergeWithPrev(idx);
+    if (act === "merge-next") return mergeWithNext(idx);
+    if (act === "insert-after") return openInsert(idx);
+    if (act === "delete") return deleteSegment(idx);
+    if (act === "reassign") return openAssign(idx);
+    if (act === "add-note") return openNoteFor(idx, textNode);
+  }
+
+  function splitAtCursor(idx, textNode) {
+    const seg = state.segments[idx];
+    const sel = window.getSelection();
+    if (!sel.rangeCount) return;
+    const range = sel.getRangeAt(0);
+    if (!textNode.contains(range.startContainer)) return;
+
+    // Determine word index split point. Walk word spans; if cursor is before a span's first char, split before it.
+    const spans = Array.from(textNode.querySelectorAll(".word"));
+    if (!spans.length) {
+      // No timed words — split text at cursor offset; spread timestamps proportionally.
+      const fullText = textNode.textContent;
+      const before = textBeforeCaret(textNode, range);
+      const after = fullText.slice(before.length);
+      if (!before.trim() || !after.trim()) { toast("Cursor at boundary — nothing to split."); return; }
+      const ratio = before.length / Math.max(1, fullText.length);
+      const splitT = seg.start + (seg.end - seg.start) * ratio;
+
+      pushUndo();
+      const left = { ...seg, end: splitT, text: before.trim(), words: spreadTokensAcrossSpan(before.trim().split(/\s+/), seg.start, splitT, seg.speaker) };
+      const right = { ...seg, start: splitT, text: after.trim(), words: spreadTokensAcrossSpan(after.trim().split(/\s+/), splitT, seg.end, seg.speaker) };
+      state.segments.splice(idx, 1, left, right);
+      render(); markDirty();
+      return;
+    }
+
+    // Find which word span contains/precedes the caret
+    let splitWordIndex = -1;
+    for (let i = 0; i < spans.length; i++) {
+      const span = spans[i];
+      const pos = range.compareBoundaryPoints(Range.START_TO_START, makeRangeAt(span, 0));
+      if (pos <= 0) { splitWordIndex = i; break; }
+    }
+    if (splitWordIndex < 0) splitWordIndex = spans.length;
+    if (splitWordIndex <= 0) {
+      toast("Cursor is at the start — nothing to split off.");
+      return;
+    }
+    if (splitWordIndex >= spans.length) {
+      toast("Cursor is at the end — nothing to split off.");
+      return;
+    }
+
+    pushUndo();
+    const left = {
+      start: seg.start,
+      end: seg.words[splitWordIndex - 1].end,
+      speaker: seg.speaker,
+      text: seg.words.slice(0, splitWordIndex).map(w => w.text).join(" "),
+      words: seg.words.slice(0, splitWordIndex).map(w => ({...w})),
+    };
+    const right = {
+      start: seg.words[splitWordIndex].start,
+      end: seg.end,
+      speaker: seg.speaker,
+      text: seg.words.slice(splitWordIndex).map(w => w.text).join(" "),
+      words: seg.words.slice(splitWordIndex).map(w => ({...w})),
+    };
+    state.segments.splice(idx, 1, left, right);
+    render(); markDirty();
+  }
+
+  function makeRangeAt(node, offset) {
+    const r = document.createRange();
+    r.setStart(node, offset);
+    r.setEnd(node, offset);
+    return r;
+  }
+  function textBeforeCaret(root, range) {
+    const r = range.cloneRange();
+    r.selectNodeContents(root);
+    r.setEnd(range.startContainer, range.startOffset);
+    return r.toString();
+  }
+
+  function mergeWithPrev(idx) {
+    if (idx === 0) return;
+    pushUndo();
+    const prev = state.segments[idx - 1];
+    const cur = state.segments[idx];
+    prev.end = cur.end;
+    prev.text = (prev.text + " " + cur.text).trim();
+    // If different speakers, keep the previous speaker but tag merged words with their original speakers.
+    prev.words = (prev.words || []).concat((cur.words || []).map(w => ({...w})));
+    state.segments.splice(idx, 1);
+    render(); markDirty();
+  }
+  function mergeWithNext(idx) {
+    if (idx >= state.segments.length - 1) return;
+    pushUndo();
+    const cur = state.segments[idx];
+    const next = state.segments[idx + 1];
+    cur.end = next.end;
+    cur.text = (cur.text + " " + next.text).trim();
+    cur.words = (cur.words || []).concat((next.words || []).map(w => ({...w})));
+    state.segments.splice(idx + 1, 1);
+    render(); markDirty();
+  }
+  function deleteSegment(idx) {
+    if (!confirm("Delete this segment?")) return;
+    pushUndo();
+    state.segments.splice(idx, 1);
+    render(); markDirty();
+  }
+
+  // ---- Speaker rename modal ----
+  let renamingSpeaker = null;
+  function openSpeakerRename(sp) {
+    renamingSpeaker = sp;
+    $("speakerModalTitle").textContent = `Rename ${sp}`;
+    $("speakerModalInput").value = speakerLabel(sp);
+    $("speakerModal").classList.add("open");
+    setTimeout(() => $("speakerModalInput").focus(), 0);
+  }
+  $("speakerModalCancel").addEventListener("click", () => $("speakerModal").classList.remove("open"));
+  $("speakerModalSave").addEventListener("click", () => {
+    const v = $("speakerModalInput").value.trim();
+    if (!v) return;
+    pushUndo();
+    state.speaker_names = state.speaker_names || {};
+    state.speaker_names[renamingSpeaker] = v;
+    $("speakerModal").classList.remove("open");
+    render(); markDirty();
+  });
+  $("speakerModalInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); $("speakerModalSave").click(); }
+  });
+
+  $("addSpeakerBtn").addEventListener("click", () => {
+    const v = prompt("New speaker label (e.g. Guest)");
+    if (!v || !v.trim()) return;
+    pushUndo();
+    const id = `SPEAKER_${String(state.speakers.length).padStart(2, "0")}`;
+    state.speakers.push(id);
+    state.speaker_names = state.speaker_names || {};
+    state.speaker_names[id] = v.trim();
+    render(); markDirty();
+  });
+
+  // ---- Assign speaker modal ----
+  let assigningIdx = -1;
+  function openAssign(idx) {
+    assigningIdx = idx;
+    const sel = $("assignSelect");
+    sel.innerHTML = "";
+    state.speakers.forEach(sp => {
+      const opt = document.createElement("option");
+      opt.value = sp;
+      opt.textContent = speakerLabel(sp);
+      if (state.segments[idx].speaker === sp) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    $("assignModal").classList.add("open");
+  }
+  $("assignCancel").addEventListener("click", () => $("assignModal").classList.remove("open"));
+  $("assignSave").addEventListener("click", () => {
+    const v = $("assignSelect").value;
+    if (assigningIdx < 0) return;
+    pushUndo();
+    state.segments[assigningIdx].speaker = v;
+    (state.segments[assigningIdx].words || []).forEach(w => w.speaker = v);
+    $("assignModal").classList.remove("open");
+    render(); markDirty();
+  });
+
+  // ---- Insert modal ----
+  let insertAfterIdx = -1;
+  function openInsert(idx) {
+    insertAfterIdx = idx;
+    const seg = state.segments[idx];
+    $("insertTime").value = (seg ? seg.end : 0).toFixed(2);
+    const sel = $("insertSpeaker"); sel.innerHTML = "";
+    state.speakers.forEach(sp => {
+      const opt = document.createElement("option");
+      opt.value = sp; opt.textContent = speakerLabel(sp);
+      if (seg && seg.speaker === sp) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    $("insertText").value = "";
+    $("insertModal").classList.add("open");
+  }
+  $("insertCancel").addEventListener("click", () => $("insertModal").classList.remove("open"));
+  $("insertSave").addEventListener("click", () => {
+    const t = parseFloat($("insertTime").value);
+    if (!isFinite(t)) { toast("Invalid time."); return; }
+    const sp = $("insertSpeaker").value;
+    const text = $("insertText").value.trim();
+    pushUndo();
+    const newSeg = {
+      start: t, end: t + Math.max(0.5, text.split(/\s+/).length * 0.4),
+      speaker: sp,
+      text,
+      words: spreadTokensAcrossSpan(text.split(/\s+/).filter(Boolean), t, t + Math.max(0.5, text.split(/\s+/).length * 0.4), sp),
+    };
+    state.segments.splice(insertAfterIdx + 1, 0, newSeg);
+    state.segments.sort((a, b) => a.start - b.start);
+    $("insertModal").classList.remove("open");
+    render(); markDirty();
+  });
+
+  // ---- Note modal ----
+  let noteCtx = null;
+  function openNoteFor(idx, textNode) {
+    noteCtx = { idx, textNode };
+    $("noteText").value = "";
+    $("noteModal").classList.add("open");
+    setTimeout(() => $("noteText").focus(), 0);
+  }
+  $("noteCancel").addEventListener("click", () => $("noteModal").classList.remove("open"));
+  $("noteSave").addEventListener("click", () => {
+    const v = $("noteText").value.trim();
+    if (!v || !noteCtx) return;
+    const seg = state.segments[noteCtx.idx];
+    pushUndo();
+    seg.text = (seg.text ? seg.text.trim() + " " : "") + `[${v}]`;
+    // Append a new untimed word at the end of the segment.
+    seg.words = seg.words || [];
+    const wEnd = seg.end;
+    seg.words.push({ text: `[${v}]`, start: Math.max(seg.start, wEnd - 0.2), end: wEnd, speaker: seg.speaker, score: null });
+    $("noteModal").classList.remove("open");
+    render(); markDirty();
+  });
+  $("noteText").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); $("noteSave").click(); }
+  });
+
+  // ---- Keyboard shortcuts ----
+  function isCmdOrCtrl(e) { return e.metaKey || e.ctrlKey; }
+  document.addEventListener("keydown", (e) => {
+    const editing = isElementEditable(document.activeElement);
+
+    // Modal close
+    if (e.key === "Escape") {
+      let closedAny = false;
+      document.querySelectorAll(".modal-overlay.open").forEach(m => { m.classList.remove("open"); closedAny = true; });
+      if (closedAny) return;
+      mediaEl().pause();
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      return;
+    }
+    // Save
+    if (isCmdOrCtrl(e) && e.key.toLowerCase() === "s") {
+      e.preventDefault(); save(); return;
+    }
+    // Undo / redo
+    if (isCmdOrCtrl(e) && e.key.toLowerCase() === "z" && !e.shiftKey) {
+      e.preventDefault(); undo(); return;
+    }
+    if (isCmdOrCtrl(e) && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) {
+      e.preventDefault(); redo(); return;
+    }
+    // Search
+    if (isCmdOrCtrl(e) && e.key.toLowerCase() === "f") {
+      e.preventDefault(); openSearch(); return;
+    }
+    // Help
+    if (e.key === "?" && !editing) {
+      e.preventDefault(); $("helpModal").classList.add("open"); return;
+    }
+    // Space play/pause (when not editing)
+    if (e.code === "Space" && !editing) {
+      e.preventDefault();
+      const m = mediaEl();
+      if (m.paused) m.play(); else m.pause();
+      return;
+    }
+    // Skip 5s
+    if (isCmdOrCtrl(e) && e.key === "ArrowLeft") {
+      e.preventDefault(); const m = mediaEl(); m.currentTime = Math.max(0, m.currentTime - 5); return;
+    }
+    if (isCmdOrCtrl(e) && e.key === "ArrowRight") {
+      e.preventDefault(); const m = mediaEl(); m.currentTime = m.currentTime + 5; return;
+    }
+    // Ctrl+1..9 — set speaker on focused/current segment
+    if ((e.ctrlKey || e.metaKey) && /^[1-9]$/.test(e.key)) {
+      const n = parseInt(e.key, 10) - 1;
+      if (n >= state.speakers.length) return;
+      const focused = document.activeElement.closest && document.activeElement.closest(".segment");
+      const target = focused || document.querySelector(".segment.current");
+      if (!target) return;
+      e.preventDefault();
+      const idx = parseInt(target.dataset.idx, 10);
+      pushUndo();
+      state.segments[idx].speaker = state.speakers[n];
+      (state.segments[idx].words || []).forEach(w => w.speaker = state.speakers[n]);
+      render(); markDirty();
+      return;
+    }
+  });
+
+  // Shift+Enter inside a segment splits at cursor
+  function onSegmentKeydown(e, idx, textNode) {
+    if (e.key === "Enter" && e.shiftKey) {
+      e.preventDefault();
+      textNode.blur();           // resync words
+      setTimeout(() => splitAtCursor(idx, document.querySelector(`.seg-text[data-idx="${idx}"]`)), 0);
+      return;
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      // Plain Enter: do not insert a newline (we use Shift+Enter for split, line breaks are not meaningful here)
+      e.preventDefault();
+      textNode.blur();
+    }
+  }
+
+  // ---- Search ----
+  let searchHits = [];
+  let searchPos = -1;
+  function openSearch() {
+    $("searchBar").classList.add("open");
+    setTimeout(() => $("searchInput").focus(), 0);
+  }
+  function closeSearch() {
+    $("searchBar").classList.remove("open");
+    clearSearchHighlights();
+    searchHits = []; searchPos = -1;
+    $("searchCount").textContent = "0 / 0";
+  }
+  $("searchBtn").addEventListener("click", openSearch);
+  $("searchClose").addEventListener("click", closeSearch);
+  $("searchInput").addEventListener("input", () => runSearch($("searchInput").value));
+  $("searchInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); e.shiftKey ? gotoPrevHit() : gotoNextHit(); }
+    else if (e.key === "Escape") { e.preventDefault(); closeSearch(); }
+  });
+  // Search highlights operate by toggling a class on .word spans only —
+  // never by mutating the text node tree, so editing remains safe even
+  // mid-search.
+  function clearSearchHighlights() {
+    document.querySelectorAll(".search-hit").forEach(el => el.classList.remove("search-hit", "current"));
+  }
+  function runSearch(q) {
+    clearSearchHighlights();
+    searchHits = []; searchPos = -1;
+    if (!q || q.length < 1) { $("searchCount").textContent = "0 / 0"; return; }
+    const needle = q.toLowerCase();
+    document.querySelectorAll(".segment").forEach(segNode => {
+      const idx = parseInt(segNode.dataset.idx, 10);
+      const seg = state.segments[idx]; if (!seg) return;
+      const haystack = (seg.text || "").toLowerCase();
+      if (!haystack.includes(needle)) return;
+      // Find every word span whose own text contains the needle, OR whose text
+      // contains a substring that, joined with neighbours by spaces, contains
+      // the needle. Simplest correct rule: highlight any word whose lowercase
+      // text contains the needle. For multi-word matches, highlight the run of
+      // consecutive words spanning the match.
+      const wordEls = Array.from(segNode.querySelectorAll(".word"));
+      if (!wordEls.length) return;
+      const tokens = wordEls.map(w => w.textContent.toLowerCase());
+      // Build an index of where each word starts in a space-joined haystack so
+      // multi-word needles map back to word ranges.
+      const joined = tokens.join(" ");
+      let from = 0;
+      while (true) {
+        const pos = joined.indexOf(needle, from);
+        if (pos < 0) break;
+        const endPos = pos + needle.length;
+        // Map pos..endPos back to word indices.
+        let cum = 0, firstWord = -1, lastWord = -1;
+        for (let i = 0; i < tokens.length; i++) {
+          const tokStart = cum;
+          const tokEnd = cum + tokens[i].length;
+          if (firstWord < 0 && tokEnd > pos) firstWord = i;
+          if (tokStart < endPos) lastWord = i;
+          cum = tokEnd + 1; // +1 for the joining space
+        }
+        if (firstWord >= 0 && lastWord >= firstWord) {
+          for (let i = firstWord; i <= lastWord; i++) {
+            wordEls[i].classList.add("search-hit");
+            if (!searchHits.includes(wordEls[i])) searchHits.push(wordEls[i]);
+          }
+        }
+        from = endPos;
+      }
+    });
+    if (searchHits.length) { searchPos = 0; markCurrentHit(); }
+    $("searchCount").textContent = `${searchHits.length ? 1 : 0} / ${searchHits.length}`;
+  }
+  function markCurrentHit() {
+    searchHits.forEach((m, i) => m.classList.toggle("current", i === searchPos));
+    if (searchPos >= 0) searchHits[searchPos].scrollIntoView({block: "center", behavior: "smooth"});
+    $("searchCount").textContent = `${searchPos + 1} / ${searchHits.length}`;
+  }
+  function gotoNextHit() {
+    if (!searchHits.length) return;
+    searchPos = (searchPos + 1) % searchHits.length;
+    markCurrentHit();
+  }
+  function gotoPrevHit() {
+    if (!searchHits.length) return;
+    searchPos = (searchPos - 1 + searchHits.length) % searchHits.length;
+    markCurrentHit();
+  }
+
+  // ---- Top bar ----
+  $("undoBtn").addEventListener("click", undo);
+  $("redoBtn").addEventListener("click", redo);
+  $("helpBtn").addEventListener("click", () => $("helpModal").classList.add("open"));
+  $("helpClose").addEventListener("click", () => $("helpModal").classList.remove("open"));
+  $("exportBtn").addEventListener("click", async () => {
+    if (dirty) await save();
+    $("dlTxt").href = `/api/job/${JOB_ID}/download/txt`;
+    $("dlSrt").href = `/api/job/${JOB_ID}/download/srt`;
+    $("dlVtt").href = `/api/job/${JOB_ID}/download/vtt`;
+    $("dlJson").href = `/api/job/${JOB_ID}/download/json`;
+    $("exportModal").classList.add("open");
+  });
+  $("exportCloseBtn").addEventListener("click", () => $("exportModal").classList.remove("open"));
+
+  // Click outside modal closes it
+  document.querySelectorAll(".modal-overlay").forEach(m => {
+    m.addEventListener("click", (e) => { if (e.target === m) m.classList.remove("open"); });
+  });
+
+  // Close any open segment menu when clicking elsewhere
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".seg-menu") && !e.target.closest(".seg-menu-btn")) {
+      document.querySelectorAll(".segment.menu-open").forEach(s => s.classList.remove("menu-open"));
+    }
+  });
+
+  bootstrap();
+})();
+</script>
+</body>
+</html>

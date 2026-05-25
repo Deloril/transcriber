@@ -186,6 +186,35 @@ You should see two `audio` streams. If you only see one, OBS isn't routing corre
 
 ---
 
+## Editor & playback review
+
+After a transcription finishes, click **Open in editor →** on the result card (or visit `/edit/<job_id>`). The editor lets you review and correct the transcription with the recording in sync:
+
+- **Word-level highlighting** — every word lights up as the recording plays. The current segment is also marked. Auto-scroll keeps the active word centred (toggle "Follow" off to scroll freely).
+- **Click-to-jump** — click any word or segment timestamp to seek playback there.
+- **Inline editing** — every segment is contenteditable. Edits resync timestamps proportionally across the segment span on blur. Plain `Enter` closes editing without a line break; `Shift+Enter` splits at the cursor.
+- **Segment menu (⋮)** — split, merge with previous/next, insert after, reassign speaker, add annotation, delete.
+- **Speakers bar** — click any chip to rename a speaker (rename propagates to all segments). Add new speakers with `+ Add`. Reassign a segment's speaker by clicking its label, or with `Ctrl+1..9` while focused.
+- **Annotations** — insert observational notes like `[laughs]` or `[unintelligible]` from the segment menu. They render in italic and export as bracketed text.
+- **Search** — `Ctrl/⌘+F`. Enter / Shift+Enter for next / previous.
+- **Undo/redo** — `Ctrl/⌘+Z` and `Shift+Ctrl/⌘+Z`. ~80 levels.
+- **Autosave** — edits are debounced and PUT'd to the server every 1.5s; TXT/SRT/VTT/JSON exports are regenerated on every save. There's also `Ctrl/⌘+S`.
+- **Export** — Export menu offers all four formats. They reflect the latest edits.
+- **Persistence** — jobs survive a server restart. Every job's state is saved under `outputs/<job_id>/job.json`; edits live alongside in `edited.json`.
+
+Keyboard summary (also visible in-app via `?`):
+
+| Key | Action |
+|-----|--------|
+| `Space` | Play / pause |
+| `Ctrl+←` / `Ctrl+→` | Skip 5 seconds |
+| `Esc` | Pause + blur |
+| `Shift+Enter` | Split segment at cursor |
+| `Ctrl+1..9` | Set speaker N for focused segment |
+| `Ctrl/⌘+F` | Search |
+| `Ctrl/⌘+Z` / `Shift+Ctrl/⌘+Z` | Undo / redo |
+| `Ctrl/⌘+S` | Save now |
+
 ## Output formats
 
 After processing, you get several files next to the original recording:
