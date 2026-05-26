@@ -214,6 +214,34 @@ class TestEditorPage:
         for act in ("merge-prev", "merge-next", "insert-after", "reassign", "delete"):
             assert f'data-act="{act}"' in body
 
+    def test_find_and_replace_controls_rendered(self, server_env) -> None:
+        """F11.2 — the editor's search bar exposes a Replace input,
+        Replace / Replace all buttons, and a toggle to expand the
+        replace row. Imports the helpers needed to apply edits."""
+        srv, client, _ = server_env
+        _new_job(srv, status="done")
+        r = client.get("/edit/abc123def456")
+        assert r.status_code == 200
+        body = r.text
+        # Inputs
+        assert 'id="replaceInput"' in body
+        # Buttons
+        assert 'id="replaceOneBtn"' in body
+        assert 'id="replaceAllBtn"' in body
+        assert 'id="replaceToggle"' in body
+        # Pure helpers imported
+        assert "replaceInSegmentWords" in body
+        assert "rebuildSegmentText" in body
+
+    def test_topbar_has_projects_link(self, server_env) -> None:
+        """The legacy editor's topbar links the user to /projects so
+        they can discover the academic coding section."""
+        srv, client, _ = server_env
+        _new_job(srv, status="done")
+        r = client.get("/edit/abc123def456")
+        assert r.status_code == 200
+        assert 'href="/projects"' in r.text
+
 
 # --------------------------------------------------------------------------- #
 # README / docs endpoints

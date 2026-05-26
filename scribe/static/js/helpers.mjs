@@ -460,6 +460,177 @@ export function rangeForMatch(tokens, needle) {
   return matches;
 }
 
+/**
+ * Apply a find-and-replace pass to a single segment's word array.
+ *
+ * The transcript editor's segments hold an ordered list of word
+ * objects (`{text, start, end, speaker, score}`). This helper produces
+ * a *new* word array with `needle` replaced by `replacement` everywhere
+ * it occurs in the segment's text, preserving each surviving word's
+ * timestamps and metadata so the player keeps working.
+ *
+ * Rules:
+ * - Match is case-insensitive (mirrors the search highlighter).
+ * - Single-word match: edit the matched word's text in place; replace
+ *   the matched substring inside the word, keep the rest.
+ * - Multi-word match: collapse the run of matched words into a single
+ *   word holding the replacement text, with start = first word's
+ *   start and end = last word's end. Confidence score is cleared
+ *   (we no longer have a speech-to-text confidence for the synthetic
+ *   token).
+ * - Empty replacement: matched words are dropped entirely. If a
+ *   single-word match leaves the word's text empty, drop the word.
+ * - Empty needle: returns the input unchanged. Avoids an infinite loop.
+ *
+ * Returns `{words, replacements}` where `replacements` is the count
+ * of needle occurrences replaced (so the caller can report
+ * "replaced N occurrences" / decide whether to push undo).
+ *
+ * Pure: never touches the DOM, never mutates inputs.
+ */
+export function replaceInSegmentWords(words, needle, replacement) {
+  if (!needle || !words || !words.length) {
+    return { words: words ? words.slice() : [], replacements: 0 };
+  }
+  const lneedle = needle.toLowerCase();
+  const tokens = words.map(w => (w.text || "").toLowerCase());
+  const joined = tokens.join(" ");
+  // Per-character → word index map. Build once so multi-word matches
+  // are easy: any char position resolves to a single word.
+  const charToWord = new Array(joined.length);
+  let cum = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    for (let k = 0; k < tokens[i].length; k++) {
+      charToWord[cum + k] = i;
+    }
+    if (i < tokens.length - 1) {
+      // The space separator belongs to the *previous* word for the
+      // purpose of "which word does this char fall under." That keeps
+      // a needle like "abc " (with a trailing space) from accidentally
+      // including the next word.
+      charToWord[cum + tokens[i].length] = i;
+    }
+    cum += tokens[i].length + 1; // +1 for the joining space
+  }
+
+  // Walk the joined text, find each match, record its range in word
+  // indices. We don't apply edits during the walk because applying
+  // them in place would shift indices.
+  const ranges = [];
+  let from = 0;
+  while (true) {
+    const pos = joined.indexOf(lneedle, from);
+    if (pos < 0) break;
+    const endPos = pos + lneedle.length - 1;
+    const firstWord = charToWord[pos];
+    const lastWord = charToWord[endPos];
+    if (firstWord != null && lastWord != null && lastWord >= firstWord) {
+      // Save char positions inside the first/last words so we can
+      // surgically rewrite single-word and partial-word matches.
+      let cumFirst = 0;
+      for (let i = 0; i < firstWord; i++) cumFirst += tokens[i].length + 1;
+      let cumLast = 0;
+      for (let i = 0; i < lastWord; i++) cumLast += tokens[i].length + 1;
+      ranges.push({
+        firstWord,
+        lastWord,
+        offsetInFirst: pos - cumFirst,
+        offsetEndInLast: endPos - cumLast + 1,
+      });
+    }
+    // Always advance by needle length to avoid infinite loops on
+    // overlapping matches; this matches the search highlighter.
+    from = pos + Math.max(1, lneedle.length);
+  }
+  if (!ranges.length) return { words: words.slice(), replacements: 0 };
+
+  // Two cases need different handling:
+  //   - All ranges where firstWord === lastWord can be applied as a
+  //     single per-word substring rewrite (regex) so multiple matches
+  //     in the same word all land cleanly.
+  //   - Ranges that span multiple words ("multi-word matches") have
+  //     to splice the array. Multi-word matches that overlap each
+  //     other can't really happen with the simple "advance past
+  //     end" walk we just did, so right-to-left splicing is safe.
+  // Group single-word and multi-word ranges separately.
+  const singleWordIdx = new Set();
+  const multiWord = [];
+  for (const r of ranges) {
+    if (r.firstWord === r.lastWord) singleWordIdx.add(r.firstWord);
+    else multiWord.push(r);
+  }
+
+  let out = words.slice();
+
+  // First pass: per-word regex rewrite for any word that has at
+  // least one single-word match. This handles the "ababab" → "XXX"
+  // case correctly because it's a single regex pass over the word.
+  if (singleWordIdx.size) {
+    // Escape the needle for regex use.
+    const reNeedle = new RegExp(
+      lneedle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+      "gi",
+    );
+    for (const idx of singleWordIdx) {
+      // Skip words that are also covered by a multi-word match — those
+      // get rewritten by the multi-word splice instead. Detect by
+      // checking if any multiWord range includes this index.
+      let covered = false;
+      for (const m of multiWord) {
+        if (idx >= m.firstWord && idx <= m.lastWord) { covered = true; break; }
+      }
+      if (covered) continue;
+      const orig = words[idx];
+      const next = (orig.text || "").replace(reNeedle, replacement);
+      if (next.length === 0) {
+        // Whole word emptied — mark for deletion via a sentinel; we'll
+        // drop sentinels after the multi-word pass to keep indices
+        // stable until then.
+        out[idx] = { ...orig, text: "", _drop: true };
+      } else {
+        out[idx] = { ...orig, text: next };
+      }
+    }
+  }
+
+  // Second pass: multi-word splices, right-to-left.
+  multiWord.sort((a, b) => a.firstWord - b.firstWord);
+  for (let r = multiWord.length - 1; r >= 0; r--) {
+    const range = multiWord[r];
+    const first = words[range.firstWord];
+    const last = words[range.lastWord];
+    const before = (first.text || "").slice(0, range.offsetInFirst);
+    const after = (last.text || "").slice(range.offsetEndInLast);
+    const merged = before + replacement + after;
+    if (merged.length === 0) {
+      out.splice(range.firstWord, range.lastWord - range.firstWord + 1);
+    } else {
+      out.splice(range.firstWord, range.lastWord - range.firstWord + 1, {
+        text: merged,
+        start: first.start,
+        end: last.end,
+        speaker: first.speaker,
+        score: null,
+      });
+    }
+  }
+
+  // Drop sentinel-marked empty words.
+  out = out.filter(w => !w._drop);
+  return { words: out, replacements: ranges.length };
+}
+
+/**
+ * Recompute a segment's `text` field from its word list — the
+ * canonical way the editor keeps `seg.text` and `seg.words` in sync
+ * after a structural edit. Mirrors the editor's existing inline
+ * normalisation but lifted here so find/replace can reuse it.
+ */
+export function rebuildSegmentText(words) {
+  if (!words || !words.length) return "";
+  return words.map(w => w.text || "").join(" ").replace(/\s+/g, " ").trim();
+}
+
 // ---------- gutter / margin layout for code applications (F4.3) ----------
 
 /**

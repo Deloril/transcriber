@@ -330,10 +330,11 @@
       padding: 6px 10px;
       margin-bottom: 14px;
       display: none;
-      gap: 8px;
-      align-items: center;
+      flex-direction: column;
+      gap: 6px;
     }
     .search-bar.open { display: flex; }
+    .search-bar .row { display: flex; gap: 8px; align-items: center; }
     .search-bar input {
       flex: 1;
       background: var(--panel-2);
@@ -344,6 +345,25 @@
       font: inherit;
     }
     .search-bar .count { color: var(--muted); font-size: 12px; min-width: 60px; }
+    /* Replace row hidden until the user expands it; keeps the bar
+       compact for the search-only case which is most common. */
+    .search-bar .replace-row { display: none; }
+    .search-bar.replace-open .replace-row { display: flex; }
+    .search-bar .replace-toggle {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .search-bar .replace-toggle:hover { color: var(--text); border-color: var(--accent); }
+    .search-bar.replace-open .replace-toggle {
+      color: var(--accent); border-color: var(--accent);
+    }
+    .search-bar .replace-msg { color: var(--muted); font-size: 12px; min-width: 100px; }
+    .search-bar .replace-msg.ok { color: var(--ok); }
     .search-hit { background: rgba(253,230,138,.25); border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(253,230,138,.4); }
     .search-hit.current { background: var(--hl); color: #1a1a1a; box-shadow: inset 0 0 0 2px var(--hl); }
 
@@ -378,6 +398,8 @@
 <div class="app">
   <div class="topbar">
     <a href="/">← Back</a>
+    <a href="/library" title="All transcriptions">Library</a>
+    <a href="/projects" title="Research projects (academic coding)">Projects</a>
     <span class="title">Editing <strong>{{ input_filename }}</strong></span>
     <span id="saveStatus" class="save-status">No changes</span>
     <button id="searchBtn" title="Search (⌘F / Ctrl+F)">🔍</button>
@@ -420,9 +442,18 @@
   </div>
 
   <div id="searchBar" class="search-bar">
-    <input id="searchInput" type="text" placeholder="Search transcript… (Enter for next, Shift+Enter for previous)">
-    <span id="searchCount" class="count">0 / 0</span>
-    <button id="searchClose" class="ctrl-btn">✕</button>
+    <div class="row">
+      <input id="searchInput" type="text" placeholder="Search transcript… (Enter for next, Shift+Enter for previous)">
+      <span id="searchCount" class="count">0 / 0</span>
+      <button id="replaceToggle" class="replace-toggle" type="button" title="Toggle replace row">↔ Replace</button>
+      <button id="searchClose" class="ctrl-btn" type="button" aria-label="Close search">✕</button>
+    </div>
+    <div class="row replace-row">
+      <input id="replaceInput" type="text" placeholder="Replace with… (Enter to replace current, Shift+Enter to replace all)">
+      <span id="replaceMsg" class="replace-msg"></span>
+      <button id="replaceOneBtn" class="ctrl-btn" type="button" title="Replace the currently-highlighted match">Replace</button>
+      <button id="replaceAllBtn" class="ctrl-btn" type="button" title="Replace every match in the transcript">Replace all</button>
+    </div>
   </div>
 
   <main>
@@ -510,7 +541,7 @@
       <tr><td><kbd>Esc</kbd></td><td>Pause and blur</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>1</kbd>–<kbd>9</kbd></td><td>Assign speaker N to focused segment</td></tr>
       <tr><td><kbd>Shift</kbd>+<kbd>Enter</kbd></td><td>Split segment at cursor</td></tr>
-      <tr><td><kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Search</td></tr>
+      <tr><td><kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Search · click <strong>↔ Replace</strong> in the search bar to find/replace · <kbd>Enter</kbd> in replace = replace current · <kbd>Shift</kbd>+<kbd>Enter</kbd> in replace = replace all</td></tr>
       <tr><td><kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>Undo</td></tr>
       <tr><td><kbd>⇧</kbd>+<kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>Redo</td></tr>
       <tr><td><kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Save now</td></tr>
@@ -542,7 +573,12 @@
 </div>
 
 <script type="module">
-import { spreadTokensAcrossSpan, escapeHtml } from "/static/js/helpers.mjs";
+import {
+  spreadTokensAcrossSpan,
+  escapeHtml,
+  replaceInSegmentWords,
+  rebuildSegmentText,
+} from "/static/js/helpers.mjs";
 (() => {
   const JOB_ID = {{ job_id | tojson }};
   const $ = (id) => document.getElementById(id);
@@ -1548,6 +1584,153 @@ import { spreadTokensAcrossSpan, escapeHtml } from "/static/js/helpers.mjs";
     searchPos = (searchPos - 1 + searchHits.length) % searchHits.length;
     markCurrentHit();
   }
+
+  // ---- Find / Replace ----
+  // The replace row is collapsed by default. Toggling it doesn't
+  // move focus; the user typically wants to keep editing the search
+  // term first, then tab into the replace input when ready.
+  $("replaceToggle").addEventListener("click", () => {
+    $("searchBar").classList.toggle("replace-open");
+    if ($("searchBar").classList.contains("replace-open")) {
+      // First time opened: nudge focus toward the replace input.
+      setTimeout(() => $("replaceInput").focus(), 0);
+    }
+  });
+
+  function setReplaceMsg(text, ok) {
+    const el = $("replaceMsg");
+    el.textContent = text;
+    el.className = "replace-msg" + (ok ? " ok" : "");
+  }
+
+  /**
+   * Replace the currently-highlighted match. Walks the search-hit
+   * list, finds the .word that matches the current cursor, locates
+   * its segment, applies replaceInSegmentWords for that segment with
+   * needle = current search term and replacement = current replace
+   * input.
+   *
+   * Surgical: only the segment containing the current hit is
+   * touched, so undo restores exactly that segment.
+   */
+  function replaceCurrent() {
+    const needle = $("searchInput").value;
+    const replacement = $("replaceInput").value;
+    if (!needle || !searchHits.length || searchPos < 0) {
+      setReplaceMsg("Nothing to replace", false);
+      return;
+    }
+    const hitEl = searchHits[searchPos];
+    if (!hitEl) return;
+    const segNode = hitEl.closest(".segment");
+    if (!segNode) return;
+    const idx = parseInt(segNode.dataset.idx, 10);
+    const seg = state.segments[idx];
+    if (!seg || !seg.words) return;
+    pushUndo();
+    // Replace only the *first* occurrence within this segment so
+    // "Replace" advances one match at a time. If a segment has more
+    // matches, the user can hit Replace again.
+    const { words: out, replacements } = replaceFirstInSegment(seg.words, needle, replacement);
+    if (!replacements) {
+      setReplaceMsg("No match in current segment", false);
+      undoStack.pop(); // didn't actually change anything
+      return;
+    }
+    seg.words = out;
+    seg.text = rebuildSegmentText(out);
+    markDirty();
+    render();
+    runSearch(needle);   // recompute hits — indices may have shifted
+    setReplaceMsg(`Replaced 1`, true);
+  }
+
+  /**
+   * Replace every match across every segment.
+   */
+  function replaceAll() {
+    const needle = $("searchInput").value;
+    const replacement = $("replaceInput").value;
+    if (!needle) { setReplaceMsg("Enter a search term first", false); return; }
+    if (!state.segments || !state.segments.length) return;
+    pushUndo();
+    let total = 0;
+    for (const seg of state.segments) {
+      if (!seg.words || !seg.words.length) continue;
+      const { words: out, replacements } = replaceInSegmentWords(seg.words, needle, replacement);
+      if (replacements) {
+        seg.words = out;
+        seg.text = rebuildSegmentText(out);
+        total += replacements;
+      }
+    }
+    if (!total) {
+      setReplaceMsg("No matches", false);
+      undoStack.pop();
+      return;
+    }
+    markDirty();
+    render();
+    runSearch(needle);
+    setReplaceMsg(`Replaced ${total}`, true);
+  }
+
+  // Single-occurrence variant of replaceInSegmentWords — applies only
+  // the first hit, not all. Keeps the per-step Replace button honest.
+  function replaceFirstInSegment(words, needle, replacement) {
+    if (!needle) return { words: words.slice(), replacements: 0 };
+    const tokens = words.map(w => (w.text || "").toLowerCase());
+    const joined = tokens.join(" ");
+    const lneedle = needle.toLowerCase();
+    const pos = joined.indexOf(lneedle);
+    if (pos < 0) return { words: words.slice(), replacements: 0 };
+    // Build the same range info, then take just one range.
+    const charToWord = new Array(joined.length);
+    let cum = 0;
+    for (let i = 0; i < tokens.length; i++) {
+      for (let k = 0; k < tokens[i].length; k++) charToWord[cum + k] = i;
+      if (i < tokens.length - 1) charToWord[cum + tokens[i].length] = i;
+      cum += tokens[i].length + 1;
+    }
+    const endPos = pos + lneedle.length - 1;
+    const firstWord = charToWord[pos];
+    const lastWord = charToWord[endPos];
+    let cumFirst = 0, cumLast = 0;
+    for (let i = 0; i < firstWord; i++) cumFirst += tokens[i].length + 1;
+    for (let i = 0; i < lastWord; i++) cumLast += tokens[i].length + 1;
+    const offsetInFirst = pos - cumFirst;
+    const offsetEndInLast = endPos - cumLast + 1;
+    const out = words.slice();
+    if (firstWord === lastWord) {
+      const orig = words[firstWord];
+      const text = orig.text || "";
+      const next = text.slice(0, offsetInFirst) + replacement + text.slice(offsetEndInLast);
+      if (next.length === 0) out.splice(firstWord, 1);
+      else out[firstWord] = { ...orig, text: next };
+    } else {
+      const first = words[firstWord], last = words[lastWord];
+      const before = (first.text || "").slice(0, offsetInFirst);
+      const after = (last.text || "").slice(offsetEndInLast);
+      const merged = before + replacement + after;
+      if (merged.length === 0) out.splice(firstWord, lastWord - firstWord + 1);
+      else out.splice(firstWord, lastWord - firstWord + 1, {
+        text: merged, start: first.start, end: last.end,
+        speaker: first.speaker, score: null,
+      });
+    }
+    return { words: out, replacements: 1 };
+  }
+
+  $("replaceOneBtn").addEventListener("click", replaceCurrent);
+  $("replaceAllBtn").addEventListener("click", replaceAll);
+  $("replaceInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      e.shiftKey ? replaceAll() : replaceCurrent();
+    } else if (e.key === "Escape") {
+      e.preventDefault(); closeSearch();
+    }
+  });
 
   // ---- Top bar ----
   $("undoBtn").addEventListener("click", undo);
