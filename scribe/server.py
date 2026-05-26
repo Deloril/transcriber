@@ -7016,6 +7016,289 @@ async def list_ai_suggestions_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# New-code suggestion lifecycle endpoints (F8.4)
+#
+# F8.3 (existing-codebook) and F8.4 (propose-a-new-code) share the
+# /ai/suggestions POST entrypoint via the ``mode`` field, but the
+# **decision lifecycle** for new-code suggestions is structurally
+# different: accepting one means *creating a Code* using the proposal's
+# name + definition (or the user's edited version of those), then
+# stamping the resulting suggestion record with
+# ``accepted_proposal_index`` + ``created_code_id`` via
+# ``record_new_code_decision``. The F8.3 accept/reject endpoints don't
+# know how to do that, so F8.4 needs its own pair of routes.
+#
+# Endpoints:
+#
+#   GET    /api/projects/<pid>/ai/new-code-suggestions
+#                                   — list (filter by source / decision).
+#   POST   /api/projects/<pid>/ai/new-code-suggestions/<sid>/accept
+#                                   — create a Code from the chosen
+#                                     proposal, stamp the audit record.
+#                                     Body: {accepted_proposal_index,
+#                                     name?, definition?,
+#                                     inclusion_criteria?,
+#                                     exclusion_criteria?, modified?,
+#                                     apply?}.
+#   POST   /api/projects/<pid>/ai/new-code-suggestions/<sid>/reject
+#                                   — record rejection (F9.6 audit row).
+#                                     Body: {reason?}.
+#
+# Acceptance creates an Application with AIProvenance
+# (feature=new_code_suggestion) when the body sets ``apply: true``
+# (default) — that way clicking a proposal in the coding view both
+# adds the new code to the codebook AND marks the highlighted span
+# with it, which is what the user expects.
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/api/projects/{project_id}/ai/new-code-suggestions")
+async def list_ai_new_code_suggestions_endpoint(
+    project_id: str, source_id: str = "", decision: str = "",
+) -> JSONResponse:
+    """List persisted F8.4 new-code suggestions for the project."""
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            suggestions = _new_code_suggestions.list_new_code_suggestions(
+                _projects_root(), project_id,
+                source_id=source_id or None,
+                decision=decision or None,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({
+        "suggestions": [s.to_dict() for s in suggestions],
+    })
+
+
+@app.post(
+    "/api/projects/{project_id}/ai/new-code-suggestions/{suggestion_id}/accept"
+)
+async def accept_ai_new_code_suggestion_endpoint(
+    project_id: str, suggestion_id: str, request: Request,
+) -> JSONResponse:
+    """Turn an F8.4 new-code proposal into a real :class:`Code`.
+
+    Body (all keys optional except ``accepted_proposal_index``)::
+
+        {
+          "accepted_proposal_index": 0,    # which proposal the human picked
+          "name": "...",                  # override the proposal's name
+          "definition": "...",            # override the proposal's definition
+          "inclusion_criteria": "...",
+          "exclusion_criteria": "...",
+          "modified": false,              # auto-set if name/def differ
+          "apply": true                   # also create an Application
+        }
+
+    Returns ``{suggestion, code, application?}``. ``application`` is
+    only present when ``apply`` is ``true``.
+    """
+    _check_project_id(project_id)
+    if not _new_code_suggestions.NEW_CODE_SUGGESTION_ID_RE.match(suggestion_id):
+        raise HTTPException(400, "Invalid new-code suggestion id")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body and not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    body = body or {}
+
+    raw_idx = body.get("accepted_proposal_index")
+    if raw_idx is None:
+        raise HTTPException(
+            400, "accepted_proposal_index is required"
+        )
+    try:
+        accepted_idx = int(raw_idx)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            400, "accepted_proposal_index must be an integer"
+        )
+
+    apply_flag = body.get("apply", True)
+    if not isinstance(apply_flag, bool):
+        apply_flag = bool(apply_flag)
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            suggestion = _new_code_suggestions.load_new_code_suggestion(
+                _projects_root(), project_id, suggestion_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Suggestion not found")
+        if suggestion.decision != _new_code_suggestions.NEW_CODE_DECISION_PENDING:
+            raise HTTPException(
+                409, f"Suggestion already {suggestion.decision}"
+            )
+        if accepted_idx < 0 or accepted_idx >= len(suggestion.proposals):
+            raise HTTPException(
+                400,
+                "accepted_proposal_index "
+                f"{accepted_idx} out of range for "
+                f"{len(suggestion.proposals)} proposals",
+            )
+        proposal = suggestion.proposals[accepted_idx]
+
+        # F2.4 — refuse new codes when the codebook is locked. The user
+        # has to unlock with a methodological memo first; the suggestion
+        # stays pending so they can revisit it after unlocking.
+        try:
+            _codebook_lock.assert_codebook_unlocked(
+                _projects_root(), project_id
+            )
+        except _codebook_lock.LockedCodebookError as e:
+            raise HTTPException(409, str(e))
+
+        # Allow the body to override name / definition / criteria. If
+        # the user edited the proposal in the UI before submitting, this
+        # is how the modification reaches the new Code. We also use the
+        # diff to auto-derive ``modified`` so the audit trail records
+        # whether the human deviated from the AI's wording.
+        name_in = body.get("name")
+        def_in = body.get("definition")
+        inc_in = body.get("inclusion_criteria")
+        exc_in = body.get("exclusion_criteria")
+        name = str(name_in) if name_in is not None else proposal.name
+        definition = (
+            str(def_in) if def_in is not None else proposal.definition
+        )
+        inclusion = str(inc_in) if inc_in is not None else ""
+        exclusion = str(exc_in) if exc_in is not None else ""
+
+        deviated = (
+            name.strip() != (proposal.name or "").strip()
+            or definition.strip() != (proposal.definition or "").strip()
+            or bool(inclusion.strip())
+            or bool(exclusion.strip())
+        )
+        modified_flag = bool(body.get("modified")) or deviated
+        decision = (
+            _new_code_suggestions.NEW_CODE_DECISION_MODIFIED if modified_flag
+            else _new_code_suggestions.NEW_CODE_DECISION_ACCEPTED
+        )
+
+        try:
+            code = _codes.Code.new(
+                project_id=project_id,
+                name=name,
+                definition=definition,
+                inclusion_criteria=inclusion,
+                exclusion_criteria=exclusion,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid code payload: {e}")
+        _codes.save_code(_projects_root(), code)
+        version = _code_versions.record_code_version(
+            _projects_root(), code,
+            change_note=f"initial-from-new-code-suggestion:{suggestion.id}",
+        )
+
+        # Stamp the F8.4 suggestion's audit record with the decision +
+        # which proposal was picked + which Code resulted.
+        coder_id = _ensure_default_coder(project_id)
+        try:
+            _new_code_suggestions.record_new_code_decision(
+                suggestion,
+                decision=decision,
+                coder_id=coder_id,
+                accepted_proposal_index=accepted_idx,
+                created_code_id=code.id,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _new_code_suggestions.save_new_code_suggestion(
+            _projects_root(), suggestion,
+        )
+
+        application_dict: dict[str, Any] | None = None
+        if apply_flag:
+            ai_prov = _applications.AIProvenance.new(
+                feature=_ai_provenance.AI_FEATURE_NEW_CODE_SUGGESTION,
+                generation_model=suggestion.generation_model,
+                embedding_model=suggestion.embedding_model,
+                suggestion_id=suggestion.id,
+                decision=decision,
+                decided_by_coder_id=coder_id,
+            )
+            try:
+                app_obj = _applications.Application.new(
+                    project_id=project_id,
+                    code_id=code.id,
+                    source_id=suggestion.source_id,
+                    coder_id=coder_id,
+                    anchor_start_word_id=suggestion.anchor_start_word_id,
+                    anchor_end_word_id=suggestion.anchor_end_word_id,
+                    definition_version_id_at_apply=version.id,
+                    ai_provenance=ai_prov,
+                )
+            except _projects.ProjectValidationError as e:
+                raise HTTPException(400, str(e))
+            _applications.save_application(_projects_root(), app_obj)
+            application_dict = app_obj.to_dict()
+
+    out: dict[str, Any] = {
+        "suggestion": suggestion.to_dict(),
+        "code": code.to_dict(),
+    }
+    if application_dict is not None:
+        out["application"] = application_dict
+    return JSONResponse(out)
+
+
+@app.post(
+    "/api/projects/{project_id}/ai/new-code-suggestions/{suggestion_id}/reject"
+)
+async def reject_ai_new_code_suggestion_endpoint(
+    project_id: str, suggestion_id: str, request: Request,
+) -> JSONResponse:
+    """Record a rejection on an F8.4 suggestion (F9.6 audit row)."""
+    _check_project_id(project_id)
+    if not _new_code_suggestions.NEW_CODE_SUGGESTION_ID_RE.match(suggestion_id):
+        raise HTTPException(400, "Invalid new-code suggestion id")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = (body or {}).get("reason", "") if isinstance(body, dict) else ""
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            suggestion = _new_code_suggestions.load_new_code_suggestion(
+                _projects_root(), project_id, suggestion_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Suggestion not found")
+        if suggestion.decision != _new_code_suggestions.NEW_CODE_DECISION_PENDING:
+            raise HTTPException(
+                409, f"Suggestion already {suggestion.decision}"
+            )
+        try:
+            _new_code_suggestions.record_new_code_decision(
+                suggestion,
+                decision=_new_code_suggestions.NEW_CODE_DECISION_REJECTED,
+                coder_id=_ensure_default_coder(project_id),
+                rejection_reason=str(reason or "")[
+                    : _new_code_suggestions.MAX_REJECTION_REASON_LEN
+                ],
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _new_code_suggestions.save_new_code_suggestion(
+            _projects_root(), suggestion,
+        )
+
+    return JSONResponse({"suggestion": suggestion.to_dict()})
+
+
+# --------------------------------------------------------------------------- #
 # Embedding index management (F8.2)
 #
 # F8.2 ships the storage + refresh layer underneath the F8.3 / F8.5 /

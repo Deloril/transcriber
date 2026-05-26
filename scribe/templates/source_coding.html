@@ -267,6 +267,18 @@
     color: var(--muted); font-size: 11px; cursor: pointer;
   }
   .apply-popover .ai-panel .ai-actions button:hover { color: var(--text); }
+  /* F8.4 — gerund pill + near-duplicate warning on new-code proposals. */
+  .apply-popover .ai-panel .ai-pill {
+    display: inline-block; padding: 0 6px;
+    border-radius: 999px;
+    background: var(--accent-soft); color: var(--text-strong);
+    font-size: 10px; line-height: 16px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .apply-popover .ai-panel .ai-dup-warn {
+    color: var(--warn, var(--err)); font-size: 10px;
+    margin-top: 2px;
+  }
 
   /* Side panel — applications already on this source. */
   .side-card { padding: 14px 16px; }
@@ -732,13 +744,20 @@
   <!-- Inline AI panel — hidden until "Suggest with AI" is clicked.
        The F8.3 / F8.4 surface lives here: the row template literal in
        renderPopList() emits a "✨ Suggest existing code with AI" row
-       (mode=existing → F8.3) or a "✨ Propose a new code with AI" row
-       (mode=new → F8.4) that, when clicked, POSTs to
+       (mode=existing → F8.3) plus a separate "✨ Propose a new code
+       with AI" row (mode=new → F8.4). Either POSTs to
        /api/projects/<pid>/ai/suggestions and renders the candidates
-       inside this panel. The data-test-feature="F8.3" marker anchors
-       the integration test that proves the surface is reachable. -->
+       inside this panel. Picking a new-code proposal calls the F8.4
+       accept route (/ai/new-code-suggestions/<sid>/accept) which
+       creates the Code and (by default) applies it to the highlighted
+       span, stamping AIProvenance(feature=new_code_suggestion). The
+       data-test-feature marker anchors the F8.3 reachability test;
+       data-test-feature-also lists every other feature this same
+       surface serves so the F8.4 reachability test can scope-pick it
+       without breaking the F8.3 substring assertion. -->
   <div id="aiPanel" class="ai-panel"
        data-test-feature="F8.3"
+       data-test-feature-also="F8.4"
        data-test-id="ai-panel"
        style="display:none"></div>
 </div>
@@ -1824,23 +1843,23 @@ function renderPopList(filter) {
       html = `<div class="pop-empty">No codes match "${escapeHtml(filter)}".</div>`;
     }
   }
-  // "✨ Suggest with AI" — last row so picking an existing code stays
-  // the easy default. The button changes mode based on whether the
-  // codebook is empty: with codes we suggest from the existing list
-  // (F8.3); without codes we ask the model to propose new ones (F8.4).
-  // The data-test-feature toggles between the two so the F8.3
-  // integration test can scope-pick the existing-code row even when
-  // an empty codebook would render the new-code variant.
-  const aiMode = CODES.length ? "existing" : "new";
-  const aiLabel = aiMode === "existing"
-    ? "✨ Suggest existing code with AI"
-    : "✨ Propose a new code with AI";
-  const aiFeatureId = aiMode === "existing" ? "F8.3" : "F8.4";
-  const aiTestId = aiMode === "existing" ? "ai-suggest-existing" : "ai-suggest-new";
+  // "✨ Suggest with AI" — F8.3 + F8.4 are deliberately separate
+  // commands so the user never accidentally invents a duplicate of an
+  // existing code with one click. The existing-code variant is hidden
+  // when the codebook is empty (nothing to suggest from); the new-code
+  // variant is always offered. Order: existing first when there are
+  // codes (the easy default), new always last. The data-test-feature
+  // marker anchors the per-feature integration tests.
+  if (CODES.length) {
+    html += `<div class="pop-row ai-row"
+                  data-ai-mode="existing"
+                  data-test-feature="F8.3"
+                  data-test-id="ai-suggest-existing">✨ Suggest existing code with AI</div>`;
+  }
   html += `<div class="pop-row ai-row"
-                data-ai-mode="${aiMode}"
-                data-test-feature="${aiFeatureId}"
-                data-test-id="${aiTestId}">${aiLabel}</div>`;
+                data-ai-mode="new"
+                data-test-feature="F8.4"
+                data-test-id="ai-suggest-new">✨ Propose a new code with AI</div>`;
   list.innerHTML = html;
 }
 
@@ -1895,6 +1914,9 @@ document.getElementById("popList").addEventListener("click", async (e) => {
 // provenance) or reject (audit row only). We never auto-apply.
 
 let CURRENT_AI_SUGGESTION = null;
+// "existing" → F8.3 (CodeSuggestion), "new" → F8.4 (NewCodeSuggestion).
+// Drives which accept/reject route the panel calls when the user clicks.
+let CURRENT_AI_SUGGESTION_KIND = "existing";
 
 function aiPanelEl() { return document.getElementById("aiPanel"); }
 function showAiStatus(html) {
@@ -1907,6 +1929,7 @@ function hideAiPanel() {
   p.style.display = "none";
   p.innerHTML = "";
   CURRENT_AI_SUGGESTION = null;
+  CURRENT_AI_SUGGESTION_KIND = "existing";
 }
 
 async function suggestWithAi(mode) {
@@ -1938,6 +1961,7 @@ async function suggestWithAi(mode) {
     }
     const body = await r.json();
     CURRENT_AI_SUGGESTION = body.suggestion;
+    CURRENT_AI_SUGGESTION_KIND = body.kind === "new" ? "new" : "existing";
     if (body.kind === "new") {
       renderAiNewCodeProposals(body.suggestion);
     } else {
@@ -1974,29 +1998,46 @@ function renderAiCandidates(suggestion) {
 }
 
 function renderAiNewCodeProposals(suggestion) {
-  // F8.4 returns proposals: [{name, definition, rationale}, ...].
+  // F8.4 returns proposals: [{name, definition, rationale, is_gerund,
+  // nearest_existing_code_id, nearest_existing_similarity}, ...].
+  // Each proposal becomes a row that, when clicked, calls the dedicated
+  // /ai/new-code-suggestions/<sid>/accept route. That route creates the
+  // Code (via the proposal's name + definition), applies it to the
+  // highlighted span, and stamps AIProvenance(feature=new_code_suggestion)
+  // on the resulting Application — the proper F8.4 decision lifecycle
+  // rather than the older "create + reject" hack.
   const props = (suggestion && suggestion.proposals) || [];
   if (!props.length) {
     showAiStatus("The model didn't propose any new codes for this span.");
     appendRejectButton(suggestion);
     return;
   }
-  // Each proposal becomes a "create new code with this name" row.
-  // Picking one creates the code, applies it, and stamps AI provenance
-  // on the resulting Application. The cleanest way to express that
-  // through the existing surface is: create-on-the-fly using the
-  // proposal's name, then accept the AI suggestion (which the
-  // create-on-the-fly path doesn't currently know how to do — so for
-  // now we just create the code, apply it, and reject the suggestion
-  // so the audit trail records that the user took the proposal).
   const rows = props.map((p, i) => {
     const label = `<span class="row-label">${escapeHtml(p.name || "(unnamed)")}</span>`;
     const def = p.definition
       ? `<div class="rationale">${escapeHtml(p.definition)}</div>` : "";
-    return `<div class="ai-cand" data-prop-idx="${i}" data-prop-name="${escapeHtml(p.name || "")}">
+    // Gerund-form nudge per F8.4 / Charmaz: small badge when the model
+    // returned a gerund-form name. Suppressed otherwise — the code is
+    // still legal, we just don't congratulate the model for it.
+    const gerundBadge = p.is_gerund
+      ? `<span class="ai-pill" title="Gerund-form name (Charmaz-aligned)">gerund</span>` : "";
+    // Near-duplicate warning. The engine fills nearest_existing_code_id
+    // + nearest_existing_similarity for proposals close to existing
+    // codes; ≥0.85 is the spec's "are you sure you want a duplicate?"
+    // threshold.
+    const dupSim = (p.nearest_existing_similarity == null)
+      ? null : Number(p.nearest_existing_similarity);
+    const dupWarn = (dupSim != null && dupSim >= 0.85)
+      ? `<div class="ai-dup-warn" data-test-id="ai-new-code-dup-warn">⚠ Looks ${(dupSim*100).toFixed(0)}% similar to an existing code — confirm before adding.</div>`
+      : "";
+    return `<div class="ai-cand"
+                 data-prop-idx="${i}"
+                 data-prop-name="${escapeHtml(p.name || "")}"
+                 data-test-id="ai-new-code-proposal">
       <div style="flex:1;min-width:0">
-        ${label}
+        <div style="display:flex;align-items:center;gap:8px">${label}${gerundBadge}</div>
         ${def}
+        ${dupWarn}
       </div>
     </div>`;
   }).join("");
@@ -2012,15 +2053,15 @@ function appendRejectButton(suggestion) {
 
 aiPanelEl().addEventListener("click", async (e) => {
   // Three click targets: an existing-code candidate (data-code-id),
-  // a new-code proposal (data-prop-name), or the "Reject" button.
+  // a new-code proposal (data-prop-idx), or the "Reject" button.
   const cand = e.target.closest(".ai-cand");
   const action = e.target.closest("[data-ai-action]");
   if (cand && cand.dataset.codeId && CURRENT_AI_SUGGESTION) {
     await acceptAiSuggestion(cand.dataset.codeId);
     return;
   }
-  if (cand && cand.dataset.propName && CURRENT_AI_SUGGESTION) {
-    await acceptAiNewCodeProposal(cand.dataset.propName);
+  if (cand && cand.dataset.propIdx != null && CURRENT_AI_SUGGESTION) {
+    await acceptAiNewCodeProposal(parseInt(cand.dataset.propIdx, 10));
     return;
   }
   if (action && action.dataset.aiAction === "reject" && CURRENT_AI_SUGGESTION) {
@@ -2062,27 +2103,41 @@ async function acceptAiSuggestion(codeId) {
   }
 }
 
-async function acceptAiNewCodeProposal(name) {
-  // F8.4: turn a proposal into a real code, then apply it. We also
-  // mark the suggestion as rejected — for now — because the new-code
-  // suggestion record doesn't carry an "accepted_code_id"-equivalent
-  // path through the server; the acceptance is captured by the new
-  // code existing in the codebook with a stamp pointing back to the
-  // suggestion (recorded server-side when the new-code engine
-  // promoted the proposal).
+async function acceptAiNewCodeProposal(proposalIdx) {
+  // F8.4 dedicated accept route: creates the Code, applies it, stamps
+  // AIProvenance(feature=new_code_suggestion), and records the
+  // suggestion's decision lifecycle (pending → accepted / modified)
+  // with accepted_proposal_index + created_code_id. The resulting
+  // Application carries provenance pointing back to the suggestion id.
   if (!CURRENT_AI_SUGGESTION) return;
   try {
-    await createCodeAndApply(name);
-    // Best effort: the rejection records that this proposal was the
-    // one taken by the user, which keeps the audit trail honest.
-    fetch(
-      `/api/projects/${PROJECT_ID}/ai/suggestions/${CURRENT_AI_SUGGESTION.id}/reject`,
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/ai/new-code-suggestions/${CURRENT_AI_SUGGESTION.id}/accept`,
       {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({reason: `accepted via codebook: ${name}`}),
+        body: JSON.stringify({
+          accepted_proposal_index: proposalIdx,
+          apply: true,
+        }),
       },
-    ).catch(() => {});
+    );
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const body = await r.json();
+    // The new Code joins CODES so the popover's existing-code list
+    // has it the next time the user opens the popover.
+    if (body.code) CODES.push(body.code);
+    if (body.application) {
+      APPS.push(body.application);
+      paintApplications();
+      renderApps();
+      refreshSpans();
+      renderGutter();
+    }
+    window.getSelection().removeAllRanges();
     hideAiPanel();
     hidePopover();
   } catch (e) {
@@ -2092,9 +2147,15 @@ async function acceptAiNewCodeProposal(name) {
 
 async function rejectAiSuggestion() {
   if (!CURRENT_AI_SUGGESTION) return;
+  // F8.3 and F8.4 have separate reject routes because they persist into
+  // different on-disk subdirectories. CURRENT_AI_SUGGESTION_KIND was
+  // captured when the suggestion came back from the server.
+  const route = CURRENT_AI_SUGGESTION_KIND === "new"
+    ? `/api/projects/${PROJECT_ID}/ai/new-code-suggestions/${CURRENT_AI_SUGGESTION.id}/reject`
+    : `/api/projects/${PROJECT_ID}/ai/suggestions/${CURRENT_AI_SUGGESTION.id}/reject`;
   try {
     await fetch(
-      `/api/projects/${PROJECT_ID}/ai/suggestions/${CURRENT_AI_SUGGESTION.id}/reject`,
+      route,
       {
         method: "POST",
         headers: {"Content-Type": "application/json"},

@@ -230,7 +230,7 @@
   </div>
 </div>
 
-<div class="card ai-card">
+<div class="card ai-card" data-test-feature="F8.4" data-test-id="ai-surfaces-card">
   <h2>Suggestion surfaces</h2>
   <p class="ai-help">
     These F-features are wired in their natural location. The dashboard view that
@@ -239,9 +239,18 @@
   </p>
   <ul style="margin-top:10px;line-height:1.8">
     <li>
-      <strong>Code suggestions on a span</strong>
-      (<code>F8.3</code> / <code>F8.4</code>) — open a transcript and use the
-      "✨ Suggest with AI" row in the apply-popover on a highlight.
+      <strong>Suggest existing code on a span</strong>
+      (<code>F8.3</code>) — open a transcript and use the
+      "✨ Suggest existing code with AI" row in the apply-popover on a highlight.
+    </li>
+    <li data-test-feature="F8.4" data-test-id="ai-surface-f8-4">
+      <strong>Propose a new code on a span</strong>
+      (<code>F8.4</code>) — separate command in the apply-popover:
+      "✨ Propose a new code with AI". Picking a proposal creates the
+      :class:`Code`, applies it to the span, and stamps AI provenance
+      (<code>feature=new_code_suggestion</code>). Pending and rejected
+      proposals are kept as audit rows under
+      <code>/ai/new-code-suggestions</code> per F9.6.
     </li>
     <li>
       <strong>Find similar quotes</strong> (<code>F8.5</code>) — per-application

@@ -488,6 +488,9 @@ class TestF8_3Reachability:
         # The panel still uses id="aiPanel" so the existing JS handler
         # finds it. Removing the id would silently break the popover.
         assert 'id="aiPanel"' in body
+        # The F8.4 secondary marker rides on the same panel — see the
+        # F8.4 reachability class for why this matters.
+        assert 'data-test-feature-also="F8.4"' in body
 
     def test_popover_emits_f8_3_existing_row(self, env) -> None:
         client, _ = env
@@ -495,17 +498,18 @@ class TestF8_3Reachability:
         r = client.get(f"/projects/{pid}/sources/{sid}")
         assert r.status_code == 200, r.text
         body = r.text
-        # The renderPopList() template literal switches between F8.3
-        # (mode=existing) and F8.4 (mode=new). The F8.3 anchor checks
-        # both halves of the conditional are present in the served
-        # template so the existing-code row gets the F8.3 marker
-        # whenever CODES.length > 0.
-        assert 'aiFeatureId = aiMode === "existing" ? "F8.3"' in body
-        assert 'data-test-id="${aiTestId}"' in body
+        # The renderPopList() template literal emits **both** rows now:
+        # an F8.3 "Suggest existing code with AI" row (only when CODES
+        # is non-empty), and an F8.4 "Propose a new code with AI" row
+        # (always). The F8.3 anchor verifies its half of the conditional
+        # is present with the expected feature/test markers.
+        assert 'data-test-feature="F8.3"' in body
+        assert 'data-test-id="ai-suggest-existing"' in body
+        assert 'Suggest existing code with AI' in body
         # Shared infrastructure: the row class + ai-mode data attr the
         # click handler reads.
         assert 'class="pop-row ai-row"' in body
-        assert 'data-ai-mode="${aiMode}"' in body
+        assert 'data-ai-mode="existing"' in body
         # Endpoint URL the JS POSTs to when the row is clicked.
         assert "/ai/suggestions" in body
 
@@ -561,4 +565,327 @@ class TestF8_3Reachability:
         assert r.status_code == 200, r.text
         body = r.text
         assert "F8.3" in body, "AI page must advertise F8.3 as a surface"
-        assert "Suggest with AI" in body
+        # The phrase that names the feature on the source-coding view —
+        # used for discovery copy on the AI page so the user knows what
+        # to look for.
+        assert "Suggest existing code with AI" in body
+
+
+# --------------------------------------------------------------------------- #
+# F8.4 reachability anchor
+#
+# F8.4 ("Suggest a new code" — separate command, gerund-form nudge,
+# decision lifecycle) shipped its pure module in cb6508f without any
+# user-facing wiring. The original surfacing bundled F8.4 and F8.3 into
+# a single "Suggest with AI" row that toggled mode based on whether the
+# codebook was empty, and accepted new-code proposals via a hack
+# (create-on-the-fly + reject-the-suggestion). This iteration:
+#
+#   1. Gives F8.4 a separate apply-popover row that is always offered
+#      ("✨ Propose a new code with AI"), so users can ask for new
+#      proposals even when the codebook has codes.
+#   2. Adds dedicated /ai/new-code-suggestions/<sid>/accept and
+#      /reject routes that drive the proper F8.4 decision lifecycle
+#      (pending → accepted/modified/rejected) and stamp the resulting
+#      Application with AIProvenance(feature=new_code_suggestion).
+#   3. Adds a list endpoint so the AI dashboard can paginate proposals.
+#
+# These assertions prove that a researcher with no prior context can
+# reach F8.4 through the user-facing surface: open a transcript, drop
+# the marker tags into the popover, click "✨ Propose a new code with
+# AI", pick a proposal, and the route round-trips a created code +
+# applied span + audit row.
+# --------------------------------------------------------------------------- #
+
+
+class TestF8_4Reachability:
+    def test_popover_always_emits_f8_4_new_code_row(self, env) -> None:
+        """Whether the codebook has codes or not, the popover must
+        offer the F8.4 "Propose a new code with AI" command. F8.4 is a
+        separate command from F8.3 per PLANNING.md ("requires explicit
+        invocation"); a researcher with a non-empty codebook must still
+        be able to reach it."""
+        client, _ = env
+        pid, _, sid = _seed(client)
+        r = client.get(f"/projects/{pid}/sources/{sid}")
+        assert r.status_code == 200, r.text
+        body = r.text
+        # F8.4-marked row.
+        assert 'data-test-feature="F8.4"' in body
+        assert 'data-test-id="ai-suggest-new"' in body
+        # The label researchers see in the popover.
+        assert 'Propose a new code with AI' in body
+        # Shared infrastructure: row class + ai-mode the click handler reads.
+        assert 'data-ai-mode="new"' in body
+
+    def test_new_mode_route_round_trips(self, env) -> None:
+        """End-to-end: click "Propose a new code with AI" calls
+        POST /ai/suggestions with mode=new, the engine persists a
+        NewCodeSuggestion, and a subsequent GET surfaces it in the
+        F8.4 listing endpoint."""
+        client, _ = env
+        pid, cid, sid = _seed(client)
+        _force_gate_on(client, pid)
+        backend = FakeBackend(generation_text='[]')
+        _install_fake_backend(backend)
+
+        post = client.post(
+            f"/api/projects/{pid}/ai/suggestions",
+            json={
+                "source_id": sid,
+                "anchor_start_word_id": "s0w0",
+                "anchor_end_word_id": "s0w5",
+                "query_text": "the participant describes new behaviour",
+                "mode": "new",
+            },
+        )
+        assert post.status_code == 200, post.text
+        body = post.json()
+        assert body["kind"] == "new"
+        suggestion_id = body["suggestion"]["id"]
+
+        listing = client.get(
+            f"/api/projects/{pid}/ai/new-code-suggestions"
+            f"?decision=pending"
+        )
+        assert listing.status_code == 200, listing.text
+        ids = [s["id"] for s in listing.json()["suggestions"]]
+        assert suggestion_id in ids, (
+            "F8.4 suggestion was not retrievable through the listing "
+            "endpoint that the inline AI panel reads from."
+        )
+
+    def test_accept_creates_code_and_application_with_ai_provenance(
+        self, env
+    ) -> None:
+        """Picking a proposal creates a real Code, applies it, and
+        stamps AI provenance (feature=new_code_suggestion). The
+        suggestion's decision moves to accepted with
+        accepted_proposal_index + created_code_id."""
+        client, _ = env
+        pid, cid, sid = _seed(client)
+        _force_gate_on(client, pid)
+        # Generate a single proposal so we know what we're accepting.
+        backend = FakeBackend(generation_text=(
+            '[{"name":"NavigatingChange",'
+            '"definition":"How participants describe shifting roles",'
+            '"rationale":"recurs in the span"}]'
+        ))
+        _install_fake_backend(backend)
+
+        post = client.post(
+            f"/api/projects/{pid}/ai/suggestions",
+            json={
+                "source_id": sid,
+                "anchor_start_word_id": "s0w0",
+                "anchor_end_word_id": "s0w5",
+                "query_text": "the participant describes shifting roles",
+                "mode": "new",
+            },
+        )
+        assert post.status_code == 200, post.text
+        sug = post.json()["suggestion"]
+        assert len(sug["proposals"]) == 1
+
+        accept = client.post(
+            f"/api/projects/{pid}/ai/new-code-suggestions/{sug['id']}/accept",
+            json={"accepted_proposal_index": 0, "apply": True},
+        )
+        assert accept.status_code == 200, accept.text
+        body = accept.json()
+        # Suggestion moved to a terminal state with the audit fields.
+        assert body["suggestion"]["decision"] in ("accepted", "modified")
+        assert body["suggestion"]["accepted_proposal_index"] == 0
+        assert body["suggestion"]["created_code_id"] == body["code"]["id"]
+        # Code was created with the proposal's wording.
+        assert body["code"]["name"] == "NavigatingChange"
+        assert "shifting roles" in body["code"]["definition"]
+        # Application was created and stamped with AI provenance.
+        ap = body["application"]
+        assert ap["code_id"] == body["code"]["id"]
+        assert ap["source_id"] == sid
+        assert ap["ai_provenance"]["feature"] == "new_code_suggestion"
+        assert ap["ai_provenance"]["suggestion_id"] == sug["id"]
+        assert ap["ai_provenance"]["embedding_model"] == "bge-m3"
+        assert ap["ai_provenance"]["generation_model"] == "llama3.2:3b"
+
+    def test_accept_with_modified_name_marks_decision_modified(
+        self, env,
+    ) -> None:
+        """When the user edits the proposal's name before saving, the
+        F8.4 audit lifecycle records 'modified' rather than 'accepted'.
+        This is the audit trail's "AI proposed X, human saved Y" path."""
+        client, _ = env
+        pid, cid, sid = _seed(client)
+        _force_gate_on(client, pid)
+        backend = FakeBackend(generation_text=(
+            '[{"name":"NavigatingChange","definition":"d","rationale":"r"}]'
+        ))
+        _install_fake_backend(backend)
+
+        post = client.post(
+            f"/api/projects/{pid}/ai/suggestions",
+            json={"source_id": sid, "anchor_start_word_id": "s0w0",
+                  "anchor_end_word_id": "s0w5", "query_text": "x",
+                  "mode": "new"},
+        )
+        sug_id = post.json()["suggestion"]["id"]
+
+        accept = client.post(
+            f"/api/projects/{pid}/ai/new-code-suggestions/{sug_id}/accept",
+            json={
+                "accepted_proposal_index": 0,
+                "name": "RidingTheWave",
+                "apply": False,  # dont need an Application for the audit assertion
+            },
+        )
+        assert accept.status_code == 200, accept.text
+        body = accept.json()
+        assert body["suggestion"]["decision"] == "modified"
+        assert body["code"]["name"] == "RidingTheWave"
+        # apply=False → no Application returned
+        assert "application" not in body
+
+    def test_accept_404_on_missing_suggestion(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/ai/new-code-suggestions/aaaaaaaaaaaa/accept",
+            json={"accepted_proposal_index": 0},
+        )
+        assert r.status_code == 404
+
+    def test_accept_invalid_suggestion_id_returns_400(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/ai/new-code-suggestions/not-hex/accept",
+            json={"accepted_proposal_index": 0},
+        )
+        assert r.status_code == 400
+
+    def test_accept_requires_accepted_proposal_index(self, env) -> None:
+        client, _ = env
+        pid, _, sid = _seed(client)
+        _force_gate_on(client, pid)
+        backend = FakeBackend(generation_text='[{"name":"X","definition":"d"}]')
+        _install_fake_backend(backend)
+        post = client.post(
+            f"/api/projects/{pid}/ai/suggestions",
+            json={"source_id": sid, "anchor_start_word_id": "s0w0",
+                  "anchor_end_word_id": "s0w5", "query_text": "x",
+                  "mode": "new"},
+        )
+        sug_id = post.json()["suggestion"]["id"]
+        r = client.post(
+            f"/api/projects/{pid}/ai/new-code-suggestions/{sug_id}/accept",
+            json={},
+        )
+        assert r.status_code == 400
+
+    def test_accept_out_of_range_index_returns_400(self, env) -> None:
+        client, _ = env
+        pid, _, sid = _seed(client)
+        _force_gate_on(client, pid)
+        backend = FakeBackend(generation_text='[{"name":"X","definition":"d"}]')
+        _install_fake_backend(backend)
+        post = client.post(
+            f"/api/projects/{pid}/ai/suggestions",
+            json={"source_id": sid, "anchor_start_word_id": "s0w0",
+                  "anchor_end_word_id": "s0w5", "query_text": "x",
+                  "mode": "new"},
+        )
+        sug_id = post.json()["suggestion"]["id"]
+        r = client.post(
+            f"/api/projects/{pid}/ai/new-code-suggestions/{sug_id}/accept",
+            json={"accepted_proposal_index": 99},
+        )
+        assert r.status_code == 400
+
+    def test_double_accept_returns_409(self, env) -> None:
+        client, _ = env
+        pid, _, sid = _seed(client)
+        _force_gate_on(client, pid)
+        backend = FakeBackend(generation_text='[{"name":"X","definition":"d"}]')
+        _install_fake_backend(backend)
+        post = client.post(
+            f"/api/projects/{pid}/ai/suggestions",
+            json={"source_id": sid, "anchor_start_word_id": "s0w0",
+                  "anchor_end_word_id": "s0w5", "query_text": "x",
+                  "mode": "new"},
+        )
+        sug_id = post.json()["suggestion"]["id"]
+        r1 = client.post(
+            f"/api/projects/{pid}/ai/new-code-suggestions/{sug_id}/accept",
+            json={"accepted_proposal_index": 0, "apply": False},
+        )
+        assert r1.status_code == 200, r1.text
+        r2 = client.post(
+            f"/api/projects/{pid}/ai/new-code-suggestions/{sug_id}/accept",
+            json={"accepted_proposal_index": 0, "apply": False},
+        )
+        assert r2.status_code == 409
+
+    def test_reject_records_decision_and_reason(self, env) -> None:
+        client, _ = env
+        pid, _, sid = _seed(client)
+        _force_gate_on(client, pid)
+        backend = FakeBackend(generation_text='[{"name":"X","definition":"d"}]')
+        _install_fake_backend(backend)
+        post = client.post(
+            f"/api/projects/{pid}/ai/suggestions",
+            json={"source_id": sid, "anchor_start_word_id": "s0w0",
+                  "anchor_end_word_id": "s0w5", "query_text": "x",
+                  "mode": "new"},
+        )
+        sug_id = post.json()["suggestion"]["id"]
+        r = client.post(
+            f"/api/projects/{pid}/ai/new-code-suggestions/{sug_id}/reject",
+            json={"reason": "duplicate of NavigatingChange"},
+        )
+        assert r.status_code == 200, r.text
+        sug = r.json()["suggestion"]
+        assert sug["decision"] == "rejected"
+        assert "duplicate" in sug["rejection_reason"]
+        # Listing returns the rejected suggestion under decision=rejected.
+        listing = client.get(
+            f"/api/projects/{pid}/ai/new-code-suggestions?decision=rejected"
+        )
+        ids = [s["id"] for s in listing.json()["suggestions"]]
+        assert sug_id in ids
+
+    def test_double_reject_returns_409(self, env) -> None:
+        client, _ = env
+        pid, _, sid = _seed(client)
+        _force_gate_on(client, pid)
+        backend = FakeBackend(generation_text='[{"name":"X","definition":"d"}]')
+        _install_fake_backend(backend)
+        post = client.post(
+            f"/api/projects/{pid}/ai/suggestions",
+            json={"source_id": sid, "anchor_start_word_id": "s0w0",
+                  "anchor_end_word_id": "s0w5", "query_text": "x",
+                  "mode": "new"},
+        )
+        sug_id = post.json()["suggestion"]["id"]
+        r1 = client.post(
+            f"/api/projects/{pid}/ai/new-code-suggestions/{sug_id}/reject",
+        )
+        assert r1.status_code == 200
+        r2 = client.post(
+            f"/api/projects/{pid}/ai/new-code-suggestions/{sug_id}/reject",
+        )
+        assert r2.status_code == 409
+
+    def test_project_ai_page_advertises_f8_4(self, env) -> None:
+        """The AI dashboard's Suggestion surfaces card must point users
+        at F8.4 with its own list-item marker, separately from F8.3.
+        Without it, a researcher landing on the AI page can't find the
+        new-code command."""
+        client, _ = env
+        pid = _new_project(client)
+        r = client.get(f"/projects/{pid}/ai")
+        assert r.status_code == 200, r.text
+        body = r.text
+        assert 'data-test-id="ai-surface-f8-4"' in body
+        assert "Propose a new code" in body
+        assert "F8.4" in body
