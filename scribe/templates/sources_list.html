@@ -130,10 +130,14 @@ function renderHead(schema) {
   const head = document.getElementById("sourcesHead");
   head.innerHTML = "";
   const tr = document.createElement("tr");
+  // F3.3: a per-source "Participants" count column. Cheap inverse
+  // navigation that lets the researcher spot a focus-group source
+  // (multiple participants) at a glance.
   tr.innerHTML = `
     <th>Name</th>
     <th>Type</th>
     <th>Language</th>
+    <th title="Participants linked to this source (F3.3)" data-test-id="src-list-parts-col">Participants</th>
     <th>Added</th>
   `;
   // F3.2 — append a column per schema attribute, in declared order.
@@ -156,12 +160,17 @@ function renderHead(schema) {
   head.appendChild(tr);
 }
 
-function renderRow(s, schema) {
+function renderRow(s, schema, partMap) {
   const tr = document.createElement("tr");
+  const partIds = (partMap && partMap[s.id]) || [];
+  const partCell = partIds.length
+    ? `<td class="hint" data-test-id="src-list-part-count">${partIds.length}</td>`
+    : `<td class="hint" data-test-id="src-list-part-count">—</td>`;
   const cells = [
     `<td><a href="/projects/${PROJECT_ID}/sources/${escapeHtml(s.id)}"><strong>${escapeHtml(s.name || "(unnamed)")}</strong></a></td>`,
     `<td>${escapeHtml(s.source_type || "transcript")}</td>`,
     `<td>${escapeHtml((s.language || "—").toUpperCase())}</td>`,
+    partCell,
     `<td class="hint">${fmtDate(s.created_at)}</td>`,
   ];
   const attrs = (s.custom_attributes && typeof s.custom_attributes === "object")
@@ -194,18 +203,34 @@ async function fetchSchema() {
   }
 }
 
+async function fetchParticipantSourceMap() {
+  // F3.3 — best-effort fetch of {source_id: [participant_id, ...]}.
+  // Failures fall back to an empty map so the list still renders.
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/participant_source_map`
+    );
+    if (!r.ok) return {};
+    const data = await r.json();
+    return (data && typeof data.map === "object" && data.map) || {};
+  } catch (_) {
+    return {};
+  }
+}
+
 async function load() {
   const loading = document.getElementById("loading");
   const card = document.getElementById("sourcesCard");
   const empty = document.getElementById("emptyState");
   const error = document.getElementById("errorState");
   try {
-    const [sourcesResp, schema] = await Promise.all([
+    const [sourcesResp, schema, partMap] = await Promise.all([
       fetch(`/api/projects/${PROJECT_ID}/sources`).then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       }),
       fetchSchema(),
+      fetchParticipantSourceMap(),
     ]);
     const list = sourcesResp.sources || [];
     loading.style.display = "none";
@@ -213,7 +238,7 @@ async function load() {
     renderHead(schema);
     const body = document.getElementById("sourcesBody");
     body.innerHTML = "";
-    list.forEach(s => body.appendChild(renderRow(s, schema)));
+    list.forEach(s => body.appendChild(renderRow(s, schema, partMap)));
     card.style.display = "";
   } catch (e) {
     loading.style.display = "none";

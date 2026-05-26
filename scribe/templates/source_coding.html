@@ -195,6 +195,48 @@
     cursor: pointer; padding: 0;
   }
   .app-row .actions button:hover { color: var(--err); }
+
+  /* Participants in this source (F3.3) — the focus-group / multi-
+     speaker roster, editable inline. Set-style "save the whole list"
+     pattern so the user toggles checkboxes and clicks one Save. */
+  .part-list-roster {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 6px;
+  }
+  .part-roster-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    font-size: 11.5px;
+    color: var(--text);
+  }
+  .part-roster-pill a { color: inherit; text-decoration: none; }
+  .part-roster-pill a:hover { color: var(--accent); }
+  .part-checkbox-list {
+    max-height: 200px;
+    overflow-y: auto;
+    margin: 6px 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel-2);
+    padding: 4px;
+  }
+  .part-checkbox-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .part-checkbox-row:hover { background: var(--panel); }
+  .part-checkbox-row input[type=checkbox] { margin: 0; }
+  .part-checkbox-row .pseudo { color: var(--muted); font-size: 11px; }
 {% endblock %}
 
 {% block body %}
@@ -210,6 +252,40 @@
     <div id="transcript"></div>
   </div>
   <div class="card side-card">
+    <!-- F3.3: Participant ↔ source mapping. The pill list shows who's
+         linked to this source (the focus-group / multi-speaker
+         roster). The "Edit" button reveals a checklist editor that
+         PUTs the desired set in one call. -->
+    <h3 style="margin-top:0;font-size:14px"
+        data-test-feature="F3.3">
+      Participants <span id="partCount" class="hint"></span>
+      <button id="editPartsBtn" type="button" class="btn secondary"
+              style="float:right;font-size:11px;padding:2px 8px"
+              data-test-id="src-edit-participants">Edit</button>
+    </h3>
+    <div id="partRoster" class="part-list-roster">
+      <span class="hint" id="partRosterEmpty">No participants linked.</span>
+    </div>
+    <div id="partEditor" style="display:none">
+      <div id="partCheckboxList" class="part-checkbox-list">
+        <div class="hint" style="padding:8px">Loading roster…</div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button id="savePartsBtn" type="button" class="btn"
+                style="font-size:12px;padding:4px 10px"
+                data-test-id="src-save-participants">Save</button>
+        <button id="cancelPartsBtn" type="button" class="btn secondary"
+                style="font-size:12px;padding:4px 10px">Cancel</button>
+        <a href="/projects/{{ project_id }}/participants/new"
+           class="hint" style="font-size:11px;margin-left:auto"
+           target="_blank" rel="noopener">+ New participant</a>
+      </div>
+      <div id="partsMsg" class="hint"
+           style="margin-top:6px;font-size:11px"
+           role="status" aria-live="polite"></div>
+    </div>
+    <hr style="border:0;border-top:1px solid var(--border);margin:14px 0">
+
     <h3 style="margin-top:0;font-size:14px">Coded segments <span id="appCount" class="hint"></span></h3>
     <div id="appList">
       <div class="hint">No applications on this source yet. Highlight text in the transcript to start.</div>
@@ -360,12 +436,144 @@ async function loadAll() {
     renderTranscript();
     renderApps();
     renderCodebookSummary();
+    // F3.3 — kick off in the background; failures stay non-fatal so
+    // they don't block the coding view if a researcher hasn't created
+    // any participants yet.
+    loadParticipantRoster();
   } catch (e) {
     loading.style.display = "none";
     errorCard.textContent = `Couldn't load: ${e.message}`;
     errorCard.style.display = "";
   }
 }
+
+// --- F3.3 — Participants linked to this source --------------------
+//
+// Inverse navigation (which participants are linked to this source)
+// plus the focus-group editor (declare the set in one PUT). All
+// non-blocking — researchers should be able to start coding before
+// they've decided who's in the focus group.
+
+let LINKED_PART_IDS = new Set();
+let ALL_PARTS_CACHE = [];
+
+async function loadParticipantRoster() {
+  try {
+    const r = await fetchJSON(
+      `/api/projects/${PROJECT_ID}/sources/${SOURCE_ID}/participants`
+    );
+    const linked = (r.participants || []);
+    LINKED_PART_IDS = new Set(linked.map(p => p.id));
+    renderParticipantRoster(linked);
+  } catch (e) {
+    document.getElementById("partRoster").innerHTML =
+      `<span class="hint" style="color:var(--err)">Couldn't load participants: ${escapeHtml(e.message)}</span>`;
+  }
+}
+
+function renderParticipantRoster(linked) {
+  const roster = document.getElementById("partRoster");
+  const count = document.getElementById("partCount");
+  count.textContent = linked.length
+    ? `(${linked.length})`
+    : "";
+  if (!linked.length) {
+    roster.innerHTML =
+      '<span class="hint" id="partRosterEmpty">No participants linked.</span>';
+    return;
+  }
+  roster.innerHTML = linked.map(p => {
+    const id = escapeHtml(p.id);
+    const name = escapeHtml(p.name || "(unnamed)");
+    const pseudo = p.pseudonym ? ` <span class="hint" style="font-size:10px">(${escapeHtml(p.pseudonym)})</span>` : "";
+    return `<span class="part-roster-pill"><a href="/projects/${PROJECT_ID}/participants/${id}">${name}</a>${pseudo}</span>`;
+  }).join("");
+}
+
+document.getElementById("editPartsBtn").addEventListener("click", async () => {
+  const editor = document.getElementById("partEditor");
+  const list = document.getElementById("partCheckboxList");
+  const msg = document.getElementById("partsMsg");
+  msg.textContent = "";
+  msg.style.color = "var(--muted)";
+  if (editor.style.display === "") {
+    editor.style.display = "none";
+    return;
+  }
+  editor.style.display = "";
+  // Lazy-load the project's participants on first open.
+  if (!ALL_PARTS_CACHE.length) {
+    list.innerHTML = '<div class="hint" style="padding:8px">Loading roster…</div>';
+    try {
+      const r = await fetchJSON(`/api/projects/${PROJECT_ID}/participants`);
+      ALL_PARTS_CACHE = r.participants || [];
+    } catch (e) {
+      list.innerHTML = `<div class="hint" style="color:var(--err);padding:8px">Couldn't load: ${escapeHtml(e.message)}</div>`;
+      return;
+    }
+  }
+  if (!ALL_PARTS_CACHE.length) {
+    list.innerHTML =
+      '<div class="hint" style="padding:8px">No participants in this project yet. <a href="/projects/' +
+      PROJECT_ID + '/participants/new" target="_blank" rel="noopener">Add one</a> to start linking.</div>';
+    return;
+  }
+  list.innerHTML = ALL_PARTS_CACHE.map(p => {
+    const id = escapeHtml(p.id);
+    const name = escapeHtml(p.name || "(unnamed)");
+    const pseudo = p.pseudonym ? `<span class="pseudo">(${escapeHtml(p.pseudonym)})</span>` : "";
+    const checked = LINKED_PART_IDS.has(p.id) ? "checked" : "";
+    return `<label class="part-checkbox-row">
+      <input type="checkbox" data-pid="${id}" ${checked}>
+      <span>${name}</span>${pseudo}
+    </label>`;
+  }).join("");
+});
+
+document.getElementById("cancelPartsBtn").addEventListener("click", () => {
+  document.getElementById("partEditor").style.display = "none";
+  document.getElementById("partsMsg").textContent = "";
+});
+
+document.getElementById("savePartsBtn").addEventListener("click", async () => {
+  const list = document.getElementById("partCheckboxList");
+  const msg = document.getElementById("partsMsg");
+  const saveBtn = document.getElementById("savePartsBtn");
+  const desired = Array.from(
+    list.querySelectorAll('input[type=checkbox]:checked')
+  ).map(cb => cb.getAttribute("data-pid"));
+  saveBtn.disabled = true;
+  msg.textContent = "Saving…";
+  msg.style.color = "var(--muted)";
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/sources/${SOURCE_ID}/participants`,
+      {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({participant_ids: desired}),
+      }
+    );
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const change = await r.json();
+    const parts = []
+      .concat(change.added.length ? [`+${change.added.length} added`] : [])
+      .concat(change.removed.length ? [`-${change.removed.length} removed`] : [])
+      .concat(change.unchanged.length ? [`${change.unchanged.length} unchanged`] : []);
+    msg.textContent = parts.length ? `Saved (${parts.join(", ")}).` : "Saved (no changes).";
+    msg.style.color = "var(--ok)";
+    document.getElementById("partEditor").style.display = "none";
+    await loadParticipantRoster();
+  } catch (e) {
+    msg.textContent = `Couldn't save: ${e.message}`;
+    msg.style.color = "var(--err)";
+  } finally {
+    saveBtn.disabled = false;
+  }
+});
 
 function renderTranscript() {
   const root = document.getElementById("transcript");

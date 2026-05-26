@@ -1432,6 +1432,226 @@ async def delete_participant_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Participant ↔ source mapping (F3.3) — inverse navigation + focus groups
+#
+# The pure module ``scribe/participant_sources.py`` shipped with passing
+# unit tests in ``tests/test_participant_sources.py`` but had no HTTP
+# surface — researchers couldn't link participants to sources or list
+# the participants in a focus-group source from the UI.
+#
+# These endpoints close that gap:
+#
+# * ``GET    /api/projects/<pid>/sources/<sid>/participants`` — list
+#   participants whose ``source_ids`` includes ``sid``. Inverse of the
+#   forward mapping kept on the participant entity (F1.3); this is the
+#   focus-group / multi-speaker view.
+#
+# * ``PUT    /api/projects/<pid>/sources/<sid>/participants`` — declare
+#   the *exact* set of participants for a source in one call (the
+#   focus-group editor pattern). Idempotent: only writes the
+#   participants whose lists actually change.
+#
+# * ``POST   /api/projects/<pid>/sources/<sid>/participants/<part_id>``
+#   — link one participant to a source. Returns ``added: bool`` so the
+#   UI can show "already linked" without a confusing toast.
+#
+# * ``DELETE /api/projects/<pid>/sources/<sid>/participants/<part_id>``
+#   — unlink one participant from a source.
+#
+# * ``GET    /api/projects/<pid>/orphan_participant_links`` — list
+#   ``source_ids`` references that point at a missing source. The
+#   audit / cleanup view; non-destructive.
+# --------------------------------------------------------------------------- #
+
+from . import participant_sources as _participant_sources  # noqa: E402
+
+
+@app.get("/api/projects/{project_id}/sources/{source_id}/participants")
+async def list_source_participants_endpoint(
+    project_id: str, source_id: str
+) -> JSONResponse:
+    """Inverse navigation (F3.3): which participants are linked to this
+    source? Always returns 200 with an empty list when nothing is
+    linked. Validates ids strictly so a typo or path-traversal attempt
+    fails loudly."""
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        # Confirm the source exists so the UI doesn't accidentally
+        # render an empty roster for a deleted source. (Participants
+        # that still reference it land in the orphan endpoint.)
+        try:
+            _sources.load_source(_projects_root(), project_id, source_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+        try:
+            parts = _participant_sources.list_participants_for_source(
+                _projects_root(), project_id, source_id
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({"participants": [p.to_dict() for p in parts]})
+
+
+@app.put("/api/projects/{project_id}/sources/{source_id}/participants")
+async def set_source_participants_endpoint(
+    project_id: str, source_id: str, request: Request
+) -> JSONResponse:
+    """Focus-group editor (F3.3): declare exactly which participants
+    are linked to ``source_id``. Body shape:
+
+        {"participant_ids": ["p1", "p2", ...]}
+
+    Returns the diff so the UI can render an audit-friendly toast
+    ("added 1, removed 1, unchanged 2"). Idempotent — calling twice
+    with the same desired set is a no-op on the second call."""
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    raw_ids = body.get("participant_ids")
+    if raw_ids is None:
+        raw_ids = []
+    if not isinstance(raw_ids, list):
+        raise HTTPException(400, "participant_ids must be a list")
+    pids = [str(x) for x in raw_ids]
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            _sources.load_source(_projects_root(), project_id, source_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+        try:
+            change = _participant_sources.set_participants_for_source(
+                _projects_root(),
+                project_id,
+                source_id,
+                pids,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({
+        "source_id": change.source_id,
+        "added": change.added,
+        "removed": change.removed,
+        "unchanged": change.unchanged,
+        "changed": change.changed,
+    })
+
+
+@app.post(
+    "/api/projects/{project_id}/sources/{source_id}"
+    "/participants/{participant_id}"
+)
+async def link_participant_to_source_endpoint(
+    project_id: str, source_id: str, participant_id: str
+) -> JSONResponse:
+    """Single-edge link (F3.3). Returns ``added`` so an "already
+    linked" call doesn't read as a 4xx — it's a no-op success."""
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    _check_participant_id(participant_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            _sources.load_source(_projects_root(), project_id, source_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+        try:
+            added = _participant_sources.link_participant_to_source(
+                _projects_root(),
+                project_id,
+                participant_id,
+                source_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Participant not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({
+        "source_id": source_id,
+        "participant_id": participant_id,
+        "added": added,
+    })
+
+
+@app.delete(
+    "/api/projects/{project_id}/sources/{source_id}"
+    "/participants/{participant_id}"
+)
+async def unlink_participant_from_source_endpoint(
+    project_id: str, source_id: str, participant_id: str
+) -> JSONResponse:
+    """Single-edge unlink (F3.3). Tolerates ``source_id`` not being on
+    disk so a researcher can clean up after a deleted source — the
+    common case for unlinking."""
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    _check_participant_id(participant_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            removed = _participant_sources.unlink_participant_from_source(
+                _projects_root(),
+                project_id,
+                participant_id,
+                source_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Participant not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({
+        "source_id": source_id,
+        "participant_id": participant_id,
+        "removed": removed,
+    })
+
+
+@app.get("/api/projects/{project_id}/orphan_participant_links")
+async def list_orphan_participant_links_endpoint(
+    project_id: str,
+) -> JSONResponse:
+    """Audit view (F3.3). Reports every participant→source edge that
+    points at a source not present on disk. Non-destructive — the UI
+    decides whether each entry is a typo to fix or a legitimately
+    deleted source whose link should be cleaned up."""
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        orphans = _participant_sources.find_orphan_links(
+            _projects_root(), project_id
+        )
+    return JSONResponse({
+        "orphans": [
+            {"participant_id": o.participant_id, "source_id": o.source_id}
+            for o in orphans
+        ],
+    })
+
+
+@app.get("/api/projects/{project_id}/participant_source_map")
+async def participant_source_map_endpoint(project_id: str) -> JSONResponse:
+    """Whole-project inverse mapping (F3.3) — useful to the UI for
+    rendering source-by-participant matrices and source-list participant
+    counts in one fetch. Returns ``{source_id: [participant_id, …]}``
+    including sources with no linked participants (empty list) so the
+    caller can iterate every source."""
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        m = _participant_sources.participant_source_map(
+            _projects_root(), project_id
+        )
+    return JSONResponse({"map": m})
+
+
+# --------------------------------------------------------------------------- #
 # Coders (F2.5, multi-coder mode) — REST surface
 #
 # The pure data layer (``scribe/coders.py``) and the ICR statistics
