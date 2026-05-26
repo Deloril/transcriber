@@ -32,6 +32,18 @@
      title="Download a .scribe.zip archive of this project (manifest + sources + codebook + sampling log + transcripts).">
     ⬇ Export archive
   </a>
+  {# F6.4: REFI-QDA / QDPX interoperable export. Sibling to the F1.5
+     archive button; this one is the portable interchange format any
+     other QDA tool (Atlas.ti / MAXQDA / NVivo / etc.) can re-open.
+     The endpoint ``/api/projects/<pid>/qdpx`` returns a .qdpx zip
+     (REFI-QDA project.qde manifest + Sources/*.txt). #}
+  <a class="btn secondary" id="exportQdpxBtn"
+     href="/api/projects/{{ project_id }}/qdpx"
+     download
+     data-test-feature="F6.4"
+     title="Download a REFI-QDA / QDPX archive of this project — the no-lock-in interchange format any QDA tool can re-open.">
+    ⬇ Export QDPX
+  </a>
 {% endblock %}
 
 {% block extra_styles %}

@@ -167,6 +167,33 @@
   </p>
 </div>
 
+{# F6.4: REFI-QDA / QDPX project export.
+   The QDPX archive is the no-lock-in interchange format every QDA
+   tool (Atlas.ti, MAXQDA, NVivo, QDA Miner, Quirkos, Dedoose) accepts
+   via REFI-QDA import. This card surfaces the existing
+   ``/api/projects/<pid>/qdpx`` endpoint as a clickable download so
+   the feature is reachable from the UI rather than only via curl. #}
+<div class="card ps-section" data-test-feature="F6.4">
+  <h2>Interoperable export (REFI-QDA / QDPX)</h2>
+  <p class="ps-help">
+    Download this project as a <strong>REFI-QDA / QDPX</strong> archive — a
+    portable format readable by Atlas.ti, MAXQDA, NVivo, QDA Miner, Quirkos,
+    and Dedoose. Includes the codebook, every coded segment, memos, and
+    plain-text source representations.
+    <em>No lock-in:</em> if you outgrow Scribe, your work moves with you.
+  </p>
+  <p>
+    <a class="ps-bundle-link"
+       href="/api/projects/{{ project_id }}/qdpx"
+       download
+       data-test-id="ps-qdpx-link"
+       data-test-feature="F6.4"
+       title="Download a .qdpx archive (REFI-QDA / QDPX) of this project for import into other QDA tools.">
+      ⬇ Download QDPX (REFI-QDA)
+    </a>
+  </p>
+</div>
+
 <script>
 const PROJECT_ID = {{ project_id | tojson }};
 
