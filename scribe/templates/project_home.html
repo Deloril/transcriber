@@ -12,6 +12,18 @@
 
 {% block actions %}
   <a class="btn secondary" href="/projects">All projects</a>
+  {# F1.5: download the whole project as a .scribe.zip archive. The
+     server endpoint streams a zip with the same internal layout as
+     the on-disk projects/<id>/ tree; the link triggers a browser
+     download via Content-Disposition. ?include_outputs=1 bundles the
+     transcript outputs/<job_id>/ trees so the receiver gets a
+     self-contained corpus, not just the project shell. #}
+  <a class="btn secondary" id="exportArchiveBtn"
+     href="/api/projects/{{ project_id }}/archive?include_outputs=1"
+     download
+     title="Download a .scribe.zip archive of this project (manifest + sources + codebook + sampling log + transcripts).">
+    ⬇ Export archive
+  </a>
 {% endblock %}
 
 {% block extra_styles %}

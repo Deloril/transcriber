@@ -53,6 +53,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import unicodedata
 import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -788,6 +789,27 @@ def _replace_sampling_log_file(
 # — readers don't care about the suffix, only the contents — but
 # ``.scribe`` (or ``.scribe.zip``) hints at the format in file managers.
 ARCHIVE_SUFFIX = ".scribe.zip"
+
+
+_FILENAME_PUNCT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def slugify_archive_filename(project: Project | None) -> str:
+    """Derive a ``<slug>.scribe.zip`` attachment filename from a project.
+
+    Mirrors :func:`scribe.refi_qda_project.slugify_qdpx_filename`:
+    ASCII-only, lowercase, dash-separated. Falls back to
+    ``project.scribe.zip`` when no usable name is available so the
+    HTTP layer can always produce a sane Content-Disposition.
+    """
+    if project is None or not project.name:
+        return f"project{ARCHIVE_SUFFIX}"
+    name = unicodedata.normalize("NFKD", project.name)
+    name = name.encode("ascii", "ignore").decode("ascii").lower()
+    slug = _FILENAME_PUNCT_RE.sub("-", name).strip("-")
+    if not slug:
+        return f"project{ARCHIVE_SUFFIX}"
+    return f"{slug}{ARCHIVE_SUFFIX}"
 
 
 def export_project_archive(

@@ -843,6 +843,200 @@ async def delete_project_endpoint(project_id: str) -> JSONResponse:
 
 
 # --------------------------------------------------------------------------- #
+# Project archives (F1.5) — round-trippable .scribe.zip export / import
+#
+# F1.5 formalised the on-disk project layout into a versioned, archive-
+# round-trippable file format (manifest.json + the F1.1–F1.4 sub-trees).
+# The pure logic lives in scribe/project_format.py with a passing test
+# suite. These endpoints surface that to the user:
+#
+#   GET  /api/projects/<pid>/archive  → download a .scribe.zip
+#   POST /api/projects/import-archive → upload a .scribe.zip, restore it
+#
+# The export is a deterministic zip (sorted entries) so the same project
+# state always produces the same archive bytes — useful for diffing two
+# captures of a project. Optional ``include_outputs=1`` query param
+# bundles the OUTPUT_DIR/<job_id>/ trees referenced by the project's
+# sources, so the receiver gets a self-contained corpus.
+# --------------------------------------------------------------------------- #
+
+from . import project_format as _project_format  # noqa: E402
+
+# Keep a single tmp directory for streaming archive bytes through. Each
+# request gets its own file under it; we never reuse names.
+_ARCHIVE_TMP_PREFIX = "scribe-archive-"
+
+
+def _archive_query_flag(value: Any) -> bool:
+    """Treat the usual truthy spellings ('1', 'true', 'yes', 'on') as True."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+@app.get("/api/projects/{project_id}/archive")
+async def export_project_archive_endpoint(
+    project_id: str, request: Request
+) -> Response:
+    """Download the project as a Scribe-native ``.scribe.zip`` archive (F1.5).
+
+    The archive's internal layout matches the on-disk layout, rooted at
+    a single top-level ``<project_id>/`` directory:
+
+      <project_id>/manifest.json
+      <project_id>/project.json
+      <project_id>/sources/<sid>.json
+      <project_id>/participants/<pid>.json
+      <project_id>/sampling_log.jsonl
+      <project_id>/codes/<cid>.json
+      <project_id>/outputs/<job_id>/...   (only if ?include_outputs=1)
+
+    The receiver can drop this back through
+    ``POST /api/projects/import-archive`` to round-trip it; the same
+    bytes also feed REFI-QDA / QDPX (F6.4) interop and F9.4 project
+    checkpoints.
+
+    Status codes: ``404`` if the project is missing; ``400`` on a bad
+    project id; ``200`` otherwise.
+    """
+    _check_project_id(project_id)
+    _project_must_exist(project_id)
+
+    include_outputs = _archive_query_flag(
+        request.query_params.get("include_outputs")
+    )
+
+    # Stream the archive via a tmp file. project_format.export_project_archive
+    # writes a real on-disk zip rather than holding everything in memory,
+    # which keeps RAM bounded for projects with bundled outputs/.
+    import tempfile
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix=_ARCHIVE_TMP_PREFIX))
+    archive_path = tmp_dir / f"{project_id}.scribe.zip"
+    try:
+        with PROJECTS_LOCK:
+            try:
+                project = _projects.load_project(
+                    _projects_root(), project_id
+                )
+            except FileNotFoundError:
+                raise HTTPException(404, "Project not found")
+            _project_format.export_project_archive(
+                _projects_root(),
+                project_id,
+                archive_path,
+                outputs_root=OUTPUT_DIR if include_outputs else None,
+                include_outputs=include_outputs,
+            )
+        archive_bytes = archive_path.read_bytes()
+    finally:
+        # Best-effort tmp cleanup; the OS reclaims it eventually anyway.
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:  # pragma: no cover — defensive
+            pass
+
+    filename = _project_format.slugify_archive_filename(project)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(
+        content=archive_bytes,
+        media_type="application/zip",
+        headers=headers,
+    )
+
+
+@app.post("/api/projects/import-archive")
+async def import_project_archive_endpoint(
+    archive: UploadFile = File(...),
+    overwrite: str | None = Form(default=None),
+    include_outputs: str | None = Form(default=None),
+) -> JSONResponse:
+    """Restore a project from a ``.scribe.zip`` archive (F1.5).
+
+    Accepts a multipart upload with a single ``archive`` file part.
+
+    Optional form fields:
+      * ``overwrite=1`` — replace an existing project of the same id
+        (default: refuse with 409 to protect against accidental
+        clobbers).
+      * ``include_outputs=1`` — extract any ``outputs/<job_id>/`` trees
+        bundled in the archive into the server's OUTPUT_DIR. Default
+        is False so an import never silently overwrites the host's
+        transcript corpus; the project still loads, it just won't
+        have media playback for those sources until the user
+        re-uploads or re-imports a transcript.
+
+    Status codes:
+      * ``201`` on a successful import. Body: ``{"project_id": "...",
+        "name": "...", "redirect": "/projects/<id>"}``.
+      * ``400`` on a malformed archive (zip-bomb, path traversal,
+        missing manifest, etc.).
+      * ``409`` if a project already exists at the same id and
+        ``overwrite`` was not set.
+      * ``413`` if the upload exceeds the F1.5 zip-bomb limits.
+    """
+    overwrite_flag = _archive_query_flag(overwrite)
+    extract_outputs = _archive_query_flag(include_outputs)
+
+    # Stream the upload into a tmp file rather than buffering the
+    # whole archive in RAM — projects with bundled outputs/ can be
+    # hundreds of megabytes.
+    import tempfile
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix=_ARCHIVE_TMP_PREFIX))
+    upload_path = tmp_dir / "upload.scribe.zip"
+    try:
+        with upload_path.open("wb") as dst:
+            while True:
+                chunk = await archive.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+
+        try:
+            with PROJECTS_LOCK:
+                bundle = _project_format.import_project_archive(
+                    _projects_root(),
+                    upload_path,
+                    outputs_root=OUTPUT_DIR if extract_outputs else None,
+                    overwrite=overwrite_flag,
+                )
+        except FileNotFoundError as e:
+            raise HTTPException(400, f"Invalid archive: {e}")
+        except _project_format.ProjectFormatError as e:
+            msg = str(e)
+            if "already exists" in msg:
+                raise HTTPException(409, msg)
+            if "exceeds limit" in msg or "too large" in msg:
+                raise HTTPException(413, msg)
+            raise HTTPException(400, msg)
+        except Exception as e:  # zipfile.BadZipFile, json errors, …
+            raise HTTPException(400, f"Invalid archive: {e}")
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:  # pragma: no cover — defensive
+            pass
+
+    return JSONResponse(
+        {
+            "project_id": bundle.project.id,
+            "name": bundle.project.name,
+            "redirect": f"/projects/{bundle.project.id}",
+            "sources": len(bundle.sources),
+            "participants": len(bundle.participants),
+            "codes": len(bundle.codes),
+            "sampling_entries": len(bundle.sampling_log),
+        },
+        status_code=201,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Sources (F1.2) — primary-data items attached to a project
 #
 # A source is most commonly a Scribe transcript (linked via

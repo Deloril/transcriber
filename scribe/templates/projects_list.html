@@ -3,6 +3,17 @@
 {% block title %}Projects{% endblock %}
 
 {% block actions %}
+  {# F1.5: import a previously exported .scribe.zip archive. The hidden
+     <input type="file"> is the actual upload control; the styled <button>
+     proxies the click for visual consistency with the New-project CTA.
+     On selection we POST multipart to /api/projects/import-archive and
+     redirect to the imported project's home on 201. #}
+  <button type="button" class="btn secondary" id="importArchiveBtn"
+          title="Import a project from a .scribe.zip archive.">
+    ⬆ Import archive
+  </button>
+  <input type="file" id="importArchiveInput" accept=".zip,.scribe,.scribe.zip,application/zip"
+         style="display:none">
   <a class="btn" href="/projects/new">+ New project</a>
 {% endblock %}
 
@@ -129,5 +140,51 @@ async function load() {
   }
 }
 load();
+
+// ----------------------------------------------------------------------
+// F1.5 — import a .scribe.zip archive.
+//
+// The import button proxies a click to a hidden <input type="file">.
+// On change we POST the file as multipart and follow the redirect from
+// the server's response body. Errors surface inline on the existing
+// errorState card so the user sees them without losing the file picker.
+// ----------------------------------------------------------------------
+const importBtn = document.getElementById("importArchiveBtn");
+const importInput = document.getElementById("importArchiveInput");
+if (importBtn && importInput) {
+  importBtn.addEventListener("click", () => importInput.click());
+  importInput.addEventListener("change", async () => {
+    const file = importInput.files && importInput.files[0];
+    if (!file) return;
+    const error = document.getElementById("errorState");
+    error.style.display = "none";
+    error.textContent = "";
+    importBtn.disabled = true;
+    importBtn.textContent = "Importing…";
+    try {
+      const fd = new FormData();
+      fd.append("archive", file);
+      // Bring transcripts back into outputs/ on import so playback works
+      // out of the box. Honours the F1.5 zip-bomb guard server-side.
+      fd.append("include_outputs", "1");
+      const r = await fetch("/api/projects/import-archive", {
+        method: "POST",
+        body: fd,
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        throw new Error(data.detail || `HTTP ${r.status}`);
+      }
+      window.location.href = data.redirect || `/projects/${data.project_id}`;
+    } catch (e) {
+      error.textContent = `Import failed: ${e.message}`;
+      error.style.display = "";
+    } finally {
+      importBtn.disabled = false;
+      importBtn.textContent = "⬆ Import archive";
+      importInput.value = "";
+    }
+  });
+}
 </script>
 {% endblock %}
