@@ -428,6 +428,141 @@
        data-test-id="ai-events-error"></div>
 </div>
 
+{# F9.6 — AI invocation log including rejected suggestions (read view).
+
+   PLANNING.md F9.6:
+     > AI invocation log including *rejected* suggestions (rejected
+     > suggestions are evidence too).
+
+   ``scribe.ai_invocation_log`` shipped the read-side aggregator
+   (build_invocation_log / count_invocations) and write-side
+   helpers (record_decision_event_for_*, record_request_event_for_*)
+   in 1f5de63. The F8.5 / F8.6 / F8.7 / F8.8 endpoints already emit
+   AIEvents through the write-side helpers when a per-engine
+   decision lands. Until this panel + the
+   ``/api/projects/<pid>/ai/invocations`` routes landed, the *read*
+   surface (a unified, filterable, joined view of every AI invocation
+   across every engine, with first-class ``decision=rejected``
+   support) was unreachable from the UI.
+
+   Sibling-but-distinct from the F8.9 events feed above:
+     * F8.9 streams the raw append-only AIEvent log; one row per
+       lifecycle event (request / decision / application / error).
+     * F9.6 aggregates per-engine record stores (CodeSuggestion,
+       NewCodeSuggestion, MemoDraft, ReviewPass, SecondCoderPass,
+       QuoteSearch) into one row per *invocation* with the canonical
+       decision lifecycle from the per-engine record plus
+       cross-references to any AIEvent rows. Two clicks (Suggest →
+       Reject) produce one row whose ``decision`` is ``rejected``.
+
+   Reads:
+     GET /api/projects/<pid>/ai/invocations
+       ?feature=…&decision=…&actor_coder_id=…&since=…&until=…
+       &limit=…&order=…
+     GET /api/projects/<pid>/ai/invocations/counts
+       ?feature=…
+#}
+<div id="aiInvocationsCard" class="card ai-card"
+     data-test-feature="F9.6"
+     data-test-id="ai-invocations-card">
+  <h2>AI invocation log <span class="ai-pill">F9.6</span></h2>
+  <p class="ai-help">
+    Every AI invocation across every engine — code suggestions,
+    new-code proposals, similar-quote searches, whole-transcript
+    review passes, AI second-coder passes, memo drafts — collapses
+    into one row here, with the human's decision (accepted / modified
+    / rejected, or <em>request_only</em> for searches and passes that
+    have no decision lifecycle of their own). Rejected suggestions
+    stay as evidence: a methodologically transparent audit trail
+    has to record what the AI proposed <em>and</em> what the
+    researcher chose to set aside.
+  </p>
+
+  <div class="ai-section"
+       data-test-id="ai-invocations-counters"
+       style="display:flex;gap:6px;flex-wrap:wrap;font-size:12px">
+    <span class="ai-pill" data-test-id="ai-invocations-count-total"
+          style="background:transparent;border:1px solid var(--border);color:var(--muted)">
+      total <strong id="ai-inv-count-total">0</strong>
+    </span>
+    <span class="ai-pill" data-test-id="ai-invocations-count-pending"
+          style="background:transparent;border:1px solid var(--muted);color:var(--muted)">
+      pending <strong id="ai-inv-count-pending">0</strong>
+    </span>
+    <span class="ai-pill" data-test-id="ai-invocations-count-accepted"
+          style="background:transparent;border:1px solid var(--ok);color:var(--ok)">
+      accepted <strong id="ai-inv-count-accepted">0</strong>
+    </span>
+    <span class="ai-pill" data-test-id="ai-invocations-count-modified"
+          style="background:transparent;border:1px solid var(--accent);color:var(--accent)">
+      modified <strong id="ai-inv-count-modified">0</strong>
+    </span>
+    <span class="ai-pill" data-test-id="ai-invocations-count-rejected"
+          style="background:transparent;border:1px solid var(--err);color:var(--err)">
+      rejected <strong id="ai-inv-count-rejected">0</strong>
+    </span>
+    <span class="ai-pill" data-test-id="ai-invocations-count-request-only"
+          style="background:transparent;border:1px solid var(--border);color:var(--muted)">
+      request_only <strong id="ai-inv-count-request-only">0</strong>
+    </span>
+  </div>
+
+  <div class="ai-section"
+       style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <div>
+      <label for="ai-inv-filter-feature" class="ai-field-label"
+             style="margin:0">Feature</label>
+      <select id="ai-inv-filter-feature" class="ai-field-input"
+              data-test-id="ai-invocations-filter-feature"
+              style="max-width:220px">
+        <option value="">All features</option>
+        <option value="code_suggestion">code_suggestion (F8.3)</option>
+        <option value="new_code_suggestion">new_code_suggestion (F8.4)</option>
+        <option value="quote_similarity">quote_similarity (F8.5)</option>
+        <option value="transcript_review">transcript_review (F8.6)</option>
+        <option value="second_coder">second_coder (F8.7)</option>
+        <option value="memo_draft">memo_draft (F8.8)</option>
+        <option value="other">other</option>
+      </select>
+    </div>
+    <div>
+      <label for="ai-inv-filter-decision" class="ai-field-label"
+             style="margin:0">Decision</label>
+      <select id="ai-inv-filter-decision" class="ai-field-input"
+              data-test-id="ai-invocations-filter-decision"
+              style="max-width:180px">
+        <option value="">All decisions</option>
+        <option value="pending">pending</option>
+        <option value="accepted">accepted</option>
+        <option value="modified">modified</option>
+        <option value="rejected">rejected (F9.6 headline)</option>
+        <option value="request_only">request_only</option>
+      </select>
+    </div>
+    <div>
+      <label for="ai-inv-filter-actor" class="ai-field-label"
+             style="margin:0">Actor (coder id)</label>
+      <input id="ai-inv-filter-actor" type="text" maxlength="12"
+             class="ai-field-input"
+             placeholder="12-char hex"
+             data-test-id="ai-invocations-filter-actor"
+             style="max-width:160px;font-family:var(--mono);font-size:12px">
+    </div>
+    <span id="ai-inv-count" class="hint"
+          data-test-id="ai-invocations-count"></span>
+    <button id="ai-inv-refresh-btn" class="btn secondary" type="button"
+            data-test-id="ai-invocations-refresh"
+            style="margin-left:auto">Refresh</button>
+  </div>
+
+  <div id="ai-inv-list" class="ai-section"
+       data-test-id="ai-invocations-list" style="margin-top:8px"></div>
+
+  <div id="ai-inv-error" class="ai-section" hidden
+       style="color:var(--err);font-size:13px"
+       data-test-id="ai-invocations-error"></div>
+</div>
+
 <div class="card ai-card" data-test-feature="F8.4" data-test-id="ai-surfaces-card">
   <h2>Suggestion surfaces</h2>
   <p class="ai-help">
@@ -1782,5 +1917,166 @@ document.getElementById("ai-events-refresh-btn")
   .addEventListener("click", () => { loadAIEvents(); });
 
 loadAIEvents();
+
+// ---------------------------------------------------------------- //
+// F9.6 — AI invocation log panel                                    //
+// ---------------------------------------------------------------- //
+// Aggregates per-engine record stores into one row per invocation
+// with a canonical decision lifecycle. The headline use-case is
+// "show me every rejected suggestion" — pass decision=rejected.
+// Counters update from /ai/invocations/counts so the badges stay
+// truthful even when the list is filtered down.
+
+function _aiInvDecisionBadge(decision) {
+  const dec = String(decision || "");
+  const map = {
+    pending: "border-color:var(--muted);color:var(--muted)",
+    accepted: "border-color:var(--ok);color:var(--ok)",
+    modified: "border-color:var(--accent);color:var(--accent)",
+    rejected: "border-color:var(--err);color:var(--err)",
+    request_only: "border-color:var(--border);color:var(--muted)",
+  };
+  const style = map[dec] || map.pending;
+  return `<span class="ai-pill" style="background:transparent;border:1px solid var(--border);${style}">${escapeHtml(dec)}</span>`;
+}
+
+function _aiInvRenderRow(entry) {
+  const when = (entry.created_at || "").slice(0, 19).replace("T", " ");
+  const feature = entry.feature || "";
+  const decision = entry.decision || "";
+  const sid = entry.suggestion_id
+    ? `<code>${escapeHtml(entry.suggestion_id.slice(0, 8))}</code>`
+    : "";
+  const model = entry.generation_model || entry.embedding_model || "";
+  const modelLine = model
+    ? `<div class="meta">model <code>${escapeHtml(model)}</code></div>`
+    : "";
+  const reason = entry.rejection_reason
+    ? `<div class="meta" style="color:var(--err)">reason: ${escapeHtml(entry.rejection_reason)}</div>`
+    : "";
+  const summary = entry.summary
+    ? `<div class="meta" style="color:var(--text)">${escapeHtml(entry.summary)}</div>`
+    : "";
+  const featurePill = feature
+    ? `<span class="ai-pill">${escapeHtml(feature)}</span>`
+    : "";
+  const actorBits = [];
+  if (entry.decided_by_coder_id) {
+    actorBits.push(`decided by <code>${escapeHtml(entry.decided_by_coder_id.slice(0, 8))}</code>`);
+  }
+  if (entry.requested_by_coder_id) {
+    actorBits.push(`requested by <code>${escapeHtml(entry.requested_by_coder_id.slice(0, 8))}</code>`);
+  }
+  const actorLine = actorBits.length
+    ? `<div class="meta">${actorBits.join(" · ")}</div>`
+    : "";
+  const eventXref = (entry.ai_event_ids && entry.ai_event_ids.length)
+    ? `<div class="meta">events: ${entry.ai_event_ids.map(e => `<code>${escapeHtml(e.slice(0, 8))}</code>`).join(" ")}</div>`
+    : "";
+  return `
+    <div class="ai-model-row"
+         data-test-id="ai-invocations-row"
+         data-suggestion-id="${escapeHtml(entry.suggestion_id)}"
+         data-decision="${escapeHtml(decision)}">
+      <div style="flex:1;min-width:0">
+        <div>${_aiInvDecisionBadge(decision)} ${featurePill} ${sid}</div>
+        ${summary}
+        ${modelLine}
+        ${actorLine}
+        ${reason}
+        ${eventXref}
+        <div class="meta">${escapeHtml(when)}</div>
+      </div>
+    </div>`;
+}
+
+async function _aiInvLoadCounts(featureFilter) {
+  const elTotal = document.getElementById("ai-inv-count-total");
+  const elPending = document.getElementById("ai-inv-count-pending");
+  const elAccepted = document.getElementById("ai-inv-count-accepted");
+  const elModified = document.getElementById("ai-inv-count-modified");
+  const elRejected = document.getElementById("ai-inv-count-rejected");
+  const elReqOnly = document.getElementById("ai-inv-count-request-only");
+  try {
+    const params = new URLSearchParams();
+    if (featureFilter) params.set("feature", featureFilter);
+    const url = `/api/projects/${PROJECT_ID}/ai/invocations/counts?${params.toString()}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const body = await r.json();
+    const c = body.counts || {};
+    elTotal.textContent = String(c.total ?? 0);
+    elPending.textContent = String(c.pending ?? 0);
+    elAccepted.textContent = String(c.accepted ?? 0);
+    elModified.textContent = String(c.modified ?? 0);
+    elRejected.textContent = String(c.rejected ?? 0);
+    elReqOnly.textContent = String(c.request_only ?? 0);
+  } catch (_) {
+    // Silently swallow counter errors — list-load below renders the
+    // primary error toast.
+  }
+}
+
+async function loadAIInvocations() {
+  const featureSel = document.getElementById("ai-inv-filter-feature");
+  const decisionSel = document.getElementById("ai-inv-filter-decision");
+  const actorInput = document.getElementById("ai-inv-filter-actor");
+  const errBox = document.getElementById("ai-inv-error");
+  const list = document.getElementById("ai-inv-list");
+  const count = document.getElementById("ai-inv-count");
+  errBox.hidden = true;
+  list.innerHTML = `<div class="hint">Loading…</div>`;
+  // Counters always reflect the *unfiltered* view — except feature,
+  // which is the per-engine sub-total knob the API supports.
+  _aiInvLoadCounts(featureSel.value);
+  try {
+    const params = new URLSearchParams();
+    if (featureSel.value) params.set("feature", featureSel.value);
+    if (decisionSel.value) params.set("decision", decisionSel.value);
+    const actor = actorInput.value.trim();
+    if (actor) params.set("actor_coder_id", actor);
+    params.set("order", "desc");
+    params.set("limit", "100");
+    const url = `/api/projects/${PROJECT_ID}/ai/invocations?${params.toString()}`;
+    const r = await fetch(url);
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try { const b = await r.json(); if (b.detail) msg = b.detail; } catch (_) {}
+      throw new Error(msg);
+    }
+    const body = await r.json();
+    const entries = body.invocations || [];
+    const total = body.total || 0;
+    const truncatedSuffix = body.truncated
+      ? ` (showing newest ${body.returned})`
+      : "";
+    count.textContent = `${total} invocation${total === 1 ? "" : "s"}${truncatedSuffix}`;
+    if (!entries.length) {
+      list.innerHTML = `
+        <div class="hint" data-test-id="ai-invocations-empty">
+          No AI invocations match these filters yet. As soon as a
+          researcher (or an AI second-coder pass) records a decision,
+          it lands here — including rejections.
+        </div>`;
+      return;
+    }
+    list.innerHTML = entries.map(_aiInvRenderRow).join("");
+  } catch (e) {
+    errBox.textContent = `Couldn't load AI invocations: ${e.message}`;
+    errBox.hidden = false;
+    list.innerHTML = "";
+  }
+}
+
+document.getElementById("ai-inv-filter-feature")
+  .addEventListener("change", () => { loadAIInvocations(); });
+document.getElementById("ai-inv-filter-decision")
+  .addEventListener("change", () => { loadAIInvocations(); });
+document.getElementById("ai-inv-filter-actor")
+  .addEventListener("change", () => { loadAIInvocations(); });
+document.getElementById("ai-inv-refresh-btn")
+  .addEventListener("click", () => { loadAIInvocations(); });
+
+loadAIInvocations();
 </script>
 {% endblock %}

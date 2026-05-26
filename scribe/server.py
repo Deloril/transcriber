@@ -6888,6 +6888,181 @@ async def get_project_ai_event_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# F9.6 — AI invocation log (including rejected suggestions)
+#
+# Per PLANNING.md F9.6:
+#   > AI invocation log including *rejected* suggestions (rejected
+#   > suggestions are evidence too).
+#
+# ``scribe.ai_invocation_log`` shipped the read-side aggregator
+# (build_invocation_log / count_invocations) and write-side helpers
+# (record_decision_event_for_*, record_request_event_for_*) in 1f5de63.
+# The F8.5 / F8.6 / F8.7 / F8.8 endpoints already call the write-side
+# helpers when a per-engine decision lands. What was missing until
+# this commit was the *read* surface: a unified, filterable, joined
+# view of every AI invocation across every engine, with first-class
+# support for ``decision=rejected`` (the F9.6 headline filter).
+#
+# Sibling-but-distinct from the F8.9 ``/ai/events`` feed:
+#
+#   * F8.9 streams the raw append-only AIEvent log; one row per
+#     invocation event (request / decision / application / error).
+#     Two clicks (Suggest, then Reject) produce two events.
+#
+#   * F9.6 aggregates per-engine record stores (CodeSuggestion,
+#     NewCodeSuggestion, MemoDraft, ReviewPass, SecondCoderPass,
+#     QuoteSearch) into one row per *invocation*, with the canonical
+#     decision lifecycle from the per-engine record plus
+#     cross-references to any AIEvent rows. Two clicks produce one
+#     row whose ``decision`` is ``rejected``. This is the report-side
+#     view; F8.9 is the source-side view. Both back the F9.7 audit
+#     export.
+#
+# Two endpoints close the loop:
+#
+#   GET /api/projects/<pid>/ai/invocations
+#     List invocation rows. Optional filters AND-combine:
+#       ?feature=<one of AI_FEATURES>
+#       ?decision=<one of INVOCATION_DECISIONS> (incl. ``rejected``,
+#                                                ``request_only``)
+#       ?actor_coder_id=<12-char hex> (matches decided_by *or*
+#                                       requested_by — "anything this
+#                                       coder touched")
+#       ?since=<ISO-8601>             — inclusive lower bound
+#       ?until=<ISO-8601>             — inclusive upper bound
+#       ?order=desc|asc               — defaults to ``desc`` so the
+#                                        UI can render newest-first
+#       ?limit=<int>                  — caps response post-ordering;
+#                                        0 disables truncation
+#
+#   GET /api/projects/<pid>/ai/invocations/counts
+#     Tiny counter dict for UI badges. Keys: ``total`` plus one per
+#     entry in ``INVOCATION_DECISIONS``. Honours an optional
+#     ``?feature=<one of AI_FEATURES>`` filter so the project AI page
+#     can render per-engine sub-totals if it wants.
+#
+# The F9.6 panel on ``project_ai.html`` consumes both routes; without
+# this read surface the user couldn't list rejected suggestions, count
+# invocations per engine, or hand a methodologically transparent audit
+# trail to a thesis examiner.
+# --------------------------------------------------------------------------- #
+
+
+def _ai_invocations_response_payload(
+    entries, *, order: str, limit
+) -> dict:
+    """Shape an InvocationLogEntry list into the wire payload.
+
+    ``entries`` is the chronological-asc list returned by
+    :func:`scribe.ai_invocation_log.build_invocation_log`.
+    ``order='desc'`` (default) reverses for the UI's newest-first feed.
+    ``limit`` caps the response *after* ordering so newest entries
+    survive truncation when ``order='desc'``.
+    """
+    items = list(entries)
+    if order == "desc":
+        items.reverse()
+    total = len(items)
+    truncated = False
+    if limit is not None and total > limit:
+        items = items[:limit]
+        truncated = True
+    return {
+        "invocations": [e.to_dict() for e in items],
+        "total": total,
+        "returned": len(items),
+        "order": order,
+        "truncated": truncated,
+        "available_features": list(_ai_provenance.AI_FEATURES),
+        "available_decisions": list(_ai_invocation_log.INVOCATION_DECISIONS),
+    }
+
+
+@app.get("/api/projects/{project_id}/ai/invocations")
+async def list_ai_invocations_endpoint(
+    project_id: str,
+    feature: str = "",
+    decision: str = "",
+    actor_coder_id: str = "",
+    since: str = "",
+    until: str = "",
+    limit: int = 200,
+    order: str = "desc",
+) -> JSONResponse:
+    """List F9.6 AI invocations for a project (read surface).
+
+    See module-level docstring above. Filters AND-combine; ``order=desc``
+    (default) returns newest-first; ``limit=0`` disables truncation.
+    Pass ``decision=rejected`` to render the F9.6 headline view —
+    every rejected suggestion the project has ever seen.
+    """
+    _check_project_id(project_id)
+    if order not in ("asc", "desc"):
+        raise HTTPException(400, "order must be 'asc' or 'desc'")
+    try:
+        limit_val = int(limit)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "limit must be a non-negative integer")
+    if limit_val < 0:
+        raise HTTPException(400, "limit must be a non-negative integer")
+    effective_limit = None if limit_val == 0 else limit_val
+    feat = feature or None
+    dec = decision or None
+    actor = actor_coder_id or None
+    since_v = since or None
+    until_v = until or None
+
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            entries = _ai_invocation_log.build_invocation_log(
+                _projects_root(),
+                project_id,
+                feature=feat,
+                decision=dec,
+                actor_coder_id=actor,
+                since=since_v,
+                until=until_v,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse(
+        _ai_invocations_response_payload(
+            entries, order=order, limit=effective_limit
+        )
+    )
+
+
+@app.get("/api/projects/{project_id}/ai/invocations/counts")
+async def count_ai_invocations_endpoint(
+    project_id: str, feature: str = "",
+) -> JSONResponse:
+    """Counter dict over the F9.6 invocation log.
+
+    Keys: ``total`` plus one per :data:`INVOCATION_DECISIONS` entry.
+    All values are integers ≥ 0. Optional ``feature`` filter restricts
+    to one engine.
+    """
+    _check_project_id(project_id)
+    feat = feature or None
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            counts = _ai_invocation_log.count_invocations(
+                _projects_root(), project_id, feature=feat
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({"counts": counts, "feature": feat or ""})
+
+
+# --------------------------------------------------------------------------- #
 # F9.1 — generic project event log
 #
 # F9.1 ships ``scribe.event_log``: the append-only project-wide audit
