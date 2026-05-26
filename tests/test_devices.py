@@ -430,3 +430,191 @@ class TestCt2RocmFallbackUrlsReport:
         )
         out = _run(capsys)
         assert "CT2 wheel mirrors" not in out
+
+
+class TestRocmDistroSupportTier:
+    """G2.3: scribe.devices surfaces the distro support tier on ROCm only."""
+
+    def _stub_rocm_minimal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(
+            devices.torch.cuda, "get_device_name", lambda i: "AMD Radeon RX 7900 XTX"
+        )
+        monkeypatch.setattr(devices, "_cuda_vram_gb", lambda: 24.0)
+        monkeypatch.setattr(devices, "_is_rdna2", lambda: False)
+        monkeypatch.setattr(devices.torch.version, "hip", "6.3", raising=False)
+        monkeypatch.setattr(devices, "gpu_arch_name", lambda: "gfx1100")
+        monkeypatch.setattr(devices, "pinned_ct2_rocm_version", lambda: "4.7.2")
+        monkeypatch.setattr(devices, "installed_ct2_version", lambda: "4.7.2")
+
+    def test_first_class_line_when_on_ubuntu_2404(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub_rocm_minimal(monkeypatch)
+        monkeypatch.setattr(
+            devices, "_rocm_distro_tier",
+            lambda: ("first-class", "Ubuntu 24.04.4 LTS"),
+        )
+        out = _run(capsys)
+        assert "Distro support:" in out
+        assert "first-class" in out
+        assert "Ubuntu 24.04.4 LTS" in out
+
+    def test_supported_line_on_rhel(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub_rocm_minimal(monkeypatch)
+        monkeypatch.setattr(
+            devices, "_rocm_distro_tier",
+            lambda: ("supported", "Red Hat Enterprise Linux 9.7 (Plow)"),
+        )
+        out = _run(capsys)
+        assert "Distro support:" in out
+        assert "supported" in out
+        assert "Red Hat Enterprise Linux 9.7" in out
+
+    def test_best_effort_line_on_fedora(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub_rocm_minimal(monkeypatch)
+        monkeypatch.setattr(
+            devices, "_rocm_distro_tier",
+            lambda: ("best-effort", "Fedora Linux 41"),
+        )
+        out = _run(capsys)
+        assert "Distro support:" in out
+        assert "best-effort" in out
+        assert "Fedora Linux 41" in out
+
+    def test_distro_tier_line_omitted_on_cuda(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # CUDA users don't care which distro tier they hit; only ROCm
+        # users have to think about AMD's support matrix.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.cuda, "get_device_name", lambda i: "FakeGPU")
+        monkeypatch.setattr(devices, "_cuda_vram_gb", lambda: 24.0)
+        monkeypatch.setattr(devices.torch.version, "cuda", "12.4", raising=False)
+        monkeypatch.setattr(devices.torch.version, "hip", None, raising=False)
+        out = _run(capsys)
+        assert "Distro support:" not in out
+
+    def test_distro_tier_line_omitted_on_cpu(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        out = _run(capsys)
+        assert "Distro support:" not in out
+
+
+class TestOsReleaseInfo:
+    """``_os_release_info()`` underlies both legacy distro pretty-name +
+    G2.3 tier classification, so it deserves its own tests."""
+
+    def test_returns_none_on_non_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(devices.platform, "system", lambda: "Darwin")
+        assert devices._os_release_info() is None
+
+    def test_returns_none_when_helper_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(devices.platform, "system", lambda: "Linux")
+        monkeypatch.delattr(devices.platform, "freedesktop_os_release", raising=False)
+        assert devices._os_release_info() is None
+
+    def test_returns_dict_on_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(devices.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(
+            devices.platform,
+            "freedesktop_os_release",
+            lambda: {"ID": "ubuntu", "VERSION_ID": "24.04", "PRETTY_NAME": "Ubuntu"},
+            raising=False,
+        )
+        info = devices._os_release_info()
+        assert info == {"ID": "ubuntu", "VERSION_ID": "24.04", "PRETTY_NAME": "Ubuntu"}
+
+    def test_returns_none_on_oserror(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(devices.platform, "system", lambda: "Linux")
+
+        def _missing() -> dict:
+            raise OSError("os-release missing")
+
+        monkeypatch.setattr(
+            devices.platform, "freedesktop_os_release", _missing, raising=False
+        )
+        assert devices._os_release_info() is None
+
+
+class TestRocmDistroTier:
+    """G2.3: ``_rocm_distro_tier()`` joins os-release detection + classification."""
+
+    def test_returns_first_class_on_ubuntu_2404(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(devices.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(
+            devices.platform,
+            "freedesktop_os_release",
+            lambda: {
+                "ID": "ubuntu",
+                "VERSION_ID": "24.04",
+                "PRETTY_NAME": "Ubuntu 24.04.4 LTS",
+            },
+            raising=False,
+        )
+        tier, pretty = devices._rocm_distro_tier()
+        assert tier == "first-class"
+        assert pretty == "Ubuntu 24.04.4 LTS"
+
+    def test_returns_unsupported_on_macos(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(devices.platform, "system", lambda: "Darwin")
+        tier, pretty = devices._rocm_distro_tier()
+        assert tier == "unsupported"
+        assert pretty is None
+
+    def test_returns_unsupported_on_windows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(devices.platform, "system", lambda: "Windows")
+        tier, pretty = devices._rocm_distro_tier()
+        assert tier == "unsupported"
+        assert pretty is None
+
+    def test_returns_unsupported_when_os_release_unreadable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Linux but os-release missing → tier_for_system handles it via
+        # classify_os_release({}) → "unsupported".
+        monkeypatch.setattr(devices.platform, "system", lambda: "Linux")
+
+        def _missing() -> dict:
+            raise OSError("no os-release")
+
+        monkeypatch.setattr(
+            devices.platform, "freedesktop_os_release", _missing, raising=False
+        )
+        tier, pretty = devices._rocm_distro_tier()
+        assert tier == "unsupported"
+        assert pretty is None
+
+    def test_falls_back_to_name_when_pretty_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(devices.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(
+            devices.platform,
+            "freedesktop_os_release",
+            lambda: {"ID": "fedora", "NAME": "Fedora Linux"},
+            raising=False,
+        )
+        tier, pretty = devices._rocm_distro_tier()
+        assert tier == "best-effort"
+        assert pretty == "Fedora Linux"

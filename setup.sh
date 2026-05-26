@@ -59,6 +59,51 @@ if [ "${1:-}" = "--rocm" ]; then
   # shellcheck disable=SC1091
   source .venv/bin/activate
 
+  # G2.3: classify the host distro against AMD's official ROCm matrix and
+  # warn (but don't block) when the user is on a best-effort or unknown
+  # distro. AMD certifies Ubuntu 22.04/24.04 + RHEL 9/10 only; everything
+  # else (Fedora, Arch, Debian, etc.) works in practice but isn't in the
+  # support matrix. We use the same Python helper devices.py uses so
+  # setup.sh and the device report can never disagree.
+  DISTRO_REPORT="$(python - <<'PY' 2>/dev/null || true
+import platform
+from scribe.rocm_distro import tier_for_system
+
+fn = getattr(platform, "freedesktop_os_release", None)
+info = None
+if fn is not None:
+    try:
+        info = dict(fn())
+    except (OSError, FileNotFoundError):
+        info = None
+tier = tier_for_system(platform.system(), info)
+pretty = (info or {}).get("PRETTY_NAME") or (info or {}).get("NAME") or "(unknown)"
+print(f"{tier}\t{pretty}")
+PY
+)"
+  if [ -n "$DISTRO_REPORT" ]; then
+    DISTRO_TIER="${DISTRO_REPORT%%	*}"
+    DISTRO_PRETTY="${DISTRO_REPORT#*	}"
+    echo ">> Detected distro: $DISTRO_PRETTY  [tier: $DISTRO_TIER]"
+    case "$DISTRO_TIER" in
+      first-class)
+        echo "   AMD-officially-supported and tested by Scribe."
+        ;;
+      supported)
+        echo "   AMD-officially-supported (Scribe doesn't test on it directly)."
+        ;;
+      best-effort|unknown)
+        echo "   Note: not in AMD's official ROCm matrix — install may still"
+        echo "   work fine, but if anything breaks please mention this in"
+        echo "   your support ticket."
+        ;;
+      unsupported)
+        # Should be unreachable on Linux, but keep the message honest.
+        echo "   Warning: this OS is outside the ROCm wheel support matrix."
+        ;;
+    esac
+  fi
+
   # The pinned CT2 ROCm wheel version is canonically defined in
   # scribe/rocm_install.py — read it from there so setup.sh and the
   # devices report can never drift apart (G2.1). Fall back to the

@@ -22,6 +22,29 @@ from .rocm_install import (
     pinned_ct2_rocm_version,
     rocm_wheel_fallback_urls,
 )
+from .rocm_distro import (
+    detected_tier_line,
+    tier_for_system,
+)
+
+
+def _os_release_info() -> dict[str, str] | None:
+    """Return the parsed ``/etc/os-release`` mapping, or None.
+
+    Wraps :func:`platform.freedesktop_os_release` with the same defensive
+    catches as :func:`_linux_distro` (Python < 3.10, missing file, OSError).
+    Returns None on non-Linux. Used to feed the G2.3 distro-tier classifier
+    *and* the legacy pretty-name display.
+    """
+    if platform.system() != "Linux":
+        return None
+    fn = getattr(platform, "freedesktop_os_release", None)
+    if fn is None:
+        return None
+    try:
+        return dict(fn())
+    except (OSError, FileNotFoundError):
+        return None
 
 
 def _linux_distro() -> str | None:
@@ -35,17 +58,27 @@ def _linux_distro() -> str | None:
     is unavailable (Python < 3.10), or when ``/etc/os-release`` can't be
     read. Empty pretty-names normalise to None.
     """
-    if platform.system() != "Linux":
-        return None
-    fn = getattr(platform, "freedesktop_os_release", None)
-    if fn is None:
-        return None
-    try:
-        info = fn()
-    except (OSError, FileNotFoundError):
+    info = _os_release_info()
+    if not info:
         return None
     pretty = info.get("PRETTY_NAME") or info.get("NAME")
     return pretty or None
+
+
+def _rocm_distro_tier() -> tuple[str, str | None]:
+    """G2.3: classify the active distro into a ROCm support tier.
+
+    Returns ``(tier, pretty_name_or_None)``. On non-Linux this returns
+    ``("unsupported", None)`` — surfaced only when the active backend is
+    ROCm (callers gate on ``backend == "rocm"`` so it doesn't appear on
+    CUDA / MPS / CPU). Pure-ish wrapper around :func:`tier_for_system`.
+    """
+    info = _os_release_info()
+    pretty = (info.get("PRETTY_NAME") if info else None) or (
+        info.get("NAME") if info else None
+    )
+    tier = tier_for_system(platform.system(), info)
+    return tier, pretty or None
 
 
 def main() -> int:
@@ -79,6 +112,12 @@ def main() -> int:
                 print(f"  GFX target:       {arch}")
         if backend == "rocm" and _is_rdna2():
             print("  Note: RDNA 2 detected — auto-applying CT2_CUDA_ALLOCATOR=cub_caching")
+        # G2.3: classify the Linux distro against AMD's official matrix.
+        # Only meaningful on ROCm — on CUDA / MPS / CPU the user doesn't
+        # care which Radeon-supporting distro they're on.
+        if backend == "rocm":
+            tier, pretty = _rocm_distro_tier()
+            print(f"  {detected_tier_line(pretty, tier)}")
         # G2.1: surface the pinned CT2 ROCm wheel version (and warn on drift)
         # only when the active backend is ROCm — on CUDA / MPS / CPU the
         # ctranslate2 build that's installed is unrelated to the ROCm pin.

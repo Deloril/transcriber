@@ -91,12 +91,21 @@ Verify it took:
 .venv/bin/python -m scribe.scripts.check_rocm   # smoke-tests the full layer
 ```
 
-Caveats:
-- AMD officially supports Ubuntu 22.04/24.04 and RHEL 9.7/10.1 for consumer
-  Radeons. Other distros (Fedora, Arch, Debian) work in practice but aren't in
-  AMD's matrix.
+Distro support tiers (G2.3) — what each label means when it shows up
+in `python -m scribe.devices`:
+
+| Tier          | Distros                                     | What this means                                                   |
+|---------------|---------------------------------------------|-------------------------------------------------------------------|
+| `first-class` | Ubuntu 22.04, Ubuntu 24.04                  | AMD-officially-supported and tested by Scribe                     |
+| `supported`   | RHEL 9, RHEL 10                             | AMD-officially-supported; Scribe doesn't actively test on it      |
+| `best-effort` | Fedora, Arch, Debian, openSUSE, derivatives | Not in AMD's matrix; works in practice via upstream packages      |
+| `unsupported` | Windows, macOS                              | No ROCm wheels available on the official PyTorch index            |
+
+Other caveats:
 - RDNA 2 cards may also need `export HSA_OVERRIDE_GFX_VERSION=10.3.0` if they
   hit allocator faults; Scribe sets `CT2_CUDA_ALLOCATOR=cub_caching` for you.
+- Windows AMD is Tier 3 — the path forward is whisper.cpp Vulkan, which
+  Scribe doesn't integrate yet. `setup.sh --rocm` refuses to run there.
 - See `docs/research/amd-rocm-research.md` for the full hardware/distro
   picture and known upstream bugs.
 
