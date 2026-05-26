@@ -2946,3 +2946,97 @@ export function gateForceOnPayload(currentCfg) {
   };
 }
 
+
+// ----------------------------------------------------------------------
+// F8.13 — inline AI-gate status block for the source-coding surface
+//
+// When ✨ Suggest with AI / 🔎 Find similar quotes / Review pass calls
+// an AI endpoint and the gate is closed, the response is HTTP 412 with
+// a structured body::
+//
+//   { detail: "AI gate not satisfied", gate: { ...AIGateStatus dict } }
+//
+// FastAPI wraps custom HTTPException bodies in ``{detail: <our body>}``
+// when the original ``HTTPException(status_code, detail=...)`` carried
+// a non-string detail. The two helpers below absorb both that envelope
+// and the structured gate payload, then build the inline replacement
+// for the old plain-text "AI gate closed" message.
+//
+// extractGateStatus(detail) returns ``{gate, message}`` from whatever
+// the response.json() produced, or ``null`` when no gate payload is
+// present (so callers can fall back to their generic error path).
+//
+// renderInlineGateBlockHtml(status, opts) builds the HTML block the
+// page substitutes for the old plain-text error. It includes the
+// gate's stable message, the formatGateProgress() summary, a one-click
+// "Force open" button (data-gate-action="force-on"), and a "Configure"
+// link to /projects/<pid>/ai.
+//
+// The page-side click handler reads ``data-gate-action`` to decide
+// whether to PUT /ai/gate; the retry-the-original-action callback is
+// page-specific and not part of this pure helper.
+// ----------------------------------------------------------------------
+
+function _gateEsc(s) {
+  // Local micro-escape so the helper has zero deps. Mirrors the page's
+  // escapeHtml() for the same five entities. Keeping it local avoids
+  // exposing a generic escapeHtml from helpers.mjs that other modules
+  // would then come to depend on.
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+export function extractGateStatus(detail) {
+  if (!detail || typeof detail !== "object") return null;
+  // FastAPI: HTTPException(412, {"detail": "...", "gate": {...}})
+  // arrives at the client as { detail: { detail: "...", gate: {...} } }.
+  // Some callers may already have unwrapped one layer; accept both.
+  const inner = (detail.detail && typeof detail.detail === "object")
+    ? detail.detail : detail;
+  const gate = inner && inner.gate;
+  if (!gate || typeof gate !== "object") return null;
+  let message = "";
+  if (typeof gate.message === "string" && gate.message) {
+    message = gate.message;
+  } else if (typeof inner.detail === "string" && inner.detail) {
+    message = inner.detail;
+  } else {
+    message = "AI gate not satisfied";
+  }
+  return { gate, message };
+}
+
+export function renderInlineGateBlockHtml(status, opts) {
+  if (!status || typeof status !== "object") return "";
+  const options = opts && typeof opts === "object" ? opts : {};
+  const projectId = options.projectId ? String(options.projectId) : "";
+  const allowForceOn = options.allowForceOn !== false;
+  const message = String(status.message || "AI gate not satisfied");
+  const progress = formatGateProgress(status);
+  const reason = status.reason ? String(status.reason) : "";
+  const settingsHref = projectId
+    ? `/projects/${encodeURIComponent(projectId)}/ai` : "";
+  const forceBtn = allowForceOn
+    ? (`<button type="button"
+              class="ai-gate-inline-force-on"
+              data-test-id="ai-gate-inline-force-on"
+              data-gate-action="force-on">`
+       + `Force open AI for this project</button>`)
+    : "";
+  const settingsLink = settingsHref
+    ? (`<a class="ai-gate-inline-settings"
+            data-test-id="ai-gate-inline-settings-link"
+            href="${_gateEsc(settingsHref)}">Open AI settings</a>`)
+    : "";
+  const progressLine = progress
+    ? `<div class="ai-gate-inline-progress">${_gateEsc(progress)}</div>` : "";
+  return `<div class="ai-gate-inline"
+              data-test-id="ai-gate-inline-block"
+              data-gate-reason="${_gateEsc(reason)}">`
+    + `<div class="ai-gate-inline-msg">${_gateEsc(message)}</div>`
+    + progressLine
+    + `<div class="ai-gate-inline-actions">${forceBtn}${settingsLink}</div>`
+    + `</div>`;
+}
+

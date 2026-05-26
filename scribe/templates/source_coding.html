@@ -294,6 +294,60 @@
     margin-top: 2px;
   }
 
+  /* F8.13 — inline AI gate block. Substitutes the old plain-text "AI
+     gate not satisfied" message with a structured block (progress
+     line + Force-open button + Open AI settings link). Used in the
+     popover's ai-panel, the similar-quotes modal status pane, and the
+     review-pass status pane — same look in all three so users learn
+     the affordance once. The .ai-gate-inline-* test ids let TestClient
+     scrape the rendered template; the same block is exercised live in
+     tests/js/ai-gate-inline.test.mjs. */
+  .ai-gate-inline {
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: var(--panel-2);
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .ai-gate-inline .ai-gate-inline-msg {
+    color: var(--text);
+    font-weight: 500;
+    margin-bottom: 4px;
+  }
+  .ai-gate-inline .ai-gate-inline-progress {
+    color: var(--muted);
+    font-size: 11px;
+    margin-bottom: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+  .ai-gate-inline .ai-gate-inline-actions {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .ai-gate-inline .ai-gate-inline-force-on {
+    background: var(--accent);
+    color: var(--bg);
+    border: 0;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .ai-gate-inline .ai-gate-inline-force-on:hover { filter: brightness(1.1); }
+  .ai-gate-inline .ai-gate-inline-force-on[disabled] {
+    opacity: .55; cursor: progress;
+  }
+  .ai-gate-inline .ai-gate-inline-settings {
+    color: var(--accent-2);
+    font-size: 11px;
+    text-decoration: underline;
+  }
+  .ai-gate-inline .ai-gate-inline-settings:hover { color: var(--text); }
+
   /* Side panel — applications already on this source. */
   .side-card { padding: 14px 16px; }
 
@@ -1080,6 +1134,9 @@ import {
   defaultMemoTypeForTarget,
   MEMO_TYPES,
   MEMO_LINK_TARGET_TYPES,
+  extractGateStatus,
+  renderInlineGateBlockHtml,
+  gateForceOnPayload,
 } from "/static/js/helpers.mjs";
 window.__snap = { snapToWord, snapToSentence, snapToParagraph };
 window.__playback = { playbackRangeForApplication, buildWordTimeMap };
@@ -1092,9 +1149,20 @@ window.__memoCtx = {
   MEMO_TYPES,
   MEMO_LINK_TARGET_TYPES,
 };
+// F8.13 — expose the inline AI-gate helpers so the 412-handler in the
+// classic-script block below can render an actionable status block
+// (with a Force-open button) instead of plain text. tests/js/ai-gate-
+// inline.test.mjs covers the helpers; tests/test_server_ai_gate_inline.py
+// pins the surface this block reaches into.
+window.__aiGate = {
+  extractGateStatus,
+  renderInlineGateBlockHtml,
+  gateForceOnPayload,
+};
 window.dispatchEvent(new CustomEvent("scribe:snap-ready"));
 window.dispatchEvent(new CustomEvent("scribe:playback-ready"));
 window.dispatchEvent(new CustomEvent("scribe:memo-ctx-ready"));
+window.dispatchEvent(new CustomEvent("scribe:ai-gate-ready"));
 </script>
 <script>
 const PROJECT_ID = {{ project_id | tojson }};
@@ -2125,6 +2193,116 @@ document.getElementById("popList").addEventListener("click", async (e) => {
   hidePopover();
 });
 
+// ---------- F8.13 — inline AI gate (shared by 412 handlers) ----------
+//
+// When any AI endpoint returns 412, the page used to dump the gate's
+// `message` string into the status pane and leave the user staring at
+// "AI suggestions disabled until you have ≥ 8 codes…" with no path
+// forward. F8.13 turns that into an actionable block: progress
+// counters, a one-click "Force open" button, and a deep link to
+// /projects/<pid>/ai for full settings. The helpers
+// (`extractGateStatus`, `renderInlineGateBlockHtml`, `gateForceOnPayload`)
+// are pure and live in helpers.mjs (covered by tests/js/ai-gate-
+// inline.test.mjs); the page-side wiring below is the wrapper that
+// turns a `Response` into HTML, then exposes a single retry handler so
+// each AI flow can register its retry callback.
+//
+// Cached so the Force-open PUT preserves the user's saved thresholds
+// rather than overwriting them with spec defaults. Refreshed on the
+// first 412 we see; mutated after a successful PUT.
+let _AI_GATE_CFG_CACHE = null;
+const _AI_GATE_RETRY = { fn: null };
+
+async function _readJsonSafe(r) {
+  try { return await r.json(); } catch (_) { return {}; }
+}
+
+async function _refreshGateCfg() {
+  // Best-effort GET so the Force-open PUT preserves min_codes / min_
+  // hand_coded_sources / enabled. Failure is silent — gateForceOnPayload
+  // falls back to the spec defaults (8 / 2 / true).
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(PROJECT_ID)}/ai/gate`);
+    if (!r.ok) return;
+    const body = await r.json();
+    if (body && body.config) _AI_GATE_CFG_CACHE = body.config;
+  } catch (_) { /* best-effort */ }
+}
+
+// Render the inline block + a fallback line if the body isn't a gate
+// payload (e.g. legitimate 400 / 500). Returns the HTML string the
+// caller drops into its own status node.
+function buildAiErrorHtml(detail, fallbackStatus) {
+  const helpers = window.__aiGate || {};
+  const status = helpers.extractGateStatus
+    ? helpers.extractGateStatus(detail) : null;
+  if (status) {
+    if (!_AI_GATE_CFG_CACHE) _refreshGateCfg();  // fire & forget
+    return helpers.renderInlineGateBlockHtml(
+      status.gate, { projectId: PROJECT_ID, allowForceOn: true }
+    );
+  }
+  // Non-gate error: surface whatever message we can find.
+  const inner = (detail && typeof detail === "object" && detail.detail) || detail;
+  let msg;
+  if (inner == null) {
+    msg = `HTTP ${fallbackStatus || "?"}`;
+  } else if (typeof inner === "string") {
+    msg = inner;
+  } else {
+    msg = JSON.stringify(inner);
+  }
+  return `<span class="ai-err">${escapeHtml(msg)}</span>`;
+}
+
+// One handler at the document level so the same delegated click works
+// for every embedded inline-gate block (popover panel, similar modal,
+// review pass, etc). The "retry" callback is set by whichever flow
+// rendered the block; clicking the Force-open button PUTs override =
+// force_on then re-invokes that callback.
+async function _forceOpenGateAndRetry(triggerBtn) {
+  const helpers = window.__aiGate || {};
+  if (!helpers.gateForceOnPayload) return;
+  if (triggerBtn) triggerBtn.disabled = true;
+  try {
+    const payload = helpers.gateForceOnPayload(_AI_GATE_CFG_CACHE);
+    const r = await fetch(`/api/projects/${encodeURIComponent(PROJECT_ID)}/ai/gate`, {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const detail = await _readJsonSafe(r);
+      const msg = (detail && (detail.detail || detail.message)) || `HTTP ${r.status}`;
+      if (triggerBtn) {
+        const block = triggerBtn.closest(".ai-gate-inline");
+        if (block) {
+          const msgEl = block.querySelector(".ai-gate-inline-msg");
+          if (msgEl) msgEl.textContent = `Could not open AI: ${msg}`;
+        }
+      }
+      return;
+    }
+    const body = await r.json();
+    if (body && body.config) _AI_GATE_CFG_CACHE = body.config;
+    const retry = _AI_GATE_RETRY.fn;
+    _AI_GATE_RETRY.fn = null;
+    if (typeof retry === "function") {
+      try { await retry(); } catch (_) { /* swallow — caller owns its UI */ }
+    }
+  } finally {
+    if (triggerBtn) triggerBtn.disabled = false;
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest('[data-gate-action="force-on"]');
+  if (!btn) return;
+  e.preventDefault();
+  _forceOpenGateAndRetry(btn);
+});
+
+
 // ---------- AI suggestions (F8.3 / F8.4) ----------
 //
 // "Suggest with AI" calls POST /api/projects/<pid>/ai/suggestions with
@@ -2167,15 +2345,13 @@ async function suggestWithAi(mode) {
       }),
     });
     if (!r.ok) {
-      // 412 means the AI gate is closed (F8.10). The body has a
-      // structured gate status the user can act on; show its message.
-      let detail = {};
-      try { detail = await r.json(); } catch (e) {}
-      const inner = (detail && detail.detail) || detail;
-      const msg = (typeof inner === "object" && inner)
-        ? (inner.gate && inner.gate.message) || inner.detail || JSON.stringify(inner)
-        : (inner || `HTTP ${r.status}`);
-      showAiStatus(`<span class="ai-err">${escapeHtml(msg)}</span>`);
+      // 412 → the F8.10 AI gate is closed. F8.13 swaps the old plain-
+      // text message for an inline block with a one-click "Force open"
+      // button; the retry callback below re-fires this same call once
+      // the gate is open.
+      const detail = await _readJsonSafe(r);
+      _AI_GATE_RETRY.fn = () => suggestWithAi(mode);
+      showAiStatus(buildAiErrorHtml(detail, r.status));
       return;
     }
     const body = await r.json();
@@ -2934,17 +3110,14 @@ async function findSimilarQuotesForApp(appId, btn) {
       },
     );
     if (!r.ok) {
-      // 412 means the AI gate is closed (F8.10). Surface the gate
-      // message directly so the user can act on it (the project AI
-      // page has the override toggle).
-      let detail = {};
-      try { detail = await r.json(); } catch (_) {}
-      const inner = (detail && detail.detail) || detail;
-      const msg = (typeof inner === "object" && inner)
-        ? (inner.gate && inner.gate.message) || inner.detail || JSON.stringify(inner)
-        : (inner || `HTTP ${r.status}`);
+      // 412 → F8.10 AI gate closed. F8.13 surfaces the structured
+      // gate status with a Force-open button right inside the modal,
+      // and registers this call as the retry so a successful override
+      // re-runs the search.
+      const detail = await _readJsonSafe(r);
+      _AI_GATE_RETRY.fn = () => findSimilarQuotesForApp(appId, btn);
       document.getElementById("similarStatus").innerHTML =
-        `<span class="err">${escapeHtml(msg)}</span>`;
+        buildAiErrorHtml(detail, r.status);
       return;
     }
     const body = await r.json();
@@ -3197,13 +3370,11 @@ async function startReviewPass() {
       },
     );
     if (!r.ok) {
-      let detail = {};
-      try { detail = await r.json(); } catch (_) {}
-      const inner = (detail && detail.detail) || detail;
-      const msg = (typeof inner === "object" && inner)
-        ? (inner.gate && inner.gate.message) || inner.detail || JSON.stringify(inner)
-        : (inner || `HTTP ${r.status}`);
-      status.innerHTML = `<span class="err">${escapeHtml(msg)}</span>`;
+      // 412 → F8.10 AI gate closed. F8.13 swaps in the inline block
+      // with Force-open + retry of the original POST.
+      const detail = await _readJsonSafe(r);
+      _AI_GATE_RETRY.fn = () => startReviewPass();
+      status.innerHTML = buildAiErrorHtml(detail, r.status);
       return;
     }
     const body = await r.json();
@@ -3238,13 +3409,11 @@ async function runReviewPassMore() {
       },
     );
     if (!r.ok) {
-      let detail = {};
-      try { detail = await r.json(); } catch (_) {}
-      const inner = (detail && detail.detail) || detail;
-      const msg = (typeof inner === "object" && inner)
-        ? (inner.gate && inner.gate.message) || inner.detail || JSON.stringify(inner)
-        : (inner || `HTTP ${r.status}`);
-      status.innerHTML = `<span class="err">${escapeHtml(msg)}</span>`;
+      // 412 → F8.10 AI gate closed. F8.13 surfaces the inline block;
+      // the retry callback continues the same review pass.
+      const detail = await _readJsonSafe(r);
+      _AI_GATE_RETRY.fn = () => runReviewPassMore();
+      status.innerHTML = buildAiErrorHtml(detail, r.status);
       return;
     }
     const body = await r.json();
