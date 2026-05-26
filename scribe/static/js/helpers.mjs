@@ -92,9 +92,10 @@ export function formatBackendLabel(backend) {
  * Build the {label, value, sub, warning} stat-tile dict for the active
  * GPU backend. ``gpu`` is the ``capabilities.gpu`` object returned by
  * the server: ``{ backend, device_name, vram_gb, gfx_target?, distro?,
- * ct2_rocm_pin?, ct2_installed?, ct2_drift_message? }``. Returns
- * ``null`` when ``gpu`` is missing — the renderer should then skip
- * the tile entirely rather than show a placeholder.
+ * ct2_rocm_pin?, ct2_installed?, ct2_drift_message?,
+ * ct2_rocm_fallback_urls? }``. Returns ``null`` when ``gpu`` is missing
+ * — the renderer should then skip the tile entirely rather than show a
+ * placeholder.
  *
  * Sub-line composition (G2.1 extends G1.3 extends G1.4):
  *   - device name (when present)
@@ -112,6 +113,16 @@ export function formatBackendLabel(backend) {
  *     terminal to run ``python -m scribe.devices``. Suppressed on
  *     CUDA / MPS / CPU because a non-ROCm user's ``ctranslate2``
  *     install is unrelated to the AMD pin.
+ *   - **G2.2** CT2 wheel fallback-mirror count (only on ROCm with at
+ *     least one mirror configured; ``+1 mirror`` / ``+3 mirrors``).
+ *     This is the user-configured ``SCRIBE_CT2_ROCM_FALLBACK_URLS``
+ *     list that ``setup.sh --rocm`` walks if the primary GitHub URL
+ *     is unreachable. Surfacing the count in the tile lets an
+ *     air-gapped researcher confirm the env var survived the shell
+ *     plumbing without dropping to ``python -m scribe.devices``.
+ *     Suppressed on CUDA / MPS / CPU (the API also nulls the field
+ *     there) and on ROCm with no mirrors configured (no point
+ *     printing "+0 mirrors").
  *
  * The sub line collapses to ``null`` when every component is missing
  * (e.g. CPU backend on a Mac with no discrete GPU), so the renderer
@@ -145,6 +156,16 @@ export function backendStatTile(gpu) {
   // ``ct2_rocm_pin`` is null on CUDA / MPS / CPU; the API guards that
   // for us so we just check for a non-empty string here.
   if (gpu.ct2_rocm_pin) parts.push(`CT2 v${String(gpu.ct2_rocm_pin)}`);
+  // G2.2: surface the user-configured fallback-mirror count on ROCm
+  // when at least one mirror is set. ``ct2_rocm_fallback_urls`` is
+  // null on non-ROCm backends and an empty array on ROCm with no
+  // mirrors; we render "+N mirror(s)" only when there's something
+  // worth showing. Defensive against non-array shapes (an external
+  // proxy munging the JSON shouldn't crash the home page).
+  const mirrors = gpu.ct2_rocm_fallback_urls;
+  if (Array.isArray(mirrors) && mirrors.length > 0) {
+    parts.push(`+${mirrors.length} ${mirrors.length === 1 ? "mirror" : "mirrors"}`);
+  }
   // G2.1 drift warning. Falsy ``ct2_drift_message`` (null / undefined /
   // empty string) means no drift — the tile renders without a warning
   // banner. Anything truthy is passed through verbatim; the server

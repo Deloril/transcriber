@@ -406,3 +406,158 @@ describe("backendStatTile (G2.1 CT2 ROCm pin + drift)", () => {
     expect(tile.warning).toContain("./setup.sh --rocm");
   });
 });
+
+// ---------- G2.2: CT2 ROCm wheel fallback-mirror count on the sub-line ----------
+//
+// G2.2 added ``gpu.ct2_rocm_fallback_urls`` to the /api/capabilities
+// payload — the user-configured ``SCRIBE_CT2_ROCM_FALLBACK_URLS`` list
+// that ``setup.sh --rocm`` walks if the primary GitHub URL is
+// unreachable (corporate firewall, GitHub outage, air-gapped box). The
+// home page Recording details card surfaces the count via the
+// ``backendStatTile()`` sub-line so an air-gapped researcher who set
+// the env var can confirm the value survived the shell plumbing
+// without dropping to ``python -m scribe.devices``.
+//
+// Contract:
+//   - non-ROCm backends: ``ct2_rocm_fallback_urls`` is null
+//     (the field doesn't apply); tile sub-line stays clean.
+//   - ROCm + no mirrors:  ``ct2_rocm_fallback_urls`` is []; tile
+//     sub-line stays clean (no point printing "+0 mirrors").
+//   - ROCm + N mirrors:   ``ct2_rocm_fallback_urls`` is [...] with
+//     length N; tile sub-line gains "+N mirror" / "+N mirrors".
+
+describe("backendStatTile (G2.2 CT2 ROCm fallback mirrors)", () => {
+  it("appends '+1 mirror' to ROCm sub-line when one mirror configured", () => {
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      gfx_target: "gfx1100",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.7.2",
+      ct2_drift_message: null,
+      ct2_rocm_fallback_urls: ["https://lab-mirror.internal/ct2-rocm.zip"],
+    });
+    expect(tile.sub).toBe(
+      "AMD Radeon RX 7900 XTX · 24 GB VRAM · gfx1100 · " +
+      "Ubuntu 24.04.4 LTS · CT2 v4.7.2 · +1 mirror"
+    );
+  });
+
+  it("appends '+N mirrors' (plural) when multiple mirrors configured", () => {
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      gfx_target: "gfx1100",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.7.2",
+      ct2_drift_message: null,
+      ct2_rocm_fallback_urls: [
+        "https://internal-mirror/a.zip",
+        "https://backup-mirror/b.zip",
+        "https://offsite-mirror/c.zip",
+      ],
+    });
+    expect(tile.sub).toBe(
+      "AMD Radeon RX 7900 XTX · 24 GB VRAM · gfx1100 · " +
+      "Ubuntu 24.04.4 LTS · CT2 v4.7.2 · +3 mirrors"
+    );
+  });
+
+  it("omits mirror segment when ROCm payload carries empty list", () => {
+    // ROCm box, no env var set → API returns []; tile sub-line stays
+    // clean (no "+0 mirrors" noise).
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      ct2_rocm_pin: "4.7.2",
+      ct2_rocm_fallback_urls: [],
+    });
+    expect(tile.sub).toBe(
+      "AMD Radeon RX 7900 XTX · 24 GB VRAM · CT2 v4.7.2"
+    );
+    // Pin: no mirror substring at all.
+    expect(tile.sub).not.toContain("mirror");
+  });
+
+  it("omits mirror segment when field is null (non-ROCm backend)", () => {
+    // CUDA box → API returns null; tile sub-line stays clean.
+    const tile = backendStatTile({
+      backend: "cuda",
+      device_name: "NVIDIA GeForce RTX 4090",
+      vram_gb: 24.0,
+      ct2_rocm_pin: null,
+      ct2_rocm_fallback_urls: null,
+    });
+    expect(tile.sub).toBe("NVIDIA GeForce RTX 4090 · 24 GB VRAM");
+    expect(tile.sub).not.toContain("mirror");
+  });
+
+  it("omits mirror segment when field is missing entirely", () => {
+    // Defensive: an older API version that doesn't carry the field
+    // shouldn't make the tile blow up.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+    });
+    expect(tile.sub).toBe("AMD Radeon RX 7900 XTX · 24 GB VRAM");
+    expect(tile.sub).not.toContain("mirror");
+  });
+
+  it("does not crash when fallback field is malformed (not an array)", () => {
+    // Defensive: a proxy munging the JSON shouldn't crash the home
+    // page. The Array.isArray guard collapses non-arrays to "no
+    // mirrors".
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      ct2_rocm_fallback_urls: "https://only/a.zip",  // wrong shape
+    });
+    expect(tile.sub).toBe("AMD Radeon RX 7900 XTX · 24 GB VRAM");
+  });
+
+  it("renders mirror segment alongside drift warning (worst-case ROCm)", () => {
+    // The realistic worst-case ROCm tile: drift detected AND mirrors
+    // configured (admin set fallbacks because primary GitHub URL is
+    // blocked, then pip drifted CT2). The tile must surface both —
+    // the warning in `warning`, the count in the sub-line.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      gfx_target: "gfx1100",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.6.0",
+      ct2_drift_message:
+        "ctranslate2 v4.6.0 installed; pinned ROCm wheel is v4.7.2 " +
+        "(run ./setup.sh --rocm to realign)",
+      ct2_rocm_fallback_urls: [
+        "https://lab-mirror.internal/a.zip",
+        "https://backup-mirror.internal/b.zip",
+      ],
+    });
+    expect(tile.sub).toContain("+2 mirrors");
+    expect(tile.warning).toContain("./setup.sh --rocm");
+  });
+
+  it("preserves the GPU tile shape (label / value / sub / warning)", () => {
+    // Pin the contract: G2.2 is additive — the four-key tile shape
+    // is unchanged, only the sub-line composition gains a segment.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      ct2_rocm_fallback_urls: ["https://m1/a.zip"],
+    });
+    expect(Object.keys(tile).sort()).toEqual(
+      ["label", "sub", "value", "warning"]
+    );
+  });
+});

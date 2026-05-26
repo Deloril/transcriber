@@ -268,6 +268,7 @@ class TestG1_3ApiCapabilitiesExposesTriageContext:
         assert set(body["gpu"].keys()) == {
             "backend", "device_name", "vram_gb", "gfx_target", "distro",
             "ct2_rocm_pin", "ct2_installed", "ct2_drift_message",
+            "ct2_rocm_fallback_urls",
         }
 
     def test_capabilities_swallows_helper_exception(

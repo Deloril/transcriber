@@ -198,6 +198,7 @@ class TestG1_1ApiCapabilitiesUsesHelperChain:
         assert set(gpu.keys()) == {
             "backend", "device_name", "vram_gb", "gfx_target", "distro",
             "ct2_rocm_pin", "ct2_installed", "ct2_drift_message",
+            "ct2_rocm_fallback_urls",
         }
         assert gpu["backend"] == "rocm"
         assert gpu["device_name"] == "Radeon RX 7900 XTX"

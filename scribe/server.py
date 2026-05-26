@@ -925,6 +925,18 @@ async def capabilities() -> JSONResponse:
     ``scribe.rocm_install`` so showing it would just be noise. The CLI
     surface (``python -m scribe.devices``) prints the same fields; the
     home page Backend tile surfaces them through ``backendStatTile()``.
+
+    G2.2: ``gpu.ct2_rocm_fallback_urls`` carries the user-configured
+    CT2 ROCm wheel-mirror fallbacks (``SCRIBE_CT2_ROCM_FALLBACK_URLS``
+    env var, comma-separated). It's an empty list when the env var is
+    unset, and ``None`` (not just empty) on every non-ROCm backend so
+    the JS tile can cleanly distinguish "no mirrors configured" from
+    "mirrors don't apply on this backend". The CLI surface
+    (``python -m scribe.devices``) prints the same list under the
+    ``CT2 wheel mirrors:`` header on ROCm only; the home page Backend
+    tile appends "+N mirror(s)" to the sub-line so a researcher who
+    set the env var for an air-gapped install can verify the value
+    survived without dropping to a terminal.
     """
     from .parakeet import nemo_available
     from .engine import gpu_backend, _gpu_device_name, _cuda_vram_gb, gpu_arch_name
@@ -933,6 +945,7 @@ async def capabilities() -> JSONResponse:
         ct2_drift_message,
         installed_ct2_version,
         pinned_ct2_rocm_version,
+        rocm_wheel_fallback_urls,
     )
     parakeet_ok, parakeet_err = nemo_available()
     backend = gpu_backend()
@@ -963,6 +976,11 @@ async def capabilities() -> JSONResponse:
     ct2_rocm_pin: str | None = None
     ct2_installed: str | None = None
     ct2_drift: str | None = None
+    # G2.2: ``None`` on non-ROCm backends (so the JS tile knows the
+    # field doesn't apply); empty list on ROCm with no mirrors
+    # configured; populated list when the user has set
+    # ``SCRIBE_CT2_ROCM_FALLBACK_URLS``.
+    ct2_rocm_fallback_urls: list[str] | None = None
     if backend == "rocm":
         try:
             ct2_rocm_pin = pinned_ct2_rocm_version()
@@ -978,6 +996,10 @@ async def capabilities() -> JSONResponse:
             )
         except Exception:  # noqa: BLE001
             ct2_drift = None
+        try:
+            ct2_rocm_fallback_urls = list(rocm_wheel_fallback_urls())
+        except Exception:  # noqa: BLE001
+            ct2_rocm_fallback_urls = []
     return JSONResponse({
         "parakeet": {
             "available": parakeet_runtime_ok,
@@ -994,6 +1016,7 @@ async def capabilities() -> JSONResponse:
             "ct2_rocm_pin": ct2_rocm_pin,
             "ct2_installed": ct2_installed,
             "ct2_drift_message": ct2_drift,
+            "ct2_rocm_fallback_urls": ct2_rocm_fallback_urls,
         },
     })
 
