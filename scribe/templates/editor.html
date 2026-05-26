@@ -400,6 +400,7 @@
     <a href="/">← Back</a>
     <a href="/library" title="All transcriptions">Library</a>
     <a href="/projects" title="Research projects (academic coding)">Projects</a>
+    <a id="codingViewLink" href="#" title="Open this transcription in its project's coding view" style="display:none">🗂 Code</a>
     <span class="title">Editing <strong>{{ input_filename }}</strong></span>
     <span id="saveStatus" class="save-status">No changes</span>
     <button id="searchBtn" title="Search (⌘F / Ctrl+F)">🔍</button>
@@ -735,6 +736,24 @@ import {
     if (!state.speaker_names) state.speaker_names = {};
     lastSavedSnapshot = snapshot();
     render();
+
+    // Surface a "🗂 Code" link in the topbar if this transcription has been
+    // attached to a project. Best-effort — the endpoint scans projects on
+    // disk, so a missing /api/job/<id>/projects (e.g. older server) fails
+    // silently.
+    fetch(`/api/job/${JOB_ID}/projects`).then(r => r.ok ? r.json() : null).then(d => {
+      if (!d || !Array.isArray(d.projects) || !d.projects.length) return;
+      // Pick the most-recent project (sorted server-side).
+      const m = d.projects[0];
+      const link = document.getElementById("codingViewLink");
+      link.href = `/projects/${m.project_id}/sources/${m.source_id}`;
+      const label = (d.projects.length > 1)
+        ? `🗂 Code (${d.projects.length} projects)`
+        : `🗂 Code in "${m.project_name || "project"}"`;
+      link.textContent = label;
+      link.title = link.title + ` — ${d.projects.length} project${d.projects.length === 1 ? "" : "s"}`;
+      link.style.display = "";
+    }).catch(() => { /* best-effort */ });
 
     // F10.2 — peek at the job-status endpoint to learn whether the
     // source media was discarded. We do this *before* attaching the

@@ -1,91 +1,187 @@
 {% extends "_shell.html" %}
 {% set active_nav = "projects" %}
 {% block title %}{{ project_name or "Project" }}{% endblock %}
-{% block heading %}{{ project_name or "Project" }}{% endblock %}
+{% block heading %}<span id="hdrName">{{ project_name or "Project" }}</span>{% endblock %}
 
 {% block subtitle_block %}
-  <span class="sub">
+  <span class="sub" id="hdrSub">
     {% if project_methodology %}{{ project_methodology }} · {% endif %}
     Stage: {{ project_stage or "initial" }}
   </span>
 {% endblock %}
 
 {% block actions %}
-  <a class="btn secondary" href="/projects/{{ project_id }}/audit">Audit log</a>
-  <a class="btn secondary" href="/projects/{{ project_id }}/settings">Settings</a>
+  <a class="btn secondary" href="/projects">All projects</a>
+{% endblock %}
+
+{% block extra_styles %}
+  .ph-grid {
+    display: grid; gap: 14px;
+    grid-template-columns: 1fr 1fr;
+  }
+  @media (max-width: 900px) { .ph-grid { grid-template-columns: 1fr; } }
+  .ph-card h2 { display: flex; align-items: center; gap: 8px; }
+  .ph-card h2 .count {
+    font-size: 11px; color: var(--muted);
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 1px 8px; font-weight: 500;
+  }
+  .ph-card .item {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .ph-card .item:last-child { border-bottom: 0; }
+  .ph-card .item a { color: var(--text); }
+  .ph-card .item a:hover { color: var(--accent); }
+  .ph-card .more { padding: 8px 10px; font-size: 12px; color: var(--muted); }
+  .ph-empty { color: var(--muted); font-size: 13px; padding: 8px 10px; }
 {% endblock %}
 
 {% block body %}
-<div class="stub">
-  <strong>Wireframe.</strong> Project home — the dashboard for one research project. Pulls from
-  <code>/api/projects/{{ project_id }}</code>. Real data loads via the JS at the bottom; if the API isn't there
-  yet, the wireframe blocks show what the cards will hold.
-</div>
-
 <nav style="display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap">
-  <a class="btn secondary" href="/projects/{{ project_id }}">Overview</a>
   <a class="btn secondary" href="/projects/{{ project_id }}/sources">Sources</a>
   <a class="btn secondary" href="/projects/{{ project_id }}/codebook">Codebook</a>
   <a class="btn secondary" href="/projects/{{ project_id }}/queries">Queries</a>
   <a class="btn secondary" href="/projects/{{ project_id }}/memos">Memos</a>
-  <a class="btn secondary" href="/projects/{{ project_id }}/ai">AI suggestions</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/ai">AI</a>
   <a class="btn secondary" href="/projects/{{ project_id }}/audit">Audit</a>
 </nav>
 
-<div class="grid two">
-  <div class="card">
-    <h2>Sources</h2>
-    <div class="wf">
-      <span class="label">Wireframe</span><br>
-      Count + last 5 sources + "Add source" button.<br>
-      <strong>Backed by:</strong> <code>F1.2</code>, <code>F1.3</code>, <code>F3.3</code>, <code>F10.3</code>.
+<div class="ph-grid">
+  <div class="card ph-card">
+    <h2>Sources <span class="count" id="srcCount">…</span></h2>
+    <div id="srcList">
+      <div class="ph-empty">Loading…</div>
+    </div>
+    <div style="margin-top:10px">
+      <a class="btn" href="/projects/{{ project_id }}/sources/add">+ Add source</a>
+      <a class="btn secondary" href="/projects/{{ project_id }}/sources">View all</a>
     </div>
   </div>
 
-  <div class="card">
-    <h2>Codebook</h2>
-    <div class="wf">
-      <span class="label">Wireframe</span><br>
-      Code count by stage (initial / focused / axial / theoretical), top frequent codes, recent edits.<br>
-      <strong>Backed by:</strong> <code>F2.1</code>, <code>F2.2</code>, <code>F9.3</code>.
+  <div class="card ph-card">
+    <h2>Codebook <span class="count" id="cbCount">…</span></h2>
+    <div id="cbList">
+      <div class="ph-empty">Loading…</div>
+    </div>
+    <div style="margin-top:10px">
+      <a class="btn secondary" href="/projects/{{ project_id }}/codebook">Open codebook</a>
     </div>
   </div>
 
-  <div class="card">
-    <h2>Recent memos</h2>
-    <div class="wf">
-      <span class="label">Wireframe</span><br>
-      Last 5 memos with type chip + linked code/source. "View all".<br>
-      <strong>Backed by:</strong> <code>F5.1</code>, <code>F5.4</code>.
+  <div class="card ph-card">
+    <h2>Coded segments <span class="count" id="appCount">…</span></h2>
+    <div id="appList">
+      <div class="ph-empty">Loading…</div>
     </div>
   </div>
 
-  <div class="card">
-    <h2>Theoretical sampling log</h2>
-    <div class="wf">
-      <span class="label">Wireframe</span><br>
-      Why each source was added; what category it was meant to fill.<br>
-      <strong>Backed by:</strong> <code>F1.4</code>.
+  <div class="card ph-card">
+    <h2>Recent memos <span class="count" id="memoCount">…</span></h2>
+    <div id="memoList">
+      <div class="ph-empty">Coming soon — once the memos UI graduates.</div>
     </div>
   </div>
 </div>
+{% endblock %}
 
-<div class="card">
-  <h2>Recent activity</h2>
-  <div class="wf">
-    <span class="label">Wireframe</span><br>
-    Chronological feed of project events: code applied, definition edited, codebook locked, memo written, AI suggestion accepted/rejected.<br>
-    <strong>Backed by:</strong> <code>F9.1</code> (event log) — already implemented; this view consumes it.
-  </div>
-</div>
-
+{% block scripts %}
 <script>
-  const PROJECT_ID = {{ project_id | tojson }};
-  fetch(`/api/projects/${PROJECT_ID}`).then(r => r.ok ? r.json() : null).then(p => {
-    if (!p) return;
-    // When the API gives us real data, swap the wireframe blocks for it.
-    // For now we just leave the wireframe in place — graduation work is
-    // F12.x territory.
-  }).catch(() => {});
+const PROJECT_ID = {{ project_id | tojson }};
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+
+async function loadProject() {
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}`);
+    if (!r.ok) return;
+    const p = await r.json();
+    if (p.name) document.getElementById("hdrName").textContent = p.name;
+    const subBits = [];
+    if (p.methodology) subBits.push(p.methodology);
+    if (p.codebook_stage) subBits.push("Stage: " + p.codebook_stage);
+    if (p.research_question) subBits.push("RQ: " + p.research_question.substring(0, 80));
+    document.getElementById("hdrSub").textContent = subBits.join(" · ");
+  } catch (_) {}
+}
+
+async function loadSources() {
+  const list = document.getElementById("srcList");
+  const count = document.getElementById("srcCount");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/sources`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const arr = data.sources || [];
+    count.textContent = arr.length;
+    if (!arr.length) {
+      list.innerHTML = `<div class="ph-empty">No sources attached. Add one →</div>`;
+      return;
+    }
+    const top = arr.slice(0, 5);
+    list.innerHTML = top.map(s =>
+      `<div class="item"><a href="/projects/${PROJECT_ID}/sources/${escapeHtml(s.id)}">${escapeHtml(s.name || "(unnamed)")}</a> <span class="hint">${escapeHtml(s.source_type || "transcript")}</span></div>`
+    ).join("");
+    if (arr.length > 5) {
+      list.innerHTML += `<div class="more">+ ${arr.length - 5} more</div>`;
+    }
+  } catch (e) {
+    list.innerHTML = `<div class="ph-empty" style="color:var(--err)">Error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function loadCodebook() {
+  const list = document.getElementById("cbList");
+  const count = document.getElementById("cbCount");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/codes`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const arr = data.codes || [];
+    count.textContent = arr.length;
+    if (!arr.length) {
+      list.innerHTML = `<div class="ph-empty">No codes yet. Open the codebook to add one →</div>`;
+      return;
+    }
+    const top = arr.slice(0, 5);
+    list.innerHTML = top.map(c =>
+      `<div class="item"><strong>${escapeHtml(c.name)}</strong> <span class="hint">${escapeHtml(c.stage || "initial")}</span></div>`
+    ).join("");
+    if (arr.length > 5) {
+      list.innerHTML += `<div class="more">+ ${arr.length - 5} more</div>`;
+    }
+  } catch (e) {
+    list.innerHTML = `<div class="ph-empty" style="color:var(--err)">Error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function loadApplications() {
+  const list = document.getElementById("appList");
+  const count = document.getElementById("appCount");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/applications`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const arr = data.applications || [];
+    count.textContent = arr.length;
+    if (!arr.length) {
+      list.innerHTML = `<div class="ph-empty">No coded segments yet. Open a source and highlight some text →</div>`;
+      return;
+    }
+    list.innerHTML = `<div class="ph-empty">${arr.length} application${arr.length === 1 ? "" : "s"} across this project. Open a source to see them in context.</div>`;
+  } catch (e) {
+    list.innerHTML = `<div class="ph-empty" style="color:var(--err)">Error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+loadProject();
+loadSources();
+loadCodebook();
+loadApplications();
 </script>
 {% endblock %}

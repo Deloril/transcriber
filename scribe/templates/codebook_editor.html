@@ -1,0 +1,206 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Codebook{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+{% endblock %}
+
+{% block extra_styles %}
+  .cb-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 900px) { .cb-grid { grid-template-columns: 1fr; } }
+  .cb-list { display: flex; flex-direction: column; gap: 8px; }
+  .cb-row {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex; align-items: center; gap: 10px;
+    cursor: pointer;
+    transition: border-color .1s;
+  }
+  .cb-row:hover { border-color: var(--accent); }
+  .cb-row.selected { border-color: var(--accent); background: rgba(122,167,255,.05); }
+  .cb-row .name { flex: 1; font-weight: 600; color: var(--text); }
+  .cb-row .stage { font-size: 11px; color: var(--muted); }
+  .cb-row .count {
+    font-size: 11px; color: var(--muted);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 999px; padding: 1px 7px;
+  }
+  .cb-row .del {
+    background: transparent; color: var(--muted);
+    border: 0; cursor: pointer; padding: 2px 6px;
+    border-radius: 4px; font-size: 14px;
+  }
+  .cb-row .del:hover { background: var(--err); color: white; }
+  .cb-form input, .cb-form textarea {
+    width: 100%;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 10px;
+    font: inherit; font-size: 13px;
+  }
+  .cb-form label {
+    display: block; font-size: 11px; color: var(--muted);
+    margin: 10px 0 4px;
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+{% endblock %}
+
+{% block body %}
+<div class="cb-grid">
+  <div class="card">
+    <h2 style="margin-top:0">Codes <span id="codeCount" class="hint" style="margin-left:6px"></span></h2>
+    <div id="codesList" class="cb-list"></div>
+    <div id="codesEmpty" class="hint" style="display:none;margin-top:8px">No codes yet. Create one →</div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">New code</h2>
+    <form id="newCodeForm" class="cb-form">
+      <label for="cb-name">Name <span style="color:var(--err)">*</span></label>
+      <input id="cb-name" type="text" required maxlength="120" placeholder="e.g. managing pain (gerund-form encouraged)">
+
+      <label for="cb-def">Definition</label>
+      <textarea id="cb-def" rows="3" maxlength="2000" placeholder="When to apply this code; what counts as an instance."></textarea>
+
+      <label for="cb-incl">Inclusion criteria</label>
+      <textarea id="cb-incl" rows="2" maxlength="1000" placeholder="Apply when…"></textarea>
+
+      <label for="cb-excl">Exclusion criteria</label>
+      <textarea id="cb-excl" rows="2" maxlength="1000" placeholder="Don't apply when… (use code Y instead)"></textarea>
+
+      <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+        <button class="btn" type="submit" id="cb-submit">Add code</button>
+        <span id="cb-msg" class="hint" role="alert" aria-live="polite"></span>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+
+let allCodes = [];
+let appCounts = {};
+
+async function refreshCodes() {
+  // Pull codes + applications in parallel; the application list lets
+  // each code show how many times it's been applied so far.
+  const [codesR, appsR] = await Promise.all([
+    fetch(`/api/projects/${PROJECT_ID}/codes`),
+    fetch(`/api/projects/${PROJECT_ID}/applications`),
+  ]);
+  if (!codesR.ok) throw new Error(`HTTP ${codesR.status}`);
+  allCodes = (await codesR.json()).codes || [];
+  appCounts = {};
+  if (appsR.ok) {
+    const apps = (await appsR.json()).applications || [];
+    apps.forEach(a => { appCounts[a.code_id] = (appCounts[a.code_id] || 0) + 1; });
+  }
+  renderList();
+}
+
+function renderList() {
+  const list = document.getElementById("codesList");
+  const empty = document.getElementById("codesEmpty");
+  document.getElementById("codeCount").textContent =
+    allCodes.length ? `(${allCodes.length})` : "";
+  list.innerHTML = "";
+  if (!allCodes.length) {
+    empty.style.display = "";
+    return;
+  }
+  empty.style.display = "none";
+  allCodes.forEach(c => {
+    const div = document.createElement("div");
+    div.className = "cb-row";
+    div.dataset.id = c.id;
+    const count = appCounts[c.id] || 0;
+    div.innerHTML = `
+      <span class="name">${escapeHtml(c.name)}</span>
+      <span class="stage">${escapeHtml(c.stage || "initial")}</span>
+      <span class="count" title="${count} application${count === 1 ? "" : "s"}">${count}</span>
+      <button class="del" data-act="delete" title="Delete this code">✕</button>
+    `;
+    list.appendChild(div);
+  });
+}
+
+document.getElementById("codesList").addEventListener("click", async (e) => {
+  const delBtn = e.target.closest("[data-act='delete']");
+  if (delBtn) {
+    e.stopPropagation();
+    const row = delBtn.closest(".cb-row");
+    const id = row.dataset.id;
+    const code = allCodes.find(c => c.id === id);
+    const count = appCounts[id] || 0;
+    let warning = `Delete the code "${code ? code.name : id}"?`;
+    if (count > 0) {
+      warning += `\n\nThis code has ${count} application${count === 1 ? "" : "s"} attached. Deleting it will leave those applications pointing at a missing code.`;
+    }
+    if (!confirm(warning)) return;
+    try {
+      const r = await fetch(`/api/projects/${PROJECT_ID}/codes/${id}`, { method: "DELETE" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await refreshCodes();
+    } catch (err) {
+      alert(`Couldn't delete: ${err.message}`);
+    }
+  }
+});
+
+document.getElementById("newCodeForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const submit = document.getElementById("cb-submit");
+  const msg = document.getElementById("cb-msg");
+  const name = document.getElementById("cb-name").value.trim();
+  if (!name) { msg.textContent = "Name is required"; msg.style.color = "var(--err)"; return; }
+  submit.disabled = true;
+  msg.textContent = "Saving…"; msg.style.color = "var(--muted)";
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/codes`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        name,
+        definition: document.getElementById("cb-def").value,
+        inclusion_criteria: document.getElementById("cb-incl").value,
+        exclusion_criteria: document.getElementById("cb-excl").value,
+      }),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    document.getElementById("newCodeForm").reset();
+    msg.textContent = "Added"; msg.style.color = "var(--ok)";
+    await refreshCodes();
+  } catch (err) {
+    msg.textContent = `Couldn't save: ${err.message}`;
+    msg.style.color = "var(--err)";
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+refreshCodes().catch(err => {
+  document.getElementById("codesEmpty").style.display = "";
+  document.getElementById("codesEmpty").textContent = `Couldn't load codes: ${err.message}`;
+  document.getElementById("codesEmpty").style.color = "var(--err)";
+});
+</script>
+{% endblock %}

@@ -1,0 +1,139 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Add source{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}/sources">← Sources</a>
+{% endblock %}
+
+{% block extra_styles %}
+  table.lib-pick {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  table.lib-pick thead th {
+    text-align: left; font-weight: 600; font-size: 11px;
+    color: var(--muted); text-transform: uppercase;
+    letter-spacing: .04em; padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+  table.lib-pick tbody td {
+    padding: 11px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  table.lib-pick tbody tr:hover { background: rgba(122,167,255,.04); }
+  table.lib-pick td.actions { white-space: nowrap; }
+  .upload-options {
+    display: grid; grid-template-columns: 1fr; gap: 14px;
+  }
+{% endblock %}
+
+{% block body %}
+<div class="card">
+  <h2 style="margin-top:0">Pick a transcription from the library</h2>
+  <p class="hint" style="margin:0 0 12px">Attach an already-completed transcription to this project. The transcript itself stays where it is; only the link is project-scoped.</p>
+  <div id="loading" class="hint">Loading library…</div>
+  <table id="libTable" class="lib-pick" style="display:none">
+    <thead><tr>
+      <th>Filename</th>
+      <th>Mode</th>
+      <th>Language</th>
+      <th>Status</th>
+      <th></th>
+    </tr></thead>
+    <tbody id="libBody"></tbody>
+  </table>
+  <div id="libEmpty" class="hint" style="display:none">No completed transcriptions in the library yet. <a href="/">Upload a new recording</a> first.</div>
+  <div id="libError" class="hint" style="color:var(--err);display:none"></div>
+</div>
+
+<div class="card" id="alsoCard">
+  <h2 style="margin-top:0">Other ways to add sources</h2>
+  <div class="upload-options">
+    <div>
+      <strong>Upload a new recording</strong>
+      <p class="hint" style="margin:4px 0 0">Use the <a href="/">main upload form</a>, then come back here once it's done. The library list above will refresh.</p>
+    </div>
+    <div>
+      <strong>Import an existing transcript</strong> <span class="hint">— text / SRT / VTT / Scribe JSON</span>
+      <p class="hint" style="margin:4px 0 0">Drop a transcript file on the home page; it lands as a no-media transcription, and you can attach it here. (F10.3 covers the parsing.)</p>
+    </div>
+  </div>
+</div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+
+async function attach(jobId, filename) {
+  if (!confirm(`Attach "${filename || jobId}" to this project as a source?`)) return;
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/sources`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        name: filename || jobId,
+        source_type: "transcript",
+        transcript_job_id: jobId,
+      }),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const src = await r.json();
+    window.location.href = `/projects/${PROJECT_ID}/sources/${src.id}`;
+  } catch (e) {
+    alert(`Couldn't attach: ${e.message}`);
+  }
+}
+
+async function load() {
+  const loading = document.getElementById("loading");
+  const table = document.getElementById("libTable");
+  const empty = document.getElementById("libEmpty");
+  const error = document.getElementById("libError");
+  try {
+    const r = await fetch("/api/jobs");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    let rows = (data.jobs || []).filter(j => j.status === "done");
+    loading.style.display = "none";
+    if (!rows.length) {
+      empty.style.display = "";
+      return;
+    }
+    const body = document.getElementById("libBody");
+    rows.forEach(j => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(j.input_filename || "(unnamed)")}</strong></td>
+        <td>${escapeHtml(j.mode || "—")}</td>
+        <td>${escapeHtml((j.language || "—").toUpperCase())}</td>
+        <td>${escapeHtml(j.status)}</td>
+        <td class="actions">
+          <button class="btn" data-attach="${escapeHtml(j.id)}" data-name="${escapeHtml(j.input_filename || "")}">Attach</button>
+        </td>
+      `;
+      body.appendChild(tr);
+    });
+    table.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-attach]");
+      if (btn) attach(btn.getAttribute("data-attach"), btn.getAttribute("data-name"));
+    });
+    table.style.display = "";
+  } catch (e) {
+    loading.style.display = "none";
+    error.textContent = `Couldn't load library: ${e.message}`;
+    error.style.display = "";
+  }
+}
+load();
+</script>
+{% endblock %}

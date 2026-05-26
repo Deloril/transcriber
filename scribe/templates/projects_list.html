@@ -6,59 +6,128 @@
   <a class="btn" href="/projects/new">+ New project</a>
 {% endblock %}
 
+{% block extra_styles %}
+  table.projects {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  table.projects thead th {
+    text-align: left; font-weight: 600; font-size: 11px;
+    color: var(--muted); text-transform: uppercase;
+    letter-spacing: .04em; padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+  table.projects tbody td {
+    padding: 11px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  table.projects tbody tr:hover { background: rgba(122,167,255,.04); }
+  table.projects td.name strong { color: var(--text); font-weight: 600; }
+  .stage-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+{% endblock %}
+
 {% block body %}
-<div class="stub">
-  <strong>Wireframe.</strong> This page will list every research project you've created. Each project bundles
-  multiple transcripts under a shared codebook (see <code>F1.1</code>, <code>F3.1</code>). The data model and
-  REST endpoints under <code>/api/projects</code> already exist; this page just doesn't render them yet.
+<div id="projectsCard" class="card" style="display:none">
+  <table class="projects">
+    <thead><tr>
+      <th>Name</th>
+      <th>Methodology</th>
+      <th>Stage</th>
+      <th>Modified</th>
+      <th></th>
+    </tr></thead>
+    <tbody id="projectsBody"></tbody>
+  </table>
 </div>
 
-<div class="card">
-  <div class="wf">
-    <span class="label">Wireframe — projects table</span><br>
-    <strong>Columns:</strong> name · methodology · sources count · code count · current stage (initial / focused / axial / theoretical / locked) · last modified · open ▸<br><br>
-    <strong>Toolbar:</strong> search · sort · filter by stage · "+ New project"<br><br>
-    <strong>Empty state:</strong> "No projects yet. Create your first to start coding transcripts together."
-  </div>
-</div>
-
-<div id="projectsList" class="card" style="display:none">
-  <h2>Your projects</h2>
-  <div id="projectsBody" class="hint">Loading…</div>
-</div>
+<div id="loading" class="card hint">Loading projects…</div>
 
 <div id="emptyState" class="empty card" style="display:none">
   <h3>No projects yet</h3>
-  <p>A project ties multiple transcripts to one codebook so you can code across the whole corpus.</p>
+  <p>A project ties multiple transcripts to one shared codebook so you can code across the whole corpus.</p>
   <a class="btn" href="/projects/new">Create your first project</a>
 </div>
 
+<div id="errorState" class="card" style="display:none;color:var(--err)"></div>
+
 <script>
-  // Best-effort live wiring: if the projects API is up, surface real data.
-  // Failure is silent; the wireframe block above stays the user-visible
-  // explanation either way.
-  fetch("/api/projects").then(r => {
-    if (!r.ok) throw new Error("not available");
-    return r.json();
-  }).then(data => {
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+function fmtDate(s) {
+  if (!s) return "—";
+  // Project timestamps come as ISO-8601 UTC.
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  } catch (_) { return s; }
+}
+
+const METHODOLOGY_LABELS = {
+  "constructivist-grounded-theory": "Constructivist GT",
+  "strauss-corbin-grounded-theory": "Strauss / Corbin GT",
+  "classical-grounded-theory": "Classical GT",
+  "thematic-analysis": "Thematic analysis",
+  "phenomenological": "Phenomenological",
+  "other": "Other",
+  "": "—",
+};
+
+function renderRow(p) {
+  const tr = document.createElement("tr");
+  const id = escapeHtml(p.id || "");
+  const name = escapeHtml(p.name || "(unnamed)");
+  const meth = escapeHtml(METHODOLOGY_LABELS[p.methodology] ?? p.methodology ?? "—");
+  const stage = escapeHtml(p.codebook_stage || "initial");
+  const modified = fmtDate(p.modified_at || p.created_at);
+  tr.innerHTML = `
+    <td class="name"><a href="/projects/${id}"><strong>${name}</strong></a></td>
+    <td>${meth}</td>
+    <td><span class="stage-pill">${stage}</span></td>
+    <td class="hint">${modified}</td>
+    <td><a class="btn secondary" href="/projects/${id}">Open</a></td>
+  `;
+  return tr;
+}
+
+async function load() {
+  const loading = document.getElementById("loading");
+  const card = document.getElementById("projectsCard");
+  const empty = document.getElementById("emptyState");
+  const error = document.getElementById("errorState");
+  try {
+    const r = await fetch("/api/projects");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
     const list = Array.isArray(data) ? data : (data.projects || []);
+    loading.style.display = "none";
     if (!list.length) {
-      document.getElementById("emptyState").style.display = "";
+      empty.style.display = "";
       return;
     }
+    // Sort newest-modified first.
+    list.sort((a, b) => (b.modified_at || b.created_at || "").localeCompare(a.modified_at || a.created_at || ""));
     const body = document.getElementById("projectsBody");
-    body.innerHTML = list.map(p => {
-      const id = p.id || p.project_id || "";
-      const name = (p.name || "Untitled project").replace(/[<>]/g, "");
-      const stage = p.codebook_stage || p.stage || "initial";
-      const modified = p.modified_at || p.updated_at || p.created_at || "";
-      return `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
-        <a href="/projects/${id}"><strong>${name}</strong></a>
-        <span class="hint" style="margin-left:8px">stage: ${stage}</span>
-        <span class="hint" style="margin-left:8px">${modified}</span>
-      </div>`;
-    }).join("");
-    document.getElementById("projectsList").style.display = "";
-  }).catch(() => { /* keep wireframe visible */ });
+    list.forEach(p => body.appendChild(renderRow(p)));
+    card.style.display = "";
+  } catch (e) {
+    loading.style.display = "none";
+    error.textContent = `Couldn't load projects: ${e.message}`;
+    error.style.display = "";
+  }
+}
+load();
 </script>
 {% endblock %}

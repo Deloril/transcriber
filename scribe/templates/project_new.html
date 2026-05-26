@@ -3,40 +3,87 @@
 {% block title %}New project{% endblock %}
 
 {% block body %}
-<div class="stub">
-  <strong>Wireframe.</strong> Form for creating a new research project (<code>F1.1</code>). Will collect:
-  name, research question, methodology declaration, sensitising concepts. POSTs to <code>/api/projects</code>.
-</div>
-
 <div class="card">
-  <div class="wf">
-    <span class="label">Wireframe — new-project form</span><br>
-    <strong>Fields:</strong> name (required) · research question · methodology (Charmaz / Strauss-Corbin / Glaser / other) · sensitising concepts (free-text)<br>
-    <strong>Action:</strong> Create → POST <code>/api/projects</code> → redirect to <code>/projects/&lt;id&gt;</code>
-  </div>
-
-  <form id="newProjectForm" style="display:none; margin-top:14px">
-    <div style="margin-bottom:10px">
-      <label for="np-name" style="display:block;color:var(--muted);font-size:12px;margin-bottom:4px">Project name</label>
-      <input id="np-name" type="text" required style="width:100%;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px">
+  <form id="newProjectForm" style="margin-top:4px">
+    <div style="margin-bottom:12px">
+      <label for="np-name" style="display:block;color:var(--muted);font-size:12px;margin-bottom:4px">Project name <span style="color:var(--err)">*</span></label>
+      <input id="np-name" type="text" required maxlength="200"
+             style="width:100%;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px"
+             placeholder="e.g. Caregiver burnout — pilot interviews">
     </div>
-    <div style="margin-bottom:10px">
-      <label for="np-rq" style="display:block;color:var(--muted);font-size:12px;margin-bottom:4px">Research question</label>
-      <textarea id="np-rq" rows="2" style="width:100%;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px"></textarea>
+    <div style="margin-bottom:12px">
+      <label for="np-rq" style="display:block;color:var(--muted);font-size:12px;margin-bottom:4px">Research question <span style="color:var(--muted)">(optional)</span></label>
+      <textarea id="np-rq" rows="2" maxlength="2000"
+                style="width:100%;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px"
+                placeholder="What you're trying to understand."></textarea>
     </div>
-    <div>
-      <button class="btn" type="submit">Create project</button>
+    <div style="margin-bottom:12px">
+      <label for="np-meth" style="display:block;color:var(--muted);font-size:12px;margin-bottom:4px">Methodology <span style="color:var(--muted)">(optional)</span></label>
+      <select id="np-meth"
+              style="width:100%;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px">
+        <option value="">— pick later —</option>
+        <option value="constructivist-grounded-theory">Constructivist grounded theory (Charmaz)</option>
+        <option value="strauss-corbin-grounded-theory">Strauss / Corbin grounded theory</option>
+        <option value="classical-grounded-theory">Classical grounded theory (Glaser)</option>
+        <option value="thematic-analysis">Thematic analysis</option>
+        <option value="phenomenological">Phenomenological</option>
+        <option value="other">Other</option>
+      </select>
+    </div>
+    <div style="margin-bottom:18px">
+      <label for="np-desc" style="display:block;color:var(--muted);font-size:12px;margin-bottom:4px">Description <span style="color:var(--muted)">(optional)</span></label>
+      <textarea id="np-desc" rows="2" maxlength="2000"
+                style="width:100%;background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px"
+                placeholder="Sensitising concepts, scope, anything else worth recording."></textarea>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <button id="np-submit" class="btn" type="submit">Create project</button>
       <a class="btn secondary" href="/projects">Cancel</a>
+      <span id="np-msg" class="hint" role="alert" aria-live="polite"></span>
     </div>
   </form>
 </div>
 
 <script>
-// Stub form handler — will be implemented when the page graduates from
-// wireframe to live. Today the API exists but the UI doesn't post yet.
-document.getElementById("newProjectForm")?.addEventListener("submit", e => {
-  e.preventDefault();
-  alert("Stub: not yet wired. The /api/projects POST endpoint exists; this form will use it when F12.x lands.");
-});
+(() => {
+  const form = document.getElementById("newProjectForm");
+  const submit = document.getElementById("np-submit");
+  const msg = document.getElementById("np-msg");
+
+  function setMsg(text, isError) {
+    msg.textContent = text;
+    msg.style.color = isError ? "var(--err)" : "var(--ok)";
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = document.getElementById("np-name").value.trim();
+    if (!name) { setMsg("Project name is required", true); return; }
+    const payload = {
+      name,
+      research_question: document.getElementById("np-rq").value.trim(),
+      methodology: document.getElementById("np-meth").value,
+      description: document.getElementById("np-desc").value.trim(),
+    };
+    submit.disabled = true;
+    setMsg("Creating…", false);
+    try {
+      const r = await fetch("/api/projects", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      const project = await r.json();
+      window.location.href = `/projects/${project.id}`;
+    } catch (err) {
+      setMsg(`Couldn't create project: ${err.message}`, true);
+      submit.disabled = false;
+    }
+  });
+})();
 </script>
 {% endblock %}

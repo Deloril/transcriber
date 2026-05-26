@@ -1,0 +1,103 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Sources{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+  <a class="btn" href="/projects/{{ project_id }}/sources/add">+ Add source</a>
+{% endblock %}
+
+{% block extra_styles %}
+  table.src {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  table.src thead th {
+    text-align: left; font-weight: 600; font-size: 11px;
+    color: var(--muted); text-transform: uppercase;
+    letter-spacing: .04em; padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+  table.src tbody td {
+    padding: 11px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  table.src tbody tr:hover { background: rgba(122,167,255,.04); }
+{% endblock %}
+
+{% block body %}
+<div id="sourcesCard" class="card" style="display:none">
+  <table class="src">
+    <thead><tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Language</th>
+      <th>Added</th>
+      <th></th>
+    </tr></thead>
+    <tbody id="sourcesBody"></tbody>
+  </table>
+</div>
+
+<div id="loading" class="card hint">Loading sources…</div>
+
+<div id="emptyState" class="empty card" style="display:none">
+  <h3>No sources attached yet</h3>
+  <p>Pick an existing transcription from your library, or upload a new recording.</p>
+  <a class="btn" href="/projects/{{ project_id }}/sources/add">+ Add a source</a>
+</div>
+
+<div id="errorState" class="card" style="display:none;color:var(--err)"></div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+function fmtDate(s) {
+  if (!s) return "—";
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  } catch (_) { return s; }
+}
+
+async function load() {
+  const loading = document.getElementById("loading");
+  const card = document.getElementById("sourcesCard");
+  const empty = document.getElementById("emptyState");
+  const error = document.getElementById("errorState");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/sources`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const list = data.sources || [];
+    loading.style.display = "none";
+    if (!list.length) { empty.style.display = ""; return; }
+    const body = document.getElementById("sourcesBody");
+    list.forEach(s => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><a href="/projects/${PROJECT_ID}/sources/${escapeHtml(s.id)}"><strong>${escapeHtml(s.name || "(unnamed)")}</strong></a></td>
+        <td>${escapeHtml(s.source_type || "transcript")}</td>
+        <td>${escapeHtml((s.language || "—").toUpperCase())}</td>
+        <td class="hint">${fmtDate(s.created_at)}</td>
+        <td><a class="btn secondary" href="/projects/${PROJECT_ID}/sources/${escapeHtml(s.id)}">Code</a></td>
+      `;
+      body.appendChild(tr);
+    });
+    card.style.display = "";
+  } catch (e) {
+    loading.style.display = "none";
+    error.textContent = `Couldn't load sources: ${e.message}`;
+    error.style.display = "";
+  }
+}
+load();
+</script>
+{% endblock %}

@@ -1,106 +1,514 @@
 {% extends "_shell.html" %}
 {% set active_nav = "projects" %}
-{% block title %}Coding — source {{ source_id }}{% endblock %}
-{% block heading %}Coding{% endblock %}
-{% block subtitle_block %}
-  <span class="sub">Source {{ source_id }} in project {{ project_id }}</span>
-{% endblock %}
+{% block title %}Coding{% endblock %}
+{% block heading %}<span id="hdrName">Coding</span>{% endblock %}
+{% block subtitle_block %}<span class="sub" id="hdrSub">Loading…</span>{% endblock %}
+
 {% block actions %}
   <a class="btn secondary" href="/projects/{{ project_id }}/sources">← Sources</a>
-  <a class="btn secondary" href="/edit/{{ source_id }}" title="Open in the legacy single-transcript editor">Edit transcript</a>
+  <a id="editLink" class="btn secondary" target="_blank" rel="noopener" href="#" style="display:none">Open in editor ↗</a>
 {% endblock %}
 
 {% block extra_styles %}
-  /* The coding view is a 3-column layout: gutter | transcript | side panel.
-     This stub paints the layout so future work can fill the slots. */
-  .coding {
+  .coding-grid {
     display: grid;
-    grid-template-columns: 60px 1fr 340px;
-    gap: 14px;
-    min-height: 60vh;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: 16px;
   }
-  @media (max-width: 1100px) {
-    .coding { grid-template-columns: 1fr; }
-    .coding .gutter { display: none; }
-    .coding .side { order: 3; }
+  @media (max-width: 1000px) { .coding-grid { grid-template-columns: 1fr; } }
+
+  .transcript-card { padding: 18px 22px; }
+  .seg {
+    margin-bottom: 14px;
+    line-height: 1.65;
+    font-size: 14px;
   }
-  .coding .gutter {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 14px 8px;
+  .seg .meta {
     color: var(--muted);
     font-size: 11px;
-    text-align: center;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    margin-bottom: 2px;
   }
-  .coding .center {
+  .seg .meta .speaker { color: var(--accent); font-weight: 600; }
+  .seg .body { user-select: text; }
+  .seg .word {
+    cursor: text;
+    padding: 1px 0;
+    border-radius: 2px;
+  }
+  .seg .word.is-applied {
+    background: rgba(167, 139, 250, .15);
+    border-bottom: 2px solid var(--accent-2);
+  }
+  .seg .word.in-selection { background: rgba(122,167,255,.25); }
+
+  /* Floating "apply code" popover above the selection. */
+  .apply-popover {
+    position: absolute;
     background: var(--panel);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 18px 22px;
-  }
-  .coding .side {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 14px 16px;
-    display: flex; flex-direction: column; gap: 12px;
-  }
-  .coding .side .pane {
-    border: 1px dashed var(--border);
     border-radius: 8px;
-    padding: 10px 12px;
-    color: var(--muted);
+    padding: 6px;
+    box-shadow: var(--shadow);
+    z-index: 60;
+    display: none;
+    min-width: 220px;
+    max-width: 280px;
+  }
+  .apply-popover.open { display: block; }
+  .apply-popover .pop-search {
+    width: 100%;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 8px; font: inherit; font-size: 12px;
+    margin-bottom: 6px;
+  }
+  .apply-popover .pop-list {
+    max-height: 200px; overflow-y: auto;
+  }
+  .apply-popover .pop-row {
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .apply-popover .pop-row:hover { background: var(--panel-2); }
+  .apply-popover .pop-row .stage {
+    color: var(--muted); font-size: 10px; margin-left: 8px;
+  }
+  .apply-popover .pop-empty { padding: 8px 10px; color: var(--muted); font-size: 12px; }
+
+  /* Side panel — applications already on this source. */
+  .side-card { padding: 14px 16px; }
+  .app-row {
+    padding: 8px 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 6px;
+    cursor: pointer;
     font-size: 12px;
   }
-  .coding .side .pane strong { color: var(--text); }
+  .app-row:hover { border-color: var(--accent); }
+  .app-row .code-name { color: var(--text); font-weight: 600; }
+  .app-row .quote {
+    color: var(--muted);
+    font-style: italic;
+    margin-top: 3px;
+    font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .app-row .actions {
+    margin-top: 4px;
+  }
+  .app-row .actions button {
+    background: transparent; border: 0;
+    color: var(--muted); font-size: 11px;
+    cursor: pointer; padding: 0;
+  }
+  .app-row .actions button:hover { color: var(--err); }
 {% endblock %}
 
 {% block body %}
-<div class="stub">
-  <strong>Wireframe.</strong> The coding view — a 3-pane layout where you read the transcript with the
-  gutter on the left showing overlapping code applications (<code>F4.3</code>) and the right pane holding
-  the codebook, AI suggestions, and quote memos. Today this just sketches the layout; the body of work
-  to populate it spans most of the F2/F4/F5/F8 features. The legacy single-transcript editor is one click
-  away via the &quot;Edit transcript&quot; button above.
-</div>
+<div id="loadingCard" class="card hint">Loading source and transcript…</div>
+<div id="errorCard" class="card" style="display:none;color:var(--err)"></div>
 
-<div class="coding">
-  <div class="gutter">
-    <div class="hint" style="writing-mode:vertical-rl; transform:rotate(180deg); margin-top:24px">Code application gutter (F4.3)</div>
+<div id="codingGrid" class="coding-grid" style="display:none">
+  <div class="card transcript-card">
+    <p class="hint" style="margin-top:0">
+      Drag-select any text and a small popover will let you apply a code.
+      Click an existing highlight (purple underline) to jump to its row in the side panel.
+    </p>
+    <div id="transcript"></div>
   </div>
-
-  <div class="center">
-    <div class="wf">
-      <span class="label">Wireframe — transcript pane</span><br>
-      Word-level rendered transcript identical to <code>/edit/{{ source_id }}</code>: speaker turns, click-to-play,
-      contenteditable per segment.<br><br>
-      <strong>Selection helpers:</strong> snap-to-word / sentence / paragraph (<code>F4.4</code>).<br>
-      <strong>On selection:</strong> popover with &quot;Apply code…&quot; (existing codes), &quot;Suggest with AI&quot;
-      (<code>F8.3</code>), &quot;Memo&quot;, &quot;Find similar quotes&quot; (<code>F8.5</code>).<br>
-      <strong>Overlap rendering:</strong> in-text underline + gutter bar for each overlapping application;
-      hover highlights the spanning text on both sides.
+  <div class="card side-card">
+    <h3 style="margin-top:0;font-size:14px">Coded segments <span id="appCount" class="hint"></span></h3>
+    <div id="appList">
+      <div class="hint">No applications on this source yet. Highlight text in the transcript to start.</div>
     </div>
-  </div>
-
-  <div class="side">
-    <div class="pane">
-      <strong>Codebook</strong><br>
-      Tree view of codes filtered by recently-used. Drag a code onto a selection to apply.
-    </div>
-    <div class="pane">
-      <strong>AI suggestions</strong><br>
-      Per-span: ranked code suggestions with embedding similarity score (<code>F8.3</code>).
-      Buttons: accept · modify · reject. Provenance logged either way (<code>F9.6</code>).
-    </div>
-    <div class="pane">
-      <strong>Quote memos</strong><br>
-      Margin annotations against the selected segment (<code>F5.1</code> quote memo).
-    </div>
-    <div class="pane">
-      <strong>Similar quotes</strong><br>
-      Embedding-search results across the corpus for the active selection (<code>F8.5</code>).
-    </div>
+    <hr style="border:0;border-top:1px solid var(--border);margin:14px 0">
+    <h3 style="margin-top:0;font-size:14px">Codebook</h3>
+    <div id="codebookSummary" class="hint">Loading…</div>
+    <a class="btn secondary" style="margin-top:8px" href="/projects/{{ project_id }}/codebook">Open codebook</a>
   </div>
 </div>
+
+<!-- Floating popover for applying a code -->
+<div id="applyPopover" class="apply-popover" role="dialog" aria-label="Apply code">
+  <input id="popSearch" class="pop-search" type="text" placeholder="Filter codes…" aria-label="Filter codes">
+  <div id="popList" class="pop-list"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+const SOURCE_ID = {{ source_id | tojson }};
+
+let SOURCE = null;
+let TRANSCRIPT = null;
+let CODES = [];
+let APPS = [];
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) {
+    const detail = await r.json().catch(() => ({}));
+    throw new Error(detail.detail || `HTTP ${r.status}: ${url}`);
+  }
+  return r.json();
+}
+
+async function loadAll() {
+  const loading = document.getElementById("loadingCard");
+  const errorCard = document.getElementById("errorCard");
+  try {
+    SOURCE = await fetchJSON(`/api/projects/${PROJECT_ID}/sources/${SOURCE_ID}`);
+    document.getElementById("hdrName").textContent = SOURCE.name || "Coding";
+    document.getElementById("hdrSub").textContent = `Source · ${SOURCE.source_type || "transcript"}`;
+
+    if (!SOURCE.transcript_job_id) {
+      throw new Error("This source isn't linked to a transcription. Coding requires a transcript.");
+    }
+
+    // Editor link is the legacy single-transcript editor for the same job.
+    const editLink = document.getElementById("editLink");
+    editLink.href = `/edit/${SOURCE.transcript_job_id}`;
+    editLink.style.display = "";
+
+    const [transcriptResp, codesResp, appsResp] = await Promise.all([
+      fetchJSON(`/api/job/${SOURCE.transcript_job_id}/transcript`),
+      fetchJSON(`/api/projects/${PROJECT_ID}/codes`),
+      fetchJSON(`/api/projects/${PROJECT_ID}/applications?source_id=${encodeURIComponent(SOURCE_ID)}`),
+    ]);
+    TRANSCRIPT = transcriptResp;
+    CODES = codesResp.codes || [];
+    APPS = appsResp.applications || [];
+
+    loading.style.display = "none";
+    document.getElementById("codingGrid").style.display = "";
+    renderTranscript();
+    renderApps();
+    renderCodebookSummary();
+  } catch (e) {
+    loading.style.display = "none";
+    errorCard.textContent = `Couldn't load: ${e.message}`;
+    errorCard.style.display = "";
+  }
+}
+
+function renderTranscript() {
+  const root = document.getElementById("transcript");
+  root.innerHTML = "";
+  const segs = TRANSCRIPT.segments || [];
+  segs.forEach((seg, segIdx) => {
+    const segEl = document.createElement("div");
+    segEl.className = "seg";
+    segEl.dataset.segIdx = segIdx;
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const speaker = seg.speaker || "—";
+    const start = formatTime(seg.start);
+    meta.innerHTML = `<span class="speaker">${escapeHtml(speaker)}</span> · ${start}`;
+    segEl.appendChild(meta);
+
+    const body = document.createElement("div");
+    body.className = "body";
+    const words = seg.words || [];
+    if (!words.length) {
+      // No word-level timestamps — fall back to whole-segment text.
+      // We still create a single .word so the selection model works.
+      const span = document.createElement("span");
+      span.className = "word";
+      span.dataset.wordId = `s${segIdx}w0`;
+      span.dataset.segIdx = segIdx;
+      span.dataset.wordIdx = 0;
+      span.textContent = seg.text || "";
+      body.appendChild(span);
+    } else {
+      words.forEach((w, wIdx) => {
+        if (wIdx > 0) body.appendChild(document.createTextNode(" "));
+        const span = document.createElement("span");
+        span.className = "word";
+        span.dataset.wordId = `s${segIdx}w${wIdx}`;
+        span.dataset.segIdx = segIdx;
+        span.dataset.wordIdx = wIdx;
+        span.textContent = w.text || "";
+        body.appendChild(span);
+      });
+    }
+    segEl.appendChild(body);
+    root.appendChild(segEl);
+  });
+  paintApplications();
+}
+
+function formatTime(t) {
+  if (typeof t !== "number" || !isFinite(t)) return "—";
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = Math.floor(t % 60);
+  if (h) return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+  return `${m}:${String(s).padStart(2,"0")}`;
+}
+
+function paintApplications() {
+  // Clear all "is-applied" first, then re-paint.
+  document.querySelectorAll(".word.is-applied").forEach(el => el.classList.remove("is-applied"));
+  APPS.forEach(a => {
+    const startId = a.anchor_start_word_id;
+    const endId = a.anchor_end_word_id;
+    paintRange(startId, endId, "is-applied");
+  });
+}
+
+function compareWordIds(a, b) {
+  const m = /^s(\d+)w(\d+)$/.exec(a);
+  const n = /^s(\d+)w(\d+)$/.exec(b);
+  if (!m || !n) return 0;
+  const [, as, aw] = m, [, bs, bw] = n;
+  if (Number(as) !== Number(bs)) return Number(as) - Number(bs);
+  return Number(aw) - Number(bw);
+}
+
+function paintRange(startId, endId, cls) {
+  // Iterate every .word; flip class if its id is in [start, end].
+  const swap = compareWordIds(startId, endId) > 0;
+  const lo = swap ? endId : startId;
+  const hi = swap ? startId : endId;
+  document.querySelectorAll(".word").forEach(el => {
+    const id = el.dataset.wordId;
+    if (compareWordIds(id, lo) >= 0 && compareWordIds(id, hi) <= 0) {
+      el.classList.add(cls);
+    }
+  });
+}
+function unpaintRange(startId, endId, cls) {
+  const swap = compareWordIds(startId, endId) > 0;
+  const lo = swap ? endId : startId;
+  const hi = swap ? startId : endId;
+  document.querySelectorAll(".word").forEach(el => {
+    const id = el.dataset.wordId;
+    if (compareWordIds(id, lo) >= 0 && compareWordIds(id, hi) <= 0) {
+      el.classList.remove(cls);
+    }
+  });
+}
+
+// ---------- Selection-driven popover ----------
+
+let CURRENT_SELECTION = null;  // {startWordId, endWordId, snippet}
+
+function nearestWordEl(node) {
+  while (node && node.nodeType === Node.TEXT_NODE) node = node.parentNode;
+  while (node && !(node.classList && node.classList.contains("word"))) {
+    node = node.parentNode;
+  }
+  return node;
+}
+
+document.addEventListener("mouseup", () => {
+  // Defer slightly so the browser finishes settling the selection.
+  setTimeout(() => onSelectionChanged(), 0);
+});
+
+function onSelectionChanged() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed) {
+    hidePopover();
+    return;
+  }
+  const range = sel.getRangeAt(0);
+  // Both endpoints must land inside .word spans within our transcript.
+  const startEl = nearestWordEl(range.startContainer);
+  const endEl = nearestWordEl(range.endContainer);
+  if (!startEl || !endEl) { hidePopover(); return; }
+  const root = document.getElementById("transcript");
+  if (!root.contains(startEl) || !root.contains(endEl)) { hidePopover(); return; }
+
+  const startId = startEl.dataset.wordId;
+  const endId = endEl.dataset.wordId;
+  const swap = compareWordIds(startId, endId) > 0;
+  CURRENT_SELECTION = {
+    startWordId: swap ? endId : startId,
+    endWordId: swap ? startId : endId,
+    snippet: sel.toString().trim(),
+  };
+  showPopover(range);
+}
+
+function hidePopover() {
+  document.getElementById("applyPopover").classList.remove("open");
+}
+function showPopover(range) {
+  const pop = document.getElementById("applyPopover");
+  const rect = range.getBoundingClientRect();
+  // Position above the selection. Use viewport rect + window scroll.
+  const top = rect.top + window.scrollY - pop.offsetHeight - 8;
+  const left = rect.left + window.scrollX;
+  pop.style.top = `${Math.max(window.scrollY + 8, top)}px`;
+  pop.style.left = `${Math.max(8, left)}px`;
+  pop.classList.add("open");
+  document.getElementById("popSearch").value = "";
+  renderPopList("");
+  setTimeout(() => document.getElementById("popSearch").focus(), 0);
+}
+
+function renderPopList(filter) {
+  const list = document.getElementById("popList");
+  const f = filter.toLowerCase();
+  const candidates = CODES.filter(c => !f || (c.name || "").toLowerCase().includes(f));
+  if (!candidates.length) {
+    if (!CODES.length) {
+      list.innerHTML = `<div class="pop-empty">No codes yet. <a href="/projects/${PROJECT_ID}/codebook">Add a code →</a></div>`;
+    } else {
+      list.innerHTML = `<div class="pop-empty">No codes match "${escapeHtml(filter)}".</div>`;
+    }
+    return;
+  }
+  list.innerHTML = candidates.map(c =>
+    `<div class="pop-row" data-code-id="${escapeHtml(c.id)}">${escapeHtml(c.name)}<span class="stage">${escapeHtml(c.stage || "initial")}</span></div>`
+  ).join("");
+}
+
+document.getElementById("popSearch").addEventListener("input", (e) => {
+  renderPopList(e.target.value);
+});
+document.getElementById("popSearch").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); hidePopover(); }
+});
+document.getElementById("popList").addEventListener("click", async (e) => {
+  const row = e.target.closest(".pop-row");
+  if (!row || !CURRENT_SELECTION) return;
+  const codeId = row.dataset.codeId;
+  await applyCode(codeId);
+  hidePopover();
+});
+
+// Close popover on outside click.
+document.addEventListener("mousedown", (e) => {
+  const pop = document.getElementById("applyPopover");
+  if (!pop.classList.contains("open")) return;
+  if (pop.contains(e.target)) return;
+  // If the click is starting a new selection, leave it alone — onSelectionChanged
+  // will retarget.
+  if (e.target.closest(".word")) return;
+  hidePopover();
+});
+
+async function applyCode(codeId) {
+  if (!CURRENT_SELECTION) return;
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/applications`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        code_id: codeId,
+        source_id: SOURCE_ID,
+        anchor_start_word_id: CURRENT_SELECTION.startWordId,
+        anchor_end_word_id: CURRENT_SELECTION.endWordId,
+      }),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const app = await r.json();
+    APPS.push(app);
+    paintApplications();
+    renderApps();
+    // Clear browser selection so the popover doesn't immediately re-open.
+    window.getSelection().removeAllRanges();
+  } catch (e) {
+    alert(`Couldn't apply code: ${e.message}`);
+  }
+}
+
+function renderApps() {
+  document.getElementById("appCount").textContent = APPS.length ? `(${APPS.length})` : "";
+  const list = document.getElementById("appList");
+  if (!APPS.length) {
+    list.innerHTML = `<div class="hint">No applications on this source yet. Highlight text in the transcript to start.</div>`;
+    return;
+  }
+  // Sort by start word id.
+  const sorted = APPS.slice().sort((a, b) => compareWordIds(a.anchor_start_word_id, b.anchor_start_word_id));
+  list.innerHTML = sorted.map(a => {
+    const code = CODES.find(c => c.id === a.code_id);
+    const codeName = code ? code.name : `(deleted code ${a.code_id.slice(0,8)})`;
+    const snippet = quoteSnippet(a.anchor_start_word_id, a.anchor_end_word_id);
+    return `<div class="app-row" data-app-id="${escapeHtml(a.id)}" data-start="${escapeHtml(a.anchor_start_word_id)}">
+      <span class="code-name">${escapeHtml(codeName)}</span>
+      <div class="quote">"${escapeHtml(snippet)}"</div>
+      <div class="actions">
+        <button data-act="delete">Remove</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function quoteSnippet(startId, endId) {
+  const swap = compareWordIds(startId, endId) > 0;
+  const lo = swap ? endId : startId;
+  const hi = swap ? startId : endId;
+  const parts = [];
+  document.querySelectorAll(".word").forEach(el => {
+    const id = el.dataset.wordId;
+    if (compareWordIds(id, lo) >= 0 && compareWordIds(id, hi) <= 0) {
+      parts.push(el.textContent);
+    }
+  });
+  return parts.join(" ");
+}
+
+document.getElementById("appList").addEventListener("click", async (e) => {
+  const delBtn = e.target.closest("button[data-act='delete']");
+  const row = e.target.closest(".app-row");
+  if (delBtn && row) {
+    e.stopPropagation();
+    const aid = row.dataset.appId;
+    if (!confirm("Remove this application? The code itself isn't affected.")) return;
+    try {
+      const r = await fetch(`/api/projects/${PROJECT_ID}/applications/${aid}`, { method: "DELETE" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      APPS = APPS.filter(a => a.id !== aid);
+      paintApplications();
+      renderApps();
+    } catch (err) {
+      alert(`Couldn't delete: ${err.message}`);
+    }
+    return;
+  }
+  if (row) {
+    // Clicking the row scrolls the first word into view.
+    const startId = row.dataset.start;
+    const wordEl = document.querySelector(`.word[data-word-id="${CSS.escape(startId)}"]`);
+    if (wordEl) wordEl.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+});
+
+function renderCodebookSummary() {
+  const summary = document.getElementById("codebookSummary");
+  if (!CODES.length) {
+    summary.innerHTML = `<span class="hint">No codes yet. <a href="/projects/${PROJECT_ID}/codebook">Add some →</a></span>`;
+    return;
+  }
+  const top = CODES.slice(0, 6).map(c => `<div>${escapeHtml(c.name)}</div>`).join("");
+  summary.innerHTML = top + (CODES.length > 6 ? `<div class="hint">+ ${CODES.length - 6} more</div>` : "");
+}
+
+loadAll();
+</script>
 {% endblock %}

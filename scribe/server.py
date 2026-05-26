@@ -329,48 +329,20 @@ def _render_subpage(
 
 @app.get("/projects/{project_id}/sources", response_class=HTMLResponse)
 async def project_sources_page(request: Request, project_id: str) -> HTMLResponse:
-    return _render_subpage(
-        request, project_id,
-        page_kind="sources",
-        page_title="Sources",
-        description="Transcripts and field notes attached to this project.",
-        feature_refs=["F1.2", "F1.3", "F3.3", "F10.3"],
-        wireframe_blocks=[
-            {"heading": "Source list", "lines": [
-                "<strong>Columns:</strong> filename · participant · duration · language · added · per-row action (open editor)",
-                "<strong>Toolbar:</strong> search · filter by participant attribute (F3.2) · &quot;+ Add source&quot;",
-            ]},
-            {"heading": "Participants", "lines": [
-                "Participant table with user-defined demographic columns (F1.3, F3.3).",
-                "One participant ↔ many sources.",
-            ]},
-            {"heading": "Sampling log", "lines": [
-                "Why each source was added, what category it was meant to fill (F1.4 — theoretical sampling).",
-            ]},
-        ],
-    )
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "sources_list.html", {
+        "project_id": pid,
+        "page_title": "Sources",
+    })
 
 
 @app.get("/projects/{project_id}/sources/add", response_class=HTMLResponse)
 async def project_source_add_page(request: Request, project_id: str) -> HTMLResponse:
-    return _render_subpage(
-        request, project_id,
-        page_kind="sources",
-        page_title="Add source",
-        description="Pick an existing transcription from the library, upload a new recording, or import an existing transcript.",
-        feature_refs=["F1.2", "F10.3"],
-        wireframe_blocks=[
-            {"heading": "From the library", "lines": [
-                "Pick a completed transcription from <code>/library</code> and attach it to this project.",
-            ]},
-            {"heading": "Upload new audio/video", "lines": [
-                "Drag a recording — same flow as <code>/</code>, but lands in this project on completion.",
-            ]},
-            {"heading": "Import existing transcript", "lines": [
-                "Drop a <code>.txt / .srt / .vtt / .json</code> file. F10.3 covers the parsers.",
-            ]},
-        ],
-    )
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "source_picker.html", {
+        "project_id": pid,
+        "page_title": "Add source",
+    })
 
 
 @app.get("/projects/{project_id}/sources/{source_id}", response_class=HTMLResponse)
@@ -386,31 +358,11 @@ async def project_source_coding_page(request: Request, project_id: str, source_i
 
 @app.get("/projects/{project_id}/codebook", response_class=HTMLResponse)
 async def project_codebook_page(request: Request, project_id: str) -> HTMLResponse:
-    return _render_subpage(
-        request, project_id,
-        page_kind="codebook",
-        page_title="Codebook",
-        description="Codes, definitions, hierarchy, and stage gates.",
-        feature_refs=["F2.1", "F2.2", "F2.3", "F2.4", "F9.3"],
-        wireframe_blocks=[
-            {"heading": "Codes", "lines": [
-                "<strong>Tree view:</strong> hierarchy of codes by parent · color swatch · application count · stage chip.",
-                "<strong>Editor pane:</strong> definition, inclusion / exclusion criteria, exemplar quotes, related codes.",
-                "<strong>Lifecycle ops:</strong> merge · split · rename · retire · promote (F2.3).",
-            ]},
-            {"heading": "Stages & snapshots", "lines": [
-                "Current stage: initial / focused / axial / theoretical / locked.",
-                "Named codebook snapshots (F9.3). Lock toggle (F2.4) requires a methodological memo on unlock.",
-            ]},
-            {"heading": "Export", "lines": [
-                "CSV · Markdown · Word · REFI-QDA Codebook XML (F2.6).",
-            ]},
-            {"heading": "Inter-coder reliability (multi-coder)", "lines": [
-                "Cohen's kappa per code · reconciliation queue (F2.5). Visible only when multi-coder mode is on.",
-            ]},
-        ],
-    )
-
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "codebook_editor.html", {
+        "project_id": pid,
+        "page_title": "Codebook",
+    })
 
 @app.get("/projects/{project_id}/queries", response_class=HTMLResponse)
 async def project_queries_page(request: Request, project_id: str) -> HTMLResponse:
@@ -1052,6 +1004,230 @@ async def delete_participant_endpoint(
         )
     if not ok:
         raise HTTPException(404, "Participant not found")
+    return JSONResponse({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
+# Codes (F2.1) + applications (F4.1) — minimal CRUD wiring
+#
+# The data layer (scribe.codes / scribe.applications / scribe.code_versions)
+# was built per-feature by the loop. This block exposes it through HTTP so
+# the UI can actually create a code and apply it to a span. Scope is
+# deliberately tight: list / create / delete codes; list / create / delete
+# applications. Update goes through the lifecycle endpoints (F2.3) which
+# the loop already wired separately.
+#
+# Single-user local tool, so every application needs a coder_id and we lazily
+# create a "default" coder per project on first use rather than asking the
+# UI to deal with multi-coder mode (F2.5).
+# --------------------------------------------------------------------------- #
+
+from . import codes as _codes  # noqa: E402
+from . import applications as _applications  # noqa: E402
+from . import code_versions as _code_versions  # noqa: E402
+from . import coders as _coders  # noqa: E402
+
+
+def _check_code_id(code_id: str) -> None:
+    if not _codes.CODE_ID_RE.match(code_id):
+        raise HTTPException(400, "Invalid code id")
+
+
+def _check_application_id(application_id: str) -> None:
+    if not _applications.APPLICATION_ID_RE.match(application_id):
+        raise HTTPException(400, "Invalid application id")
+
+
+def _ensure_default_coder(project_id: str) -> str:
+    """Return a coder id for ``project_id``. Creates a "default" coder on
+    first use so the single-user local flow doesn't have to surface coder
+    management. Multi-coder mode (F2.5) writes additional coders via
+    its own UI; this only ever creates one."""
+    existing = _coders.list_coders(_projects_root(), project_id)
+    if existing:
+        # Use the oldest coder by created_at (fall back to id if missing).
+        existing.sort(key=lambda c: (c.created_at, c.id))
+        return existing[0].id
+    coder = _coders.Coder.new(project_id=project_id, name="You", role="researcher")
+    _coders.save_coder(_projects_root(), coder)
+    return coder.id
+
+
+@app.get("/api/projects/{project_id}/codes")
+async def list_codes_endpoint(project_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        codes = _codes.list_codes(_projects_root(), project_id)
+    return JSONResponse({"codes": [c.to_dict() for c in codes]})
+
+
+@app.post("/api/projects/{project_id}/codes")
+async def create_code_endpoint(project_id: str, request: Request) -> JSONResponse:
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            code = _codes.Code.new(
+                project_id=project_id,
+                name=str(body.get("name", "")),
+                definition=str(body.get("definition", "") or ""),
+                inclusion_criteria=str(body.get("inclusion_criteria", "") or ""),
+                exclusion_criteria=str(body.get("exclusion_criteria", "") or ""),
+                exemplars=body.get("exemplars") or [],
+                parent_code_id=body.get("parent_code_id") or None,
+                related_codes=body.get("related_codes") or [],
+                theoretical_memo=str(body.get("theoretical_memo", "") or ""),
+                stage=str(body.get("stage", "initial") or "initial"),
+                colour=str(body.get("colour", "") or ""),
+                status=str(body.get("status", "active") or "active"),
+                provenance=body.get("provenance") or {},
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid code payload: {e}")
+        _codes.save_code(_projects_root(), code)
+        # Record the initial version so applications have something to
+        # reference via definition_version_id_at_apply.
+        _code_versions.record_code_version(_projects_root(), code, change_note="initial")
+    return JSONResponse(code.to_dict(), status_code=201)
+
+
+@app.get("/api/projects/{project_id}/codes/{code_id}")
+async def get_code_endpoint(project_id: str, code_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    _check_code_id(code_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            code = _codes.load_code(_projects_root(), project_id, code_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Code not found")
+    return JSONResponse(code.to_dict())
+
+
+@app.delete("/api/projects/{project_id}/codes/{code_id}")
+async def delete_code_endpoint(project_id: str, code_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    _check_code_id(code_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        ok = _codes.delete_code(_projects_root(), project_id, code_id)
+    if not ok:
+        raise HTTPException(404, "Code not found")
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/projects/{project_id}/applications")
+async def list_applications_endpoint(
+    project_id: str, source_id: str = "", code_id: str = ""
+) -> JSONResponse:
+    """List applications. Optional ``source_id`` and ``code_id`` query
+    parameters narrow the result, which is what the source-coding view
+    uses to render only this source's applications."""
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        all_apps = _applications.list_applications(
+            _projects_root(), project_id,
+            source_id=source_id or None,
+            code_id=code_id or None,
+        )
+    return JSONResponse({"applications": [a.to_dict() for a in all_apps]})
+
+
+@app.post("/api/projects/{project_id}/applications")
+async def create_application_endpoint(project_id: str, request: Request) -> JSONResponse:
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    code_id = body.get("code_id")
+    source_id = body.get("source_id")
+    if not code_id:
+        raise HTTPException(400, "code_id is required")
+    if not source_id:
+        raise HTTPException(400, "source_id is required")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        # Ensure the referenced code exists and grab the latest version id
+        # so the application snapshot is methodologically correct (F4.1
+        # requires definition_version_id_at_apply).
+        try:
+            code = _codes.load_code(_projects_root(), project_id, code_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Code not found")
+        latest = _code_versions.latest_code_version(_projects_root(), project_id, code_id)
+        if latest is None:
+            # Should be impossible because create_code records v1, but
+            # belt-and-braces — record one now.
+            latest = _code_versions.record_code_version(
+                _projects_root(), code, change_note="initial-on-demand",
+            )
+
+        coder_id = _ensure_default_coder(project_id)
+
+        try:
+            app_obj = _applications.Application.new(
+                project_id=project_id,
+                code_id=code_id,
+                source_id=str(source_id),
+                coder_id=coder_id,
+                anchor_start_word_id=str(body.get("anchor_start_word_id", "")),
+                anchor_end_word_id=str(body.get("anchor_end_word_id", "")),
+                definition_version_id_at_apply=latest.id,
+                start_char_offset=body.get("start_char_offset"),
+                end_char_offset=body.get("end_char_offset"),
+                confidence=body.get("confidence"),
+                provenance=body.get("provenance") or {},
+                note=str(body.get("note", "") or ""),
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid application payload: {e}")
+        _applications.save_application(_projects_root(), app_obj)
+    return JSONResponse(app_obj.to_dict(), status_code=201)
+
+
+@app.get("/api/projects/{project_id}/applications/{application_id}")
+async def get_application_endpoint(project_id: str, application_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    _check_application_id(application_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            a = _applications.load_application(
+                _projects_root(), project_id, application_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Application not found")
+    return JSONResponse(a.to_dict())
+
+
+@app.delete("/api/projects/{project_id}/applications/{application_id}")
+async def delete_application_endpoint(project_id: str, application_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    _check_application_id(application_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        ok = _applications.delete_application(
+            _projects_root(), project_id, application_id,
+        )
+    if not ok:
+        raise HTTPException(404, "Application not found")
     return JSONResponse({"ok": True})
 
 
@@ -2424,6 +2600,29 @@ async def job_status(job_id: str) -> JSONResponse:
         if not job:
             raise HTTPException(404, "Job not found")
         return JSONResponse(_job_dict(job))
+
+
+@app.get("/api/job/{job_id}/projects")
+async def job_projects(job_id: str) -> JSONResponse:
+    """Return every project / source pair that links to this job, so the
+    editor can offer "Open in coding view" links. A transcription can be
+    attached to multiple projects; we return all matches sorted by
+    project modified-time so the most recent is first."""
+    _check_job_id(job_id)
+    matches: list[dict[str, Any]] = []
+    with PROJECTS_LOCK:
+        for project in _projects.list_projects(_projects_root()):
+            for source in _sources.list_sources(_projects_root(), project.id):
+                if source.transcript_job_id == job_id:
+                    matches.append({
+                        "project_id": project.id,
+                        "project_name": project.name,
+                        "project_modified_at": project.modified_at,
+                        "source_id": source.id,
+                        "source_name": source.name,
+                    })
+    matches.sort(key=lambda m: m.get("project_modified_at") or "", reverse=True)
+    return JSONResponse({"projects": matches})
 
 
 def _job_dict(job: Job) -> dict[str, Any]:
