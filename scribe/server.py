@@ -89,6 +89,14 @@ class Job:
     # gracefully degrade (hide the player, disable seek/play) and
     # tells the library row to render a small "media discarded" icon.
     media_discarded: bool = False
+    # G7.1 — pluggable transcription-engine backend. The user picks
+    # this from the upload page's Engine selector (next to the model
+    # picker); the engine routes the inference call through
+    # :mod:`scribe.whisper_backend`. Default is ``faster-whisper``,
+    # the historical (and still recommended) backend on CUDA / ROCm /
+    # CPU. Apple Silicon users will switch to ``whisper.cpp`` once
+    # the G7.2 adapter lands.
+    whisper_backend: str = "faster-whisper"
 
     def to_state(self) -> dict[str, Any]:
         d = asdict(self)
@@ -121,6 +129,9 @@ class Job:
             started_at=d.get("started_at"),
             finished_at=d.get("finished_at"),
             media_discarded=_to_bool_persisted(d.get("media_discarded", False)),
+            whisper_backend=str(
+                d.get("whisper_backend") or "faster-whisper"
+            ),
         )
 
 
@@ -219,7 +230,44 @@ async def _startup() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "index.html", {})
+    # G7.1 — surface the registered Whisper backends so the upload
+    # page can render an Engine selector. The default id is what the
+    # form pre-selects; available_id is the same today but G7.3 will
+    # flip it for Apple Silicon once the whisper.cpp adapter ships.
+    from .whisper_backend import (
+        default_backend_id,
+        describe_backends,
+    )
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "whisper_backends": describe_backends(),
+            "default_whisper_backend": default_backend_id(),
+        },
+    )
+
+
+@app.get("/api/whisper-backends")
+async def whisper_backends_endpoint() -> JSONResponse:
+    """List the registered Whisper inference backends (G7.1).
+
+    Used by the upload page's engine selector and by callers that
+    want to A/B between backends programmatically. Returns one JSON
+    object per backend with its id, display name, description,
+    supported devices, model format, and a runtime ``available``
+    flag that's ``False`` when the backend's prerequisites aren't
+    installed (the UI greys out those options instead of hiding
+    them, so the user knows they exist).
+    """
+    from .whisper_backend import (
+        default_backend_id,
+        describe_backends,
+    )
+    return JSONResponse({
+        "default": default_backend_id(),
+        "backends": describe_backends(),
+    })
 
 
 @app.get("/edit/{job_id}", response_class=HTMLResponse)
@@ -10567,6 +10615,7 @@ async def upload(
     model: str = Form("large-v3"),
     batch_size: str = Form("8"),
     options: str = Form("{}"),
+    backend: str = Form("faster-whisper"),
 ) -> JSONResponse:
     job_id = uuid.uuid4().hex[:12]
     safe_name = Path(file.filename or "upload.bin").name
@@ -10596,6 +10645,18 @@ async def upload(
     except ValueError:
         bs = 8
 
+    # G7.1 — validate the chosen Whisper backend against the registry
+    # before kicking off the job. An unknown id is a hard 400; the user
+    # will have got it from a stale UI / scripted client.
+    from .whisper_backend import is_valid_backend_id
+    backend_id = (backend or "").strip() or "faster-whisper"
+    if not is_valid_backend_id(backend_id):
+        raise HTTPException(
+            400,
+            f"Unknown transcription backend {backend_id!r}. "
+            "See GET /api/whisper-backends for the registered list.",
+        )
+
     try:
         streams = probe_audio_streams(input_path)
     except Exception as e:
@@ -10623,6 +10684,7 @@ async def upload(
         input_filename=safe_name,
         options=opts_dict,
         batch_size=bs,
+        whisper_backend=backend_id,
     )
     with JOBS_LOCK:
         JOBS[job_id] = job
@@ -10673,6 +10735,7 @@ def _run_job(job_id: str) -> None:
             hf_token=os.environ.get("HF_TOKEN"),
             options=AdvancedOptions.from_dict(job.options),
             progress=lambda m, f: _set_progress(job_id, m, f),
+            whisper_backend=job.whisper_backend,
         )
         base = job.output_dir / job.input_path.stem
         paths = write_all(result, base)

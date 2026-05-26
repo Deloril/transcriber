@@ -992,6 +992,102 @@ def _safe_load_model(whisperx, *, model_name, device, compute_type, language, as
         return whisperx.load_model(model_name, **kw)
 
 
+def _run_faster_whisper_inference(
+    audio_path: Path,
+    *,
+    model_name: str,
+    language: str,
+    asr_options: dict[str, Any],
+    vad_options: dict[str, Any],
+    progress: ProgressFn,
+    progress_base: float = 0.0,
+    progress_span: float = 1.0,
+) -> dict[str, Any]:
+    """faster-whisper / whisperx inference for a single audio file.
+
+    Loads the Whisper model, transcribes, frees the model, and returns a
+    whisperx-shaped ``{"segments": [...], "language": "<iso>"}`` dict.
+    Alignment (word-level timestamps) is the caller's responsibility — this
+    function deliberately stops after inference so the alignment model can
+    claim the GPU.
+
+    Extracted as a free function so :class:`scribe.whisper_backend.\
+FasterWhisperBackend` can wrap the same code path the engine uses
+    today (G7.1). Keeps a single source of truth for the
+    ``_safe_load_model`` + ``asr.transcribe`` + ``_ProgressCapture``
+    dance — adding a new ``WhisperBackend`` subclass doesn't have to
+    re-implement faster-whisper's quirks.
+
+    ``asr_options`` is the dict from :meth:`AdvancedOptions.asr_options`
+    plus two extra keys read from the same source object:
+
+    * ``"batch_size"`` — int, fed to ``asr.transcribe``. Defaults to 8.
+    * ``"chunk_size"`` — int, fed to ``asr.transcribe``. Defaults to 30.
+
+    Both keys are stripped before the dict is forwarded to
+    ``whisperx.load_model`` so the upstream library doesn't see knobs
+    it doesn't recognise.
+    """
+    whisperx = _load_whisperx()
+    device, compute_type = _whisper_device_and_compute()
+
+    # Pull per-call knobs out of asr_options before passing the rest
+    # to load_model. The two values come from the AdvancedOptions /
+    # batch_size form fields — the caller is responsible for
+    # pre-populating them.
+    batch_size = int(asr_options.get("batch_size", 8) or 8)
+    chunk_size = int(asr_options.get("chunk_size", 30) or 30)
+    asr_opts_for_load = {
+        k: v for k, v in asr_options.items()
+        if k not in ("batch_size", "chunk_size")
+    }
+
+    progress("Loading Whisper model", progress_base + 0.0 * progress_span)
+    asr = _safe_load_model(
+        whisperx,
+        model_name=model_name,
+        # CT2's ROCm wheel still takes device="cuda" — translate the
+        # honest "rocm" label at the library boundary (G1.2).
+        device=_to_torch_device_arg(device),
+        compute_type=compute_type,
+        language=language,
+        asr_options=asr_opts_for_load,
+        vad_options=vad_options,
+    )
+
+    audio = whisperx.load_audio(str(audio_path))
+
+    # Streaming progress for the long transcribe loop. The helper owns
+    # the full [0..1] of its progress_span — the caller is responsible
+    # for budgeting alignment / diarization headroom on top. The
+    # 18/82 split mirrors the historical 10/45 inline split when the
+    # caller passes progress_span = parent_span * 0.55.
+    transcribe_lo = 0.18
+    transcribe_hi = 1.0
+
+    def _on_transcribe_pct(label: str, pct: float) -> None:
+        progress(label, progress_base + (transcribe_lo + pct * (transcribe_hi - transcribe_lo)) * progress_span)
+
+    progress("Transcribing audio", progress_base + transcribe_lo * progress_span)
+    with _ProgressCapture("Transcribing audio", _on_transcribe_pct):
+        asr_result = asr.transcribe(
+            audio,
+            batch_size=batch_size,
+            language=None if language == "auto" else language,
+            chunk_size=chunk_size,
+            print_progress=True,
+        )
+    detected_lang = asr_result.get("language") or language or "en"
+
+    # Free Whisper before loading alignment model — keeps memory low.
+    del asr
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return {"segments": asr_result["segments"], "language": detected_lang}
+
+
 def _transcribe_with_alignment(
     audio_path: Path,
     *,
@@ -1003,10 +1099,17 @@ def _transcribe_with_alignment(
     progress_base: float,
     progress_span: float,
     hf_token: str | None = None,
+    whisper_backend: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """
     Run transcription (Whisper or Parakeet) + word-level alignment on a single
     audio file. Returns (aligned_segments, detected_language).
+
+    ``whisper_backend`` selects the inference engine for non-Parakeet
+    models (G7.1). ``None`` / ``"faster-whisper"`` keeps the historical
+    behaviour. Other registered backend ids dispatch through
+    :mod:`scribe.whisper_backend`. Parakeet models always use the NeMo
+    path regardless of ``whisper_backend`` — the field is Whisper-only.
     """
     whisperx = _load_whisperx()
 
@@ -1030,47 +1133,42 @@ def _transcribe_with_alignment(
         asr_result = {"segments": seg_dicts, "language": detected_lang}
         audio = whisperx.load_audio(str(audio_path))
     else:
-        device, compute_type = _whisper_device_and_compute()
-
-        progress("Loading Whisper model", progress_base + 0.0 * progress_span)
-        asr = _safe_load_model(
-            whisperx,
-            model_name=model_name,
-            # CT2's ROCm wheel still takes device="cuda" — translate the
-            # honest "rocm" label at the library boundary (G1.2).
-            device=_to_torch_device_arg(device),
-            compute_type=compute_type,
-            language=language,
-            asr_options=options.asr_options(),
-            vad_options=options.vad_options(),
+        # G7.1 — route the inference call through the registered
+        # backend. ``faster-whisper`` is the default and wraps
+        # :func:`_run_faster_whisper_inference` so the existing
+        # whisperx machinery stays the single source of truth. Other
+        # backends (``whisper.cpp`` etc.) ship their own adapter.
+        from .whisper_backend import (
+            default_backend_id,
+            get_backend,
         )
-
+        backend_id = (whisper_backend or "").strip() or default_backend_id()
+        # Bake batch_size + chunk_size into asr_options so backend
+        # implementations have a single dict to consume instead of
+        # juggling extra kwargs on every call.
+        asr_opts = dict(options.asr_options())
+        asr_opts["batch_size"] = int(batch_size)
+        asr_opts["chunk_size"] = int(options.chunk_size)
+        backend = get_backend(backend_id)
+        backend_result = backend.transcribe(
+            audio_path,
+            model_name=model_name,
+            language=language,
+            asr_options=asr_opts,
+            vad_options=options.vad_options(),
+            progress=progress,
+            progress_base=progress_base,
+            progress_span=progress_span * 0.55,
+        )
+        asr_result = {
+            "segments": backend_result["segments"],
+            "language": backend_result["language"],
+        }
+        detected_lang = asr_result["language"]
+        # Re-load audio for the alignment pass — backends are free to
+        # internally use a different audio decoder, so the engine
+        # owns the canonical numpy array fed into whisperx.align.
         audio = whisperx.load_audio(str(audio_path))
-
-        # Streaming progress for the long transcribe loop. WhisperX's per-chunk
-        # ratio gets remapped into our [0.10..0.55] slice of progress_span.
-        transcribe_lo = 0.10
-        transcribe_hi = 0.55
-
-        def _on_transcribe_pct(label: str, pct: float) -> None:
-            progress(label, progress_base + (transcribe_lo + pct * (transcribe_hi - transcribe_lo)) * progress_span)
-
-        progress("Transcribing audio", progress_base + transcribe_lo * progress_span)
-        with _ProgressCapture("Transcribing audio", _on_transcribe_pct):
-            asr_result = asr.transcribe(
-                audio,
-                batch_size=batch_size,
-                language=None if language == "auto" else language,
-                chunk_size=int(options.chunk_size),
-                print_progress=True,
-            )
-        detected_lang = asr_result.get("language") or language or "en"
-
-        # Free Whisper before loading alignment model — keeps memory low.
-        del asr
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     progress("Loading alignment model", progress_base + 0.55 * progress_span)
     # _torch_device() returns the honest backend label (cuda/rocm/mps/cpu);
@@ -1125,6 +1223,7 @@ def transcribe_multi_track(
     batch_size: int = 8,
     options: AdvancedOptions | None = None,
     progress: ProgressFn = _noop_progress,
+    whisper_backend: str | None = None,
 ) -> TranscriptionResult:
     """
     Transcribe a recording where each audio stream is one speaker.
@@ -1171,6 +1270,7 @@ def transcribe_multi_track(
             progress_base=i / n,
             progress_span=1.0 / n,
             hf_token=os.environ.get("HF_TOKEN"),
+            whisper_backend=whisper_backend,
         )
         used_language = detected
 
@@ -1229,6 +1329,7 @@ def transcribe_diarize(
     batch_size: int = 8,
     options: AdvancedOptions | None = None,
     progress: ProgressFn = _noop_progress,
+    whisper_backend: str | None = None,
 ) -> TranscriptionResult:
     """Single-track transcription with pyannote AI diarization."""
     if not hf_token:
@@ -1254,6 +1355,7 @@ def transcribe_diarize(
         progress_base=0.05,
         progress_span=0.7,
         hf_token=hf_token,
+        whisper_backend=whisper_backend,
     )
 
     whisperx = _load_whisperx()
@@ -1365,12 +1467,18 @@ def transcribe(
     hf_token: str | None = None,
     options: AdvancedOptions | None = None,
     progress: ProgressFn = _noop_progress,
+    whisper_backend: str | None = None,
 ) -> TranscriptionResult:
     """
     Entry point.
 
     mode='auto' picks multi-track if the input has ≥2 audio streams,
     otherwise diarize.
+
+    ``whisper_backend`` (G7.1) selects the Whisper inference engine for
+    non-Parakeet models. ``None`` / ``"faster-whisper"`` keeps the
+    historical CTranslate2 path. Other registered backend ids dispatch
+    through :mod:`scribe.whisper_backend`.
     """
     opts = options or AdvancedOptions()
     if mode == "auto":
@@ -1387,6 +1495,7 @@ def transcribe(
             batch_size=batch_size,
             options=opts,
             progress=progress,
+            whisper_backend=whisper_backend,
         )
     return transcribe_diarize(
         input_path,
@@ -1400,4 +1509,5 @@ def transcribe(
         batch_size=batch_size,
         options=opts,
         progress=progress,
+        whisper_backend=whisper_backend,
     )

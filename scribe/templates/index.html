@@ -540,6 +540,34 @@
         </div>
       </div>
 
+      {# G7.1 — Whisper inference engine selector. Sits next to the
+         model picker so it's discoverable. ``whisper_backends`` is
+         the registry snapshot from scribe.whisper_backend; the JS
+         submits the chosen id alongside the upload payload. #}
+      {% if whisper_backends %}
+      <div style="height: 14px;"></div>
+      <div class="row">
+        <div>
+          <label>Engine
+            <span class="help"
+              title="Which inference engine handles the Whisper pass. faster-whisper is the default on CUDA / ROCm / CPU. whisper.cpp ships in G7.2 for Apple Silicon Metal acceleration.">?</span>
+          </label>
+          <select id="whisperBackend" data-test-id="whisper-backend-select">
+            {% for be in whisper_backends %}
+              <option value="{{ be.id }}"
+                {% if be.id == default_whisper_backend %} selected{% endif %}
+                {% if not be.available %} disabled{% endif %}
+                data-available="{{ 'true' if be.available else 'false' }}"
+                title="{{ be.description }}">
+                {{ be.display_name }}{% if not be.available %} (unavailable){% endif %}
+              </option>
+            {% endfor %}
+          </select>
+          <p id="whisperBackendHint" class="hint" style="margin-top:6px;"></p>
+        </div>
+      </div>
+      {% endif %}
+
       <div style="height: 14px;"></div>
 
       <div class="row">
@@ -1069,6 +1097,30 @@
     }
     $("model").addEventListener("change", updateModelHint);
 
+    // G7.1 — refresh the engine hint strip whenever the user picks
+    // a different backend. The selected option's title carries the
+    // backend's description; if the option is disabled (the
+    // ``available`` flag was false at server-render time) we surface
+    // the unavailable_reason inline so the user understands why.
+    function updateWhisperBackendHint() {
+      const sel = $("whisperBackend");
+      const hint = $("whisperBackendHint");
+      if (!sel || !hint) return;
+      const opt = sel.options[sel.selectedIndex];
+      if (!opt) {
+        hint.textContent = "";
+        return;
+      }
+      const desc = opt.getAttribute("title") || "";
+      const available = opt.getAttribute("data-available") !== "false";
+      hint.style.color = available ? "var(--muted)" : "var(--warn)";
+      hint.textContent = desc;
+    }
+    if ($("whisperBackend")) {
+      $("whisperBackend").addEventListener("change", updateWhisperBackendHint);
+      updateWhisperBackendHint();
+    }
+
     // -------- F10.3: Import existing transcript --------
     let _importTranscript = null;
     let _importMedia = null;
@@ -1187,6 +1239,11 @@
       fd.append("model", $("model").value);
       fd.append("batch_size", String(getBatchSize()));
       fd.append("options", JSON.stringify(getAdvancedOptionsOnly()));
+      // G7.1 — pluggable Whisper backend. Element only exists when
+      // the server rendered a backends list; otherwise we fall
+      // through to the server-side default (``faster-whisper``).
+      const wbEl = $("whisperBackend");
+      if (wbEl) fd.append("backend", wbEl.value || "faster-whisper");
 
       let resp;
       try {
