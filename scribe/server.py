@@ -915,10 +915,25 @@ async def capabilities() -> JSONResponse:
     extra triage context support tickets ask for. The CLI surface
     (``python -m scribe.devices``) prints the same fields; the home page
     Recording details card surfaces them through ``backendStatTile()``.
+
+    G2.1: ``gpu.ct2_rocm_pin`` / ``gpu.ct2_installed`` /
+    ``gpu.ct2_drift_message`` carry the pinned CT2 ROCm wheel version,
+    the actually-installed ``ctranslate2`` package version, and a
+    human-readable drift warning when they disagree. All three are
+    ``None`` on non-ROCm backends — the ``ctranslate2`` build a CUDA /
+    MPS / CPU user has installed is unrelated to the AMD-only pin in
+    ``scribe.rocm_install`` so showing it would just be noise. The CLI
+    surface (``python -m scribe.devices``) prints the same fields; the
+    home page Backend tile surfaces them through ``backendStatTile()``.
     """
     from .parakeet import nemo_available
     from .engine import gpu_backend, _gpu_device_name, _cuda_vram_gb, gpu_arch_name
     from .devices import _linux_distro
+    from .rocm_install import (
+        ct2_drift_message,
+        installed_ct2_version,
+        pinned_ct2_rocm_version,
+    )
     parakeet_ok, parakeet_err = nemo_available()
     backend = gpu_backend()
     # Parakeet is NVIDIA-only at runtime even if NeMo imports successfully.
@@ -940,6 +955,29 @@ async def capabilities() -> JSONResponse:
         distro = _linux_distro()
     except Exception:  # noqa: BLE001
         distro = None
+    # G2.1: ROCm-only CT2 pin / drift surface. The pinned wheel version is a
+    # constant in scribe.rocm_install; the installed version is read from
+    # importlib.metadata; the drift message is None when they match. All
+    # three are None outside ROCm — CUDA / MPS / CPU users have a CT2 build
+    # whose version is unrelated to the AMD pin.
+    ct2_rocm_pin: str | None = None
+    ct2_installed: str | None = None
+    ct2_drift: str | None = None
+    if backend == "rocm":
+        try:
+            ct2_rocm_pin = pinned_ct2_rocm_version()
+        except Exception:  # noqa: BLE001
+            ct2_rocm_pin = None
+        try:
+            ct2_installed = installed_ct2_version()
+        except Exception:  # noqa: BLE001
+            ct2_installed = None
+        try:
+            ct2_drift = ct2_drift_message(
+                installed=ct2_installed, pinned=ct2_rocm_pin
+            )
+        except Exception:  # noqa: BLE001
+            ct2_drift = None
     return JSONResponse({
         "parakeet": {
             "available": parakeet_runtime_ok,
@@ -953,6 +991,9 @@ async def capabilities() -> JSONResponse:
             "vram_gb": round(_cuda_vram_gb(), 1) if backend in ("cuda", "rocm") else None,
             "gfx_target": gfx_target,
             "distro": distro,
+            "ct2_rocm_pin": ct2_rocm_pin,
+            "ct2_installed": ct2_installed,
+            "ct2_drift_message": ct2_drift,
         },
     })
 

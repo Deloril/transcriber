@@ -89,13 +89,14 @@ export function formatBackendLabel(backend) {
 }
 
 /**
- * Build the {label, value, sub} stat-tile dict for the active GPU
- * backend. ``gpu`` is the ``capabilities.gpu`` object returned by the
- * server: ``{ backend, device_name, vram_gb, gfx_target?, distro? }``.
- * Returns ``null`` when ``gpu`` is missing — the renderer should then
- * skip the tile entirely rather than show a placeholder.
+ * Build the {label, value, sub, warning} stat-tile dict for the active
+ * GPU backend. ``gpu`` is the ``capabilities.gpu`` object returned by
+ * the server: ``{ backend, device_name, vram_gb, gfx_target?, distro?,
+ * ct2_rocm_pin?, ct2_installed?, ct2_drift_message? }``. Returns
+ * ``null`` when ``gpu`` is missing — the renderer should then skip
+ * the tile entirely rather than show a placeholder.
  *
- * Sub-line composition (G1.3 extends G1.4):
+ * Sub-line composition (G2.1 extends G1.3 extends G1.4):
  *   - device name (when present)
  *   - VRAM in GB (when reported; only CUDA / ROCm carry this)
  *   - gfx target (when reported; only ROCm carries this — gfx1100,
@@ -104,13 +105,31 @@ export function formatBackendLabel(backend) {
  *   - Linux distro pretty-name (when reported; populated on Linux
  *     across every backend so support tickets always show the kernel
  *     / driver context)
+ *   - **G2.1** CT2 ROCm wheel pin (only on ROCm; ``CT2 v4.7.2`` style).
+ *     This is the pinned version in ``scribe.rocm_install`` that
+ *     ``setup.sh --rocm`` installs. Surfacing it in the tile means a
+ *     ROCm user can spot drift at a glance without dropping to the
+ *     terminal to run ``python -m scribe.devices``. Suppressed on
+ *     CUDA / MPS / CPU because a non-ROCm user's ``ctranslate2``
+ *     install is unrelated to the AMD pin.
  *
  * The sub line collapses to ``null`` when every component is missing
  * (e.g. CPU backend on a Mac with no discrete GPU), so the renderer
  * doesn't print an empty " · ".
  *
+ * **G2.1 warning field.** When the server reports a non-empty
+ * ``gpu.ct2_drift_message`` (i.e. the installed ``ctranslate2`` doesn't
+ * match the pinned ROCm wheel version, or isn't installed at all), the
+ * tile carries a ``warning`` string — the same human-readable message
+ * the CLI prints. The renderer should surface this *visibly* (e.g. as
+ * a ⚠ line under the Recording details card); it's the single most
+ * actionable piece of information for a ROCm user whose ``setup.sh
+ * --rocm`` invocation got reverted by a transitive ``pip install``.
+ * On the happy path (or non-ROCm backends) ``warning`` is ``null``.
+ *
  * @param {object|null|undefined} gpu
- * @returns {{label: string, value: string, sub: string|null}|null}
+ * @returns {{label: string, value: string, sub: string|null,
+ *           warning: string|null}|null}
  */
 export function backendStatTile(gpu) {
   if (!gpu || typeof gpu !== "object") return null;
@@ -122,10 +141,21 @@ export function backendStatTile(gpu) {
   }
   if (gpu.gfx_target) parts.push(String(gpu.gfx_target));
   if (gpu.distro) parts.push(String(gpu.distro));
+  // G2.1: surface the pinned CT2 ROCm wheel version on ROCm only.
+  // ``ct2_rocm_pin`` is null on CUDA / MPS / CPU; the API guards that
+  // for us so we just check for a non-empty string here.
+  if (gpu.ct2_rocm_pin) parts.push(`CT2 v${String(gpu.ct2_rocm_pin)}`);
+  // G2.1 drift warning. Falsy ``ct2_drift_message`` (null / undefined /
+  // empty string) means no drift — the tile renders without a warning
+  // banner. Anything truthy is passed through verbatim; the server
+  // already formats the human-readable text.
+  const drift = gpu.ct2_drift_message;
+  const warning = drift ? String(drift) : null;
   return {
     label: "Backend",
     value,
     sub: parts.length ? parts.join(" · ") : null,
+    warning,
   };
 }
 

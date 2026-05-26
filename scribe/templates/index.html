@@ -350,6 +350,27 @@
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .stat .sub { font-size: 11px; color: var(--muted); }
+    /* G2.1: ROCm-only CT2 wheel-drift warning banner. Sits between the
+       stats grid and the per-track audio list so a researcher noticing
+       slow transcription has somewhere to look first. Tone is "warn"
+       (amber) — the install isn't broken but the pinned ROCm wheel
+       has been swapped out for an unrelated CT2 build. */
+    .backend-warning {
+      margin: 0 0 12px 0;
+      padding: 8px 12px;
+      background: var(--warn-bg, #fff7e6);
+      border: 1px solid var(--warn-border, #f5d27a);
+      border-radius: 9px;
+      color: var(--warn-text, #7a4a00);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .backend-warning code {
+      background: rgba(0,0,0,.06);
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
     .stream-list { margin: 0; padding: 0; list-style: none; }
     .stream-list li {
       padding: 8px 12px;
@@ -846,6 +867,10 @@
         <span id="statsName" class="name"></span>
       </div>
       <div id="statsGrid" class="stats-grid"></div>
+      <!-- G2.1: ROCm-only CT2 wheel-drift warning. Hidden by default;
+           ``renderStats`` populates + un-hides it when ``backendStatTile``
+           returns a non-null ``warning``. -->
+      <div id="backendWarning" class="backend-warning hidden" role="status"></div>
       <div id="streamList"></div>
       <div class="waveform-wrap">
         <div class="wf-head">
@@ -1384,7 +1409,10 @@
       }
       // Backend tile — shows whether transcription will run on
       // CUDA / ROCm / MPS / CPU. Helper lives in helpers.mjs so it
-      // can be unit-tested (G1.4).
+      // can be unit-tested (G1.4). G2.1 added the ``warning`` field
+      // (CT2 ROCm wheel drift); we render it in the dedicated banner
+      // beneath the stats grid so the user spots it without hunting
+      // through tile sub-lines.
       const backendTile = backendStatTile(_caps && _caps.gpu);
       if (backendTile) stats.push(backendTile);
       stats.forEach(s => {
@@ -1395,6 +1423,21 @@
                        (s.sub ? `<span class="sub">${escapeHtml(s.sub)}</span>` : "");
         grid.appendChild(el);
       });
+      // G2.1: surface the CT2 ROCm wheel-drift warning. ``warning`` is
+      // null on the happy path (matched pin) and on every non-ROCm
+      // backend — the banner stays hidden until something actionable
+      // is reported.
+      const warnEl = $("backendWarning");
+      if (warnEl) {
+        const warning = backendTile && backendTile.warning;
+        if (warning) {
+          warnEl.textContent = "⚠ " + warning;
+          warnEl.classList.remove("hidden");
+        } else {
+          warnEl.textContent = "";
+          warnEl.classList.add("hidden");
+        }
+      }
 
       // Per-track audio list (only if multiple)
       const list = $("streamList");

@@ -179,7 +179,11 @@ class TestG1_1ApiCapabilitiesUsesHelperChain:
         breaks silently. ``gfx_target`` and ``distro`` were added by
         G1.3 to the same payload (ROCm-only / Linux-only respectively);
         ``backendStatTile`` reads them too, so the pinned key set
-        includes them here."""
+        includes them here. ``ct2_rocm_pin`` / ``ct2_installed`` /
+        ``ct2_drift_message`` were added by G2.1 (ROCm-only) and are
+        likewise read by ``backendStatTile`` — the helper appends the
+        pinned wheel version to the sub-line on ROCm and surfaces the
+        drift message via the tile's ``warning`` field."""
         from scribe import engine
         srv, client, _ = server_env
         monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
@@ -188,10 +192,12 @@ class TestG1_1ApiCapabilitiesUsesHelperChain:
 
         body = client.get("/api/capabilities").json()
         gpu = body["gpu"]
-        # G1.4 fields + G1.3 fields. The G1.4-only subset is still
-        # backwards compatible — the new fields are nullable.
+        # G1.4 fields + G1.3 fields + G2.1 fields. New fields are
+        # nullable; the tile helper tolerates missing-or-null values
+        # so the contract remains backwards compatible.
         assert set(gpu.keys()) == {
             "backend", "device_name", "vram_gb", "gfx_target", "distro",
+            "ct2_rocm_pin", "ct2_installed", "ct2_drift_message",
         }
         assert gpu["backend"] == "rocm"
         assert gpu["device_name"] == "Radeon RX 7900 XTX"

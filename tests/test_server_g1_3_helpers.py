@@ -251,9 +251,10 @@ class TestG1_3ApiCapabilitiesExposesTriageContext:
     def test_capabilities_payload_shape_is_pinned(
         self, server_env, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The home page tile reads {backend, device_name, vram_gb,
-        # gfx_target, distro}. Pin that exact key set so a future
-        # response-shape drift fails this test loudly.
+        # The home page tile reads the gpu payload by key. G2.1 added
+        # ct2_rocm_pin / ct2_installed / ct2_drift_message (ROCm-only,
+        # nullable on every other backend). Pin the full key set so a
+        # future response-shape drift fails this test loudly.
         from scribe import engine, devices
 
         srv, client, _ = server_env
@@ -266,6 +267,7 @@ class TestG1_3ApiCapabilitiesExposesTriageContext:
         body = client.get("/api/capabilities").json()
         assert set(body["gpu"].keys()) == {
             "backend", "device_name", "vram_gb", "gfx_target", "distro",
+            "ct2_rocm_pin", "ct2_installed", "ct2_drift_message",
         }
 
     def test_capabilities_swallows_helper_exception(

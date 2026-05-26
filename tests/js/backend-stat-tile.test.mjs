@@ -42,6 +42,10 @@ describe("backendStatTile", () => {
       label: "Backend",
       value: "CUDA",
       sub: "NVIDIA GeForce RTX 4090 · 24 GB VRAM",
+      // G2.1: ``warning`` is part of the tile shape now; null on the
+      // happy path. Pin it explicitly so a regression that drops the
+      // field fails this test loudly.
+      warning: null,
     });
   });
 
@@ -61,6 +65,7 @@ describe("backendStatTile", () => {
       label: "Backend",
       value: "CPU",
       sub: null,
+      warning: null,
     });
   });
 
@@ -74,6 +79,7 @@ describe("backendStatTile", () => {
       label: "Backend",
       value: "MPS",
       sub: "Apple M2 Max",
+      warning: null,
     });
   });
 
@@ -232,5 +238,171 @@ describe("backendStatTile (G1.3 gfx_target + distro)", () => {
     });
     const sub = tile.sub;
     expect(sub.indexOf("gfx1100")).toBeLessThan(sub.indexOf("Ubuntu"));
+  });
+});
+
+// ---------- G2.1: CT2 ROCm pin + drift on the tile ----------
+//
+// G2.1 added three fields to ``GET /api/capabilities``:
+//   - ``ct2_rocm_pin``        — pinned CT2 ROCm wheel version ("4.7.2")
+//   - ``ct2_installed``       — actually-installed ctranslate2 version
+//   - ``ct2_drift_message``   — human-readable warning when they disagree
+// All three are null on non-ROCm backends. The pin surfaces in the
+// Backend tile sub-line ("CT2 v4.7.2") so the user can spot the wheel
+// version at a glance; drift surfaces via the dedicated ``warning``
+// field which the home page renders as an amber banner.
+
+describe("backendStatTile (G2.1 CT2 ROCm pin + drift)", () => {
+  it("appends CT2 pin to the sub-line on ROCm after distro", () => {
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      gfx_target: "gfx1100",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.7.2",
+      ct2_drift_message: null,
+    });
+    expect(tile.sub).toBe(
+      "AMD Radeon RX 7900 XTX · 24 GB VRAM · gfx1100 · Ubuntu 24.04.4 LTS · CT2 v4.7.2"
+    );
+    expect(tile.warning).toBeNull();
+  });
+
+  it("emits warning when CT2 has drifted (installed ≠ pin)", () => {
+    const drift =
+      "ctranslate2 v4.6.0 installed; pinned ROCm wheel is v4.7.2 " +
+      "(run ./setup.sh --rocm to realign)";
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      gfx_target: "gfx1100",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.6.0",
+      ct2_drift_message: drift,
+    });
+    expect(tile.warning).toBe(drift);
+    // Sub-line still shows the pin so the user can see what should be
+    // installed; the warning explains what's actually installed.
+    expect(tile.sub).toContain("CT2 v4.7.2");
+  });
+
+  it("emits warning when ctranslate2 isn't installed at all", () => {
+    const drift =
+      "ctranslate2 not found; pinned ROCm wheel is v4.7.2 " +
+      "(run ./setup.sh --rocm)";
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      gfx_target: "gfx1100",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: null,
+      ct2_drift_message: drift,
+    });
+    expect(tile.warning).toBe(drift);
+  });
+
+  it("omits CT2 pin from sub-line on CUDA (ROCm-only fingerprint)", () => {
+    const tile = backendStatTile({
+      backend: "cuda",
+      device_name: "NVIDIA GeForce RTX 4090",
+      vram_gb: 24.0,
+      gfx_target: null,
+      distro: "Ubuntu 24.04.4 LTS",
+      // The API guarantees these are null on non-ROCm — but pin the
+      // helper's behaviour explicitly so a future server bug that
+      // leaks a CUDA ctranslate2 build version doesn't render
+      // misleading text in the tile.
+      ct2_rocm_pin: null,
+      ct2_installed: null,
+      ct2_drift_message: null,
+    });
+    expect(tile.sub).toBe(
+      "NVIDIA GeForce RTX 4090 · 24 GB VRAM · Ubuntu 24.04.4 LTS"
+    );
+    expect(tile.sub).not.toContain("CT2");
+    expect(tile.warning).toBeNull();
+  });
+
+  it("omits CT2 pin on MPS / CPU (no ctranslate2 ROCm wheel involved)", () => {
+    const mps = backendStatTile({
+      backend: "mps",
+      device_name: "Apple M2 Max",
+      vram_gb: null,
+      gfx_target: null,
+      distro: null,
+      ct2_rocm_pin: null,
+      ct2_installed: null,
+      ct2_drift_message: null,
+    });
+    expect(mps.sub).toBe("Apple M2 Max");
+    expect(mps.warning).toBeNull();
+    const cpu = backendStatTile({ backend: "cpu" });
+    expect(cpu.sub).toBeNull();
+    expect(cpu.warning).toBeNull();
+  });
+
+  it("treats empty / missing drift message as no-warning", () => {
+    // An empty string is falsy in JS but not null — the helper must
+    // treat both as "no drift" so the renderer doesn't pop an empty
+    // banner.
+    const base = {
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      gfx_target: "gfx1100",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.7.2",
+    };
+    expect(backendStatTile({ ...base, ct2_drift_message: null }).warning).toBeNull();
+    expect(backendStatTile({ ...base, ct2_drift_message: "" }).warning).toBeNull();
+    expect(backendStatTile({ ...base, ct2_drift_message: undefined }).warning).toBeNull();
+  });
+
+  it("CT2 v-prefix matches the CLI render exactly", () => {
+    // ``python -m scribe.devices`` prints ``CT2 ROCm pin:     v4.7.2``;
+    // the tile uses ``CT2 v4.7.2`` so support tickets that paste the
+    // tile or the CLI output use the same canonical version string.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      ct2_rocm_pin: "4.7.2",
+    });
+    expect(tile.sub).toContain("CT2 v4.7.2");
+    expect(tile.sub).not.toContain("CT2 4.7.2"); // missing v-prefix
+    expect(tile.sub).not.toContain("CTv4.7.2"); // smashed
+  });
+
+  it("RDNA 4 + Fedora + drift — chain that fires CT2 issue #2021", () => {
+    // The realistic worst-case ROCm tile: RX 9070 XT on Fedora 43,
+    // CT2 has drifted because pip pulled an unrelated version,
+    // and there's an upstream blocker (CT2 #2021). The tile must
+    // make all four pieces visible.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 9070 XT",
+      vram_gb: 16.0,
+      gfx_target: "gfx1201",
+      distro: "Fedora Linux 43 (Workstation Edition)",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.6.0",
+      ct2_drift_message:
+        "ctranslate2 v4.6.0 installed; pinned ROCm wheel is v4.7.2 " +
+        "(run ./setup.sh --rocm to realign)",
+    });
+    expect(tile.sub).toBe(
+      "AMD Radeon RX 9070 XT · 16 GB VRAM · gfx1201 · " +
+      "Fedora Linux 43 (Workstation Edition) · CT2 v4.7.2"
+    );
+    expect(tile.warning).toContain("v4.6.0 installed");
+    expect(tile.warning).toContain("v4.7.2");
+    expect(tile.warning).toContain("./setup.sh --rocm");
   });
 });
