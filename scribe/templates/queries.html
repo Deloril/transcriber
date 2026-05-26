@@ -33,6 +33,59 @@
 
 {% block actions %}
   <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+  {#
+    F6.2 — coded-segment retrieval report download menu.
+
+    Three direct download targets — CSV / Markdown / RTF — all live
+    behind /api/projects/<pid>/retrieval-report?format=...&group_by=...
+    The links carry ``download`` so the browser saves rather than
+    rendering inline. The same JS open / close / outside-click /
+    Escape pattern as the codebook editor's F2.6 export menu (the
+    only wrinkle is the namespace prefix ``rr-`` so the two menus
+    can co-exist on a future page that surfaces both).
+
+    The ``data-fmt`` attributes power Vitest tests against the
+    helpers used to assemble the URL. ``group_by=code`` is the
+    default the F6.2 module documents ("per code").
+  #}
+  <span class="rr-export-wrap" data-test-feature="F6.2">
+    <button
+      type="button"
+      class="btn secondary"
+      id="rr-export-btn"
+      title="Download every coded segment in the project (CSV / Markdown / Word)"
+      aria-haspopup="menu"
+      aria-expanded="false"
+    >📥 Coded segments ▾</button>
+    <div
+      class="rr-export-menu"
+      id="rr-export-menu"
+      role="menu"
+      aria-label="Export coded segments"
+    >
+      <a
+        role="menuitem"
+        class="rr-export-item"
+        href="/api/projects/{{ project_id }}/retrieval-report?format=csv&group_by=code"
+        data-fmt="csv"
+        download
+      >CSV <span class="rr-export-hint">spreadsheet — RFC 4180</span></a>
+      <a
+        role="menuitem"
+        class="rr-export-item"
+        href="/api/projects/{{ project_id }}/retrieval-report?format=markdown&group_by=code"
+        data-fmt="markdown"
+        download
+      >Markdown <span class="rr-export-hint">grouped by code, paste into thesis</span></a>
+      <a
+        role="menuitem"
+        class="rr-export-item"
+        href="/api/projects/{{ project_id }}/retrieval-report?format=rtf&group_by=code"
+        data-fmt="rtf"
+        download
+      >Word (RTF) <span class="rr-export-hint">opens in Word / LibreOffice</span></a>
+    </div>
+  </span>
 {% endblock %}
 
 {% block subtitle_block %}
@@ -282,6 +335,35 @@
     border: 1px solid color-mix(in srgb, var(--err) 40%, var(--border));
     padding: 8px 10px; border-radius: 6px;
     margin-bottom: 8px; font-size: 12.5px;
+  }
+
+  /* F6.2: coded-segment retrieval report dropdown (header-actions area).
+     Mirrors the F2.6 codebook export dropdown's visual contract with
+     the ``rr-`` namespace so both menus can co-exist on a future page. */
+  .rr-export-wrap { position: relative; display: inline-block; }
+  .rr-export-menu {
+    display: none;
+    position: absolute; top: 100%; right: 0;
+    margin-top: 4px; min-width: 320px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.18);
+    padding: 4px; z-index: 50;
+  }
+  .rr-export-menu.open { display: block; }
+  .rr-export-item {
+    display: block; padding: 8px 10px;
+    border-radius: 6px;
+    color: var(--text); text-decoration: none;
+    font-size: 13px;
+  }
+  .rr-export-item:hover, .rr-export-item:focus {
+    background: var(--panel-2); outline: none;
+  }
+  .rr-export-item .rr-export-hint {
+    display: block; font-size: 11.5px; color: var(--muted);
+    margin-top: 1px;
   }
 {% endblock %}
 
@@ -998,6 +1080,52 @@ async function deleteSavedQuery(sqid) {
 }
 
 document.getElementById("sqSave").addEventListener("click", saveCurrentQuery);
+
+
+// --------------------------------------------------------------------- //
+// F6.2 — Coded-segment retrieval report dropdown
+//
+// Same open/close/outside-click/Escape pattern as the F2.6 codebook
+// export menu in codebook_editor.html. The links themselves point
+// straight at /api/projects/<pid>/retrieval-report?format=...&group_by=...
+// with ``download`` set so the browser saves rather than rendering;
+// all this JS does is open / close the menu so the affordance feels
+// at home next to the F3.5 ← Project link.
+// --------------------------------------------------------------------- //
+
+const rrExportBtn = document.getElementById("rr-export-btn");
+const rrExportMenu = document.getElementById("rr-export-menu");
+
+function closeRetrievalExportMenu() {
+  if (!rrExportMenu) return;
+  rrExportMenu.classList.remove("open");
+  if (rrExportBtn) rrExportBtn.setAttribute("aria-expanded", "false");
+}
+
+if (rrExportBtn && rrExportMenu) {
+  rrExportBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const wasOpen = rrExportMenu.classList.contains("open");
+    closeRetrievalExportMenu();
+    if (!wasOpen) {
+      rrExportMenu.classList.add("open");
+      rrExportBtn.setAttribute("aria-expanded", "true");
+    }
+  });
+  rrExportMenu.addEventListener("click", (e) => {
+    if (e.target.closest(".rr-export-item")) {
+      closeRetrievalExportMenu();
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if (!rrExportMenu.contains(e.target) && e.target !== rrExportBtn) {
+      closeRetrievalExportMenu();
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeRetrievalExportMenu();
+  });
+}
 
 
 (async () => {

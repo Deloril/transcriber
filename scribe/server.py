@@ -17,7 +17,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 import markdown as md
-from fastapi import Body, FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi import Body, FastAPI, HTTPException, Query, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -5331,6 +5331,206 @@ async def export_codebook_endpoint(
         # header. We slugify to ASCII upstream, so the simple quoted
         # form is sufficient — no need for RFC 5987 ``filename*=``
         # extension.
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(
+        content=text,
+        media_type=spec.media_type,
+        headers=headers,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Coded-segment retrieval report (F6.2)
+#
+# F6.2 phrasing in PLANNING.md:
+#
+#   > Coded-segment retrieval report (per code, filterable, grouped by
+#   > source / participant).
+#
+# The pure renderer is :mod:`scribe.retrieval_report` (CSV / Markdown /
+# RTF; group-by code / source / participant / none; per-code / per-
+# source / per-coder / per-participant filters that AND-combine).
+# This endpoint hydrates applications + codes + sources + coders +
+# participants from the on-disk store, optionally pulls transcript
+# text from ``outputs/<job_id>/edited.json`` (or the engine's JSON
+# sidecar) so the rendered body carries the actual quoted spans, and
+# streams the result back as an attachment.
+#
+# Query parameters mirror the CLI surface in
+# :mod:`scribe.scripts.export_retrieval_report` so a researcher who
+# learns one carries the muscle memory across:
+#
+#   ?format=csv|markdown|rtf       (default csv; aliases md / word /
+#                                   doc / docx accepted)
+#   ?group_by=code|source|participant|none
+#                                  (default code; aliases codes /
+#                                   sources / participants / flat)
+#   ?code=<code_id>                (repeatable; AND-combined filter)
+#   ?source=<source_id>            (repeatable)
+#   ?coder=<coder_id>              (repeatable)
+#   ?participant=<participant_id>  (repeatable)
+#
+# Filters default to "match every row" when absent; passing an empty
+# repeated filter (e.g. ``?code=&code=``) is treated as the user
+# stripping out empties. We intentionally don't expose the
+# "match-nothing on empty list" branch through the URL because there's
+# no way for a browser to tell the difference between "no filter" and
+# "empty filter" — the F6.2 pure module honours that distinction in
+# tests, the HTTP surface deliberately collapses it.
+#
+# Status codes: ``404`` if the project is missing; ``400`` for an
+# unrecognised format / group_by; ``200`` otherwise (including empty
+# projects — a header-only CSV / placeholder Markdown / minimal RTF
+# is the right answer when there's nothing coded yet).
+# --------------------------------------------------------------------------- #
+
+
+from . import retrieval_report as _retrieval_report  # noqa: E402
+
+
+def _load_segments_for_source_for_retrieval(
+    source: "_sources.Source",
+) -> list[dict] | None:
+    """Resolve a source's transcript segments under the server's OUTPUT_DIR.
+
+    Same discovery rules as the QDPX exporter
+    (:func:`_load_segments_for_source_for_qdpx`): prefer
+    ``edited.json`` (the editor's authoritative version), fall back
+    to any ``*.json`` engine sidecar with a ``segments`` array.
+    Returns ``None`` if no transcript is available — the caller
+    leaves the row's ``text`` field empty rather than failing the
+    whole report.
+    """
+    if not getattr(source, "transcript_job_id", ""):
+        return None
+    job_dir = OUTPUT_DIR / source.transcript_job_id
+    if not job_dir.is_dir():
+        return None
+    edited = job_dir / "edited.json"
+    candidates: list[Path] = []
+    if edited.is_file():
+        candidates.append(edited)
+    candidates.extend(
+        sorted(p for p in job_dir.glob("*.json") if p.name != "edited.json")
+    )
+    for p in candidates:
+        try:
+            data = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("segments"), list):
+            return data["segments"]
+    return None
+
+
+@app.get("/api/projects/{project_id}/retrieval-report")
+async def export_retrieval_report_endpoint(
+    project_id: str,
+    format: str = "csv",
+    group_by: str = "code",
+    code: list[str] | None = Query(default=None),
+    source: list[str] | None = Query(default=None),
+    coder: list[str] | None = Query(default=None),
+    participant: list[str] | None = Query(default=None),
+) -> Response:
+    """Download the project's coded-segment retrieval report (F6.2).
+
+    Body is one of CSV / Markdown / RTF, rendered by
+    :func:`scribe.retrieval_report.render_report`. The rows hydrate
+    every application in the project with code / source / coder /
+    participant names + the actual quoted text from the editor's
+    transcript (when one is available). Filters are applied after
+    hydration so a row only ever appears in the body if it matches
+    every supplied filter (AND-combined).
+
+    Headers:
+
+    * ``Content-Type`` matches the format
+      (text/csv / text/markdown / application/rtf, all charset=utf-8
+      where appropriate).
+    * ``Content-Disposition: attachment; filename="<slug>-coded-
+      segments.<ext>"`` so browsers prompt a save rather than
+      rendering inline.
+
+    Status codes: ``404`` if the project is missing; ``400`` for an
+    unrecognised format or group_by; ``200`` otherwise.
+    """
+    _check_project_id(project_id)
+    try:
+        fmt = _retrieval_report.normalise_format(format)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    try:
+        gb = _retrieval_report.normalise_group_by(group_by)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        apps = _applications.list_applications(_projects_root(), project_id)
+        codes = _codes.list_codes(_projects_root(), project_id)
+        sources = _sources.list_sources(_projects_root(), project_id)
+        coders = _coders.list_coders(_projects_root(), project_id)
+        parts = _participants.list_participants(
+            _projects_root(), project_id
+        )
+
+    # Hydrate transcript segments per source so quoted text survives
+    # into the rendered body. Sources without a discoverable
+    # transcript get omitted from the map; build_retrieval_rows
+    # leaves their ``text`` empty without raising.
+    segments_by_source: dict[str, list[dict]] = {}
+    for s in sources:
+        segs = _load_segments_for_source_for_retrieval(s)
+        if segs is not None:
+            segments_by_source[s.id] = segs
+
+    rows = _retrieval_report.build_retrieval_rows(
+        applications=apps,
+        codes=codes,
+        sources=sources,
+        coders=coders,
+        participants=parts,
+        segments_by_source=segments_by_source or None,
+    )
+
+    # Drop empty repeats and apply filters only when the user
+    # supplied at least one non-empty value. The pure module's
+    # "empty list = match nothing" branch is deliberately not
+    # reachable through the URL — see the section comment above.
+    def _clean(values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        kept = [v for v in values if v]
+        return kept or None
+
+    code_f = _clean(code)
+    source_f = _clean(source)
+    coder_f = _clean(coder)
+    part_f = _clean(participant)
+    if any(f is not None for f in (code_f, source_f, coder_f, part_f)):
+        rows = _retrieval_report.filter_rows(
+            rows,
+            code_ids=code_f,
+            source_ids=source_f,
+            coder_ids=coder_f,
+            participant_ids=part_f,
+        )
+
+    text = _retrieval_report.render_report(
+        fmt, rows, project=project, group_by=gb
+    )
+    spec = _retrieval_report.EXPORT_FORMATS[fmt]
+    filename = _retrieval_report.slugify_report_filename(project, fmt)
+    headers = {
+        # Quote the filename so spaces / non-ASCII never break the
+        # header. We slugify to ASCII upstream, so the simple quoted
+        # form is sufficient — same convention as the F6.1 codebook
+        # export.
         "Content-Disposition": f'attachment; filename="{filename}"',
     }
     return Response(
