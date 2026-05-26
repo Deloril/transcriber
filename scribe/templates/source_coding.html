@@ -159,6 +159,44 @@
 
   /* Side panel — applications already on this source. */
   .side-card { padding: 14px 16px; }
+
+  /* F4.2 — per-code spans summary (non-contiguous components +
+     duplicate-anchor diagnostic). Lives between the "Coded segments"
+     heading and the per-row list so a researcher reads it as a
+     summary before scrolling rows. */
+  .spans-summary {
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    font-size: 11px;
+  }
+  .spans-summary .row { display: flex; align-items: center; gap: 6px; }
+  .spans-summary .row + .row { margin-top: 4px; }
+  .spans-summary .swatch {
+    width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto;
+  }
+  .spans-summary .name { color: var(--text); font-weight: 600; }
+  .spans-summary .places { color: var(--muted); }
+  .spans-summary .dup {
+    color: var(--err);
+    margin-left: auto;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .app-row .place-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 500;
+    border: 1px solid var(--border);
+  }
   .app-row {
     padding: 8px 10px;
     background: var(--panel-2);
@@ -356,6 +394,15 @@
     <hr style="border:0;border-top:1px solid var(--border);margin:14px 0">
 
     <h3 style="margin-top:0;font-size:14px">Coded segments <span id="appCount" class="hint"></span></h3>
+    <!-- F4.2 spans summary: per-code "(N places)" non-contiguous-component
+         counts + duplicate-anchor diagnostic. Hidden until at least one
+         code applies in 2+ places or has a duplicate-anchor warning. -->
+    <div id="spansSummary"
+         class="spans-summary"
+         role="region"
+         aria-label="Code span summary"
+         data-spans-source-id="{{ source_id }}"
+         style="display:none"></div>
     <div id="appList">
       <div class="hint">No applications on this source yet. Highlight text in the transcript to start.</div>
     </div>
@@ -384,6 +431,11 @@ let SOURCE = null;
 let TRANSCRIPT = null;
 let CODES = [];
 let APPS = [];
+// F4.2 — per-code span structure for this source. Refreshed every
+// time APPS changes (apply / remove / AI-suggestion accept). Shape
+// matches GET /api/projects/<pid>/applications/spans?source_id=<sid>:
+//   { source_id, by_code: [...], duplicate_anchor_groups: [...] }
+let SPANS = { by_code: [], duplicate_anchor_groups: [] };
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -505,6 +557,10 @@ async function loadAll() {
     renderTranscript();
     renderApps();
     renderCodebookSummary();
+    // F4.2 — first paint of the per-code spans summary. Failures are
+    // non-fatal: the rest of the coding view stays usable even if the
+    // diagnostic panel can't render this once.
+    refreshSpans();
     // F3.3 — kick off in the background; failures stay non-fatal so
     // they don't block the coding view if a researcher hasn't created
     // any participants yet.
@@ -1299,6 +1355,7 @@ async function acceptAiSuggestion(codeId) {
     APPS.push(body.application);
     paintApplications();
     renderApps();
+    refreshSpans();
     window.getSelection().removeAllRanges();
     hideAiPanel();
     hidePopover();
@@ -1421,11 +1478,91 @@ async function applyCode(codeId) {
     APPS.push(app);
     paintApplications();
     renderApps();
+    refreshSpans();
     // Clear browser selection so the popover doesn't immediately re-open.
     window.getSelection().removeAllRanges();
   } catch (e) {
     alert(`Couldn't apply code: ${e.message}`);
   }
+}
+
+// F4.2 — fetch the per-code spans summary for this source and paint
+// the diagnostic panel. Called after every APPS mutation
+// (load / apply / remove / AI accept). Non-fatal: a failed fetch
+// hides the panel and writes a console warning.
+async function refreshSpans() {
+  try {
+    const url = `/api/projects/${PROJECT_ID}/applications/spans`
+      + `?source_id=${encodeURIComponent(SOURCE_ID)}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    SPANS = await r.json();
+  } catch (e) {
+    SPANS = { by_code: [], duplicate_anchor_groups: [] };
+    // eslint-disable-next-line no-console
+    console.warn("F4.2 spans fetch failed:", e);
+  }
+  renderSpansSummary();
+  // Re-paint the row list so per-row "place i/N" badges reflect the
+  // new component grouping.
+  renderApps();
+}
+
+function renderSpansSummary() {
+  const panel = document.getElementById("spansSummary");
+  if (!panel) return;
+  const byCode = (SPANS && SPANS.by_code) || [];
+  // Only show codes whose application_count > 1 — single applications
+  // don't need a "1 place" badge cluttering the side panel. Duplicate-
+  // anchor warnings still surface (those are always worth flagging).
+  const interesting = byCode.filter(
+    e => e.application_count > 1 || e.duplicate_anchor_count > 0
+  );
+  if (!interesting.length) {
+    panel.style.display = "none";
+    panel.innerHTML = "";
+    return;
+  }
+  panel.style.display = "";
+  panel.innerHTML = interesting.map(entry => {
+    const code = CODES.find(c => c.id === entry.code_id);
+    const codeName = code ? code.name : `(deleted code ${entry.code_id.slice(0,8)})`;
+    const colours = codeColours(code || { id: entry.code_id });
+    const places = entry.component_count > 1
+      ? `${entry.component_count} places · ${entry.application_count} applications`
+      : `${entry.application_count} applications`;
+    const dup = entry.duplicate_anchor_count > 0
+      ? `<span class="dup" title="Identical anchors detected — F4.2 diagnostic">${entry.duplicate_anchor_count} duplicate${entry.duplicate_anchor_count === 1 ? "" : "s"}</span>`
+      : "";
+    return `<div class="row" data-code-id="${escapeHtml(entry.code_id)}">
+      <span class="swatch" style="background:${colours.swatch}"></span>
+      <span class="name">${escapeHtml(codeName)}</span>
+      <span class="places">${escapeHtml(places)}</span>
+      ${dup}
+    </div>`;
+  }).join("");
+}
+
+// F4.2 — given an application, return ``{index, total}`` for the
+// non-contiguous component it belongs to, or null when the code has
+// only one component (no badge needed). Components in SPANS.by_code
+// are anchor-sorted earliest first; we match by anchor_start_word_id
+// to preserve "place 1" / "place 2" labels even after edits.
+function placeBadgeFor(app) {
+  if (!SPANS || !Array.isArray(SPANS.by_code)) return null;
+  const entry = SPANS.by_code.find(e => e.code_id === app.code_id);
+  if (!entry || entry.component_count < 2) return null;
+  // Find the component whose start_word_id <= app.start <= end_word_id.
+  for (let i = 0; i < entry.components.length; i += 1) {
+    const c = entry.components[i];
+    if (
+      compareWordIds(c.start_word_id, app.anchor_start_word_id) <= 0
+      && compareWordIds(app.anchor_start_word_id, c.end_word_id) <= 0
+    ) {
+      return { index: i + 1, total: entry.component_count };
+    }
+  }
+  return null;
 }
 
 function renderApps() {
@@ -1442,11 +1579,18 @@ function renderApps() {
     const codeName = code ? code.name : `(deleted code ${a.code_id.slice(0,8)})`;
     const snippet = quoteSnippet(a.anchor_start_word_id, a.anchor_end_word_id);
     const colours = codeColours(code || { id: a.code_id });
+    // F4.2 — show "place i/N" when this code has multiple non-
+    // contiguous components on this source. Quietly absent for
+    // single-component codes.
+    const place = placeBadgeFor(a);
+    const placeBadge = place
+      ? `<span class="place-badge" title="F4.2: place ${place.index} of ${place.total} non-contiguous occurrences">place ${place.index}/${place.total}</span>`
+      : "";
     return `<div class="app-row"
                  data-app-id="${escapeHtml(a.id)}"
                  data-start="${escapeHtml(a.anchor_start_word_id)}"
                  style="--code-border:${colours.border}">
-      <span class="code-name"><span class="swatch" style="background:${colours.swatch}"></span>${escapeHtml(codeName)}</span>
+      <span class="code-name"><span class="swatch" style="background:${colours.swatch}"></span>${escapeHtml(codeName)}${placeBadge}</span>
       <div class="quote">"${escapeHtml(snippet)}"</div>
       <div class="actions">
         <button data-act="delete">Remove</button>
@@ -1482,6 +1626,7 @@ document.getElementById("appList").addEventListener("click", async (e) => {
       APPS = APPS.filter(a => a.id !== aid);
       paintApplications();
       renderApps();
+      refreshSpans();
     } catch (err) {
       alert(`Couldn't delete: ${err.message}`);
     }

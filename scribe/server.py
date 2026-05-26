@@ -2692,7 +2692,30 @@ async def run_saved_query_endpoint(
 
 from . import coders as _coders  # noqa: E402
 from . import applications as _applications  # noqa: E402
+from . import application_spans as _application_spans  # noqa: E402  (F4.2)
 from . import codes as _codes  # noqa: E402
+
+
+def _segment_word_counts_for_source(
+    source: "_sources.Source",
+) -> dict[int, int]:
+    """Return ``{segment_index: word_count}`` for cross-segment
+    adjacency detection (F4.2). Empty dict when no transcript is
+    available — callers should treat that as "only within-segment
+    adjacency is detectable", which matches the
+    :func:`scribe.application_spans.applications_adjacent` contract.
+    """
+    segments = _load_segments_for_source_speaker_map(source)
+    if not segments:
+        return {}
+    counts: dict[int, int] = {}
+    for i, seg in enumerate(segments):
+        if not isinstance(seg, dict):
+            continue
+        words = seg.get("words")
+        if isinstance(words, list):
+            counts[i] = len(words)
+    return counts
 
 
 def _check_coder_id(coder_id: str) -> None:
@@ -3818,6 +3841,135 @@ async def create_application_endpoint(project_id: str, request: Request) -> JSON
             raise HTTPException(400, f"Invalid application payload: {e}")
         _applications.save_application(_projects_root(), app_obj)
     return JSONResponse(app_obj.to_dict(), status_code=201)
+
+
+@app.get("/api/projects/{project_id}/applications/spans")
+async def applications_spans_endpoint(
+    project_id: str, source_id: str,
+) -> JSONResponse:
+    """Per-(code, source) span structure for a single source (F4.2).
+
+    Required query param: ``source_id`` — the F4.2 headline question
+    ("how many places in this source does this code apply?") is
+    inherently scoped to one source, so we make the caller commit to
+    one rather than pretending to summarise the whole project.
+
+    Defined **before** ``GET /applications/{application_id}`` so the
+    static ``spans`` segment wins over the parametric capture: FastAPI
+    matches in registration order, and ``_check_application_id`` would
+    otherwise reject the literal "spans" as a bad id.
+
+    Response shape::
+
+        {
+          "source_id": "<sid>",
+          "by_code": [
+            {
+              "code_id": "<cid>",
+              "application_count": <int>,        # how many apps total
+              "component_count": <int>,          # F4.2 headline:
+                                                 # distinct non-contiguous
+                                                 # places (1 = single span,
+                                                 # 2+ = non-contiguous case)
+              "components": [
+                {
+                  "start_word_id": "s<seg>w<word>",
+                  "end_word_id":   "s<seg>w<word>",
+                  "size": <int>,                 # apps in this component
+                },
+                ...
+              ],
+              "duplicate_anchor_count": <int>,   # diagnostic
+            },
+            ...
+          ],
+          "duplicate_anchor_groups": [
+            {
+              "code_id": "<cid>",
+              "application_ids": ["<aid>", ...],
+            },
+            ...
+          ]
+        }
+
+    Sorted: ``by_code`` follows the order each code first appears in
+    document order on this source (so the side-panel can paint codes
+    in reading order); within each code, components are anchor-sorted
+    earliest first.
+    """
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            source = _sources.load_source(
+                _projects_root(), project_id, source_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+        apps = _applications.list_applications(
+            _projects_root(), project_id, source_id=source_id,
+        )
+    # Cross-segment adjacency: include word counts when the transcript
+    # is reachable. When it isn't, only within-segment adjacency is
+    # detected — which matches the application_spans contract.
+    word_counts = _segment_word_counts_for_source(source)
+
+    # Bucket by code_id so we get a single per-code summary even when
+    # apps are interleaved across codes in the underlying list.
+    code_ids_in_order: list[str] = []
+    seen: set[str] = set()
+    for a in _application_spans.sort_by_anchor(apps):
+        if a.code_id not in seen:
+            seen.add(a.code_id)
+            code_ids_in_order.append(a.code_id)
+
+    dup_groups_all = _application_spans.find_duplicate_anchors(apps)
+
+    by_code: list[dict] = []
+    for cid in code_ids_in_order:
+        components = _application_spans.non_contiguous_components(
+            apps, cid, source_id, segment_word_counts=word_counts or None,
+        )
+        comp_payload: list[dict] = []
+        for comp in components:
+            first = comp[0]
+            last = comp[-1]
+            comp_payload.append({
+                "start_word_id": first.anchor_start_word_id,
+                "end_word_id": last.anchor_end_word_id,
+                "size": len(comp),
+            })
+        dup_groups_for_code = [
+            g for g in dup_groups_all
+            if g and g[0].code_id == cid and g[0].source_id == source_id
+        ]
+        duplicate_anchor_count = sum(len(g) for g in dup_groups_for_code)
+        application_count = sum(
+            1 for a in apps if a.code_id == cid and a.source_id == source_id
+        )
+        by_code.append({
+            "code_id": cid,
+            "application_count": application_count,
+            "component_count": len(components),
+            "components": comp_payload,
+            "duplicate_anchor_count": duplicate_anchor_count,
+        })
+
+    duplicate_payload = [
+        {
+            "code_id": g[0].code_id,
+            "application_ids": [a.id for a in g],
+        }
+        for g in dup_groups_all
+        if g and g[0].source_id == source_id
+    ]
+
+    return JSONResponse({
+        "source_id": source_id,
+        "by_code": by_code,
+        "duplicate_anchor_groups": duplicate_payload,
+    })
 
 
 @app.get("/api/projects/{project_id}/applications/{application_id}")
