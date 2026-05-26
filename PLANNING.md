@@ -302,3 +302,269 @@ The minimum viable academic coding tool. Researchers can start using it immediat
 - Should transcripts be coded *only* after the editor pass, or live during editing? Researchers typically want to clean before coding.
 - Memo Markdown vs rich text. Markdown is simpler and exports cleanly; rich text is what NVivo users expect.
 - AI: Ollama-only or also support llama.cpp embedded? Ollama is simpler to ship; embedded is one fewer dependency on the user.
+
+---
+
+# Audit: wireframes + partial implementations to graduate
+
+These are features whose **pure module exists with passing tests** but
+whose UI is either a wireframe stub on `project_subpage.html`, a missing
+template, or a partial widget. Each entry lists the F-ID it maps to, what
+exists today, and what needs to land. Items are grouped by where the
+gap actually is (UI, partial UI, or end-to-end missing).
+
+This section was written 2026-05-26 by walking every template and
+matching it against the routes in `server.py` and the modules in
+`scribe/`. **Trust working features, not commit messages.**
+
+## A. Project subpages still rendering as wireframes
+
+The `project_subpage.html` shell renders a stub-banner + four wireframe
+cards for these routes. Each is an `alert("Stub: …")` button or a
+`<div class="wf">` placeholder. Backend is ready in every case below;
+graduate the template into a real page and wire it into the routes in
+`scribe/server.py` (`_render_subpage` calls).
+
+- **W1.1 Memos page (`/projects/<id>/memos`)** — `scribe.memos`,
+  `scribe.memo_export`, and the `/api/projects/<id>/memos` POST route
+  exist (server.py:1255+). Page must list memos with type/linked-to/
+  author filter (F5.1), open/edit/create modal (F5.2), and an "Export
+  all" button (F5.4). The "+ New memo" button on the wireframe is an
+  `alert("Stub: F5.1")` today.
+
+- **W1.2 Memo canvas (`/projects/<id>/memos/canvas` — does not exist)** —
+  `scribe.memo_canvas` is a complete module with 30 vitest tests
+  (`tests/js/memo-canvas.test.mjs`) plus 60+ pytest tests; the canvas
+  routes are wired (server.py:1364–1611, including cards / categories /
+  links). No template, no route. Build a draggable canvas page (F5.3)
+  that consumes those endpoints.
+
+- **W1.3 Promote-memo-to-code button** — `scribe.memo_promote` +
+  `tests/js/memo-promote.test.mjs` are done. Endpoint
+  `/api/projects/<id>/memos/<memo_id>/promote-to-code` exists
+  (server.py:1617). The UI affordance does not exist on any memo view
+  (since the memo view itself doesn't exist — see W1.1). Fold this into
+  W1.1 once that page lands (F5.5).
+
+- **W1.4 Memo drafts ("✨ Draft this with AI")** — `scribe.memo_drafts`
+  is a full module with passing tests; no route registered in
+  `server.py`, no UI. Wire a `POST /api/projects/<id>/memos/draft` and
+  surface it from the (forthcoming) memo modal (F8.8).
+
+- **W1.5 Queries / matrices page (`/projects/<id>/queries`)** —
+  `scribe.matrix` and `scribe.matrix_export` are complete modules
+  (counts, co-occurrence, code × attribute crosstab, CSV/XLSX
+  exporters). No routes, no template — only the wireframe-subpage
+  placeholders. Ship the query builder (F3.5), saved queries (F3.7),
+  and matrix views (F3.6) — at least one matrix view + retrieval-report
+  is the minimum viable page.
+
+- **W1.6 Audit-timeline page (`/projects/<id>/audit`)** —
+  `scribe.event_log` is the append-only log; `scribe.audit_export` can
+  render Markdown / RTF (F9.7) and `scribe.codebook_snapshots` exists.
+  No event-timeline UI, no audit-export download endpoint, no time-
+  travel viewer. Ship at least: event timeline with filter (F9.1) +
+  "Export audit log" button (F9.7).
+
+- **W1.7 Project settings page (`/projects/<id>/settings`)** —
+  Wireframe with five cards. Methodology + sensitising concepts are
+  already saved on the project entity (F1.1) but cannot be edited
+  after creation. Codebook stage / lock toggle (F2.4) has its module
+  (`scribe.codebook_lock`) but no UI. Source attribute schema (F3.2)
+  has no module yet. Danger zone (delete project + REFI-QDA + anonymised
+  export) is half-wired — the export endpoints exist (server.py:1810,
+  1902, 1966) but the buttons don't. Ship as: edit project metadata
+  form, stage/lock toggle, attribute schema editor (depends on F3.2
+  module landing), and a danger-zone card with three working buttons.
+
+- **W1.8 AI suggestions page (`/projects/<id>/ai`)** — Wireframe today.
+  Per-span suggestions are already wired into the **coding view**
+  (F8.3 / F8.4 in `source_coding.html`), so this page should be the
+  *queue* view: pending whole-transcript reviews (F8.6 — not yet
+  implemented), AI-second-coder diff (F8.7 — pure module exists, no
+  UI), and the AI-off gate status (F8.10 — endpoint exists at
+  `/api/projects/<id>/ai/gate`, but no UI to override it). Ship the
+  page as a status dashboard plus an "AI off / on" toggle for F8.10.
+
+## B. Templates that exist but are missing critical fields or actions
+
+These pages render real data, but they expose only a fraction of the
+data layer that already supports the feature.
+
+- **W2.1 Codebook editor — code definition fields (`F2.1`)** —
+  `codebook_editor.html` only edits **name, definition, inclusion,
+  exclusion**. The Code entity supports: exemplars, parent_code,
+  related_codes (typed), theoretical_memo, stage, colour, status,
+  provenance — and the POST route already accepts all of them
+  (server.py:1083–1090). Add fields for parent code (dropdown of other
+  codes), related codes (multi-select), exemplars (repeater), stage
+  (initial / focused / axial / theoretical), colour picker, status
+  (active / retired). The per-code colour helper in `source_coding.html`
+  hashes the id today; once `colour` is editable, prefer the user's
+  pick over the hash.
+
+- **W2.2 Codebook editor — lifecycle ops (`F2.3`)** — `code_lifecycle.py`
+  implements merge, split, rename, retire, promote/demote. None of
+  these are in `codebook_editor.html`. Add a per-row `⋮` menu with
+  Rename / Merge into… / Split / Retire / Promote / Demote. Wire to
+  pure module via new endpoints (no routes today for these ops).
+
+- **W2.3 Codebook editor — version history (`F2.2 / F9.2`)** —
+  `code_versions.py` records every definition edit, and
+  `definition_at_apply.py` round-trips the version-at-apply for an
+  application. The codebook editor doesn't surface the history at
+  all. Add a "history" disclosure per code showing the version list,
+  diff between versions, and the version recorded against each
+  application.
+
+- **W2.4 Codebook editor — locked stage toggle (`F2.4`)** —
+  `codebook_lock.py` + `codebook_lock_audit.py` are complete pure
+  modules with tests. No UI. Add a stage selector (initial / focused /
+  axial / theoretical / locked) with the unlock-requires-memo gate
+  enforced server-side (the audit module already has the contract).
+
+- **W2.5 Codebook editor — codebook export (`F2.6 / F6.1 / F6.5`)** —
+  `/api/projects/<id>/codebook/export` (server.py:1739) and
+  `/api/projects/<id>/codebook/refi-qda-xml` (server.py:1810) work.
+  Add a download menu to the codebook editor: CSV / Markdown / Word /
+  REFI-QDA Codebook XML. Today these endpoints can only be hit via
+  curl.
+
+- **W2.6 Sources list — attribute columns (`F3.2`)** —
+  `sources_list.html` shows Name / Type / Language / Added. F3.2 wants
+  user-defined columns per source (recording date, custom attributes).
+  No backend module yet; design the schema in `scribe/source_attributes.py`
+  before touching the template.
+
+- **W2.7 Source picker — speaker awareness (`F3.4`)** —
+  `source_picker.html` doesn't surface per-speaker selection. The
+  speaker-map module (`scribe/speaker_map.py`) is in place but the
+  picker can't restrict an attached source to a specific speaker
+  (interviewer vs interviewee). Likely a column on the participant ↔
+  source mapping (W3.1 below).
+
+## C. End-to-end missing — no module, no route, no template
+
+These features are in `PLANNING.md` Phase E (or earlier) but have
+nothing on disk yet. Each needs the standard cadence: pure module +
+tests, FastAPI route + tests, template + Vitest.
+
+- **W3.1 Participants UI (`F1.3 / F3.3`)** — `scribe.participants`
+  and `scribe.participant_sources` exist with passing tests; the
+  endpoints are wired (server.py:905–1054). Zero UI. Add a
+  `/projects/<id>/participants` page (list, create, edit, attach to
+  sources). Wire the "Speakers" picker on the source page so a
+  speaker label can be linked to a participant id.
+
+- **W3.2 Sampling log (`F1.4`)** — No module, no UI. Ship a
+  `scribe/sampling_log.py` (already exists as an empty module — verify)
+  + a "Why was this source added?" memo prompt at attach-time + a
+  per-project sampling log readable from project settings. The
+  theoretical-sampling justification is required for a credible GT
+  audit trail.
+
+- **W3.3 Find similar quotes (`F8.5`)** — `embedding_index.py` is
+  built; no UI. Add a per-application "🔎 Find similar quotes" button
+  in `source_coding.html` and a `/api/projects/<id>/ai/similar` route.
+
+- **W3.4 Whole-transcript AI review (`F8.6`)** — Not started. Background
+  job that produces a list of suggestions for review. Needs route,
+  module, queue UI on the AI page (W1.8).
+
+- **W3.5 AI second-coder pass (`F8.7`)** — `ai_second_coder.py` is a
+  pure module with tests. No route, no UI. Ship as: launch button
+  (only enabled when codebook is locked), runs in background, results
+  diff into the AI page (W1.8) showing "model agreed / disagreed"
+  per application.
+
+- **W3.6 Project checkpoints (`F9.4`)** — `project_checkpoints.py`
+  exists; not surfaced in the audit page. Ship a "Save checkpoint"
+  button + a list under the audit timeline (depends on W1.6).
+
+- **W3.7 Audit export download (`F9.7`)** — `audit_export.py` exists;
+  no GET route, no button. Ship `/api/projects/<id>/audit/export?fmt=md|rtf`
+  and a download button on the audit page (depends on W1.6).
+
+- **W3.8 Time-travel view (`F9.8`)** — Not started. Read-only view of
+  the project as it was at a given snapshot. `codebook_snapshots.py`
+  is the building block. Stretch — Phase E.
+
+- **W3.9 Per-application provenance hover (`F9.9`)** —
+  `application_provenance_display.py` and the Vitest suite are done;
+  the hover/tooltip is not wired into the gutter renderer in
+  `source_coding.html`. Hover over any highlighted span should show
+  the coder, timestamp, definition-version, and (for AI applications)
+  the suggestion + rationale. Should be a small JS edit, not a big
+  design.
+
+- **W3.10 Multi-coder mode + ICR UI (`F2.5`)** — `coders.py` and
+  `icr.py` (Cohen's kappa, Krippendorff's alpha) are pure modules
+  with tests. No coder switcher, no per-coder attribution on
+  applications, no ICR view. Coder identity is a Phase E unlock —
+  needs a name-picker on the project page or a per-session header,
+  plus an ICR results page (probably under `/projects/<id>/icr` or
+  a tab on the audit page).
+
+- **W3.11 Application re-anchoring + orphans queue (`F4.5`)** —
+  `application_reanchor.py` is the pure module. No UI surface for
+  the orphan queue. After a transcript edit deletes a coded span's
+  anchors, those applications need to land somewhere reviewable.
+
+- **W3.12 Snap-to-word/sentence/paragraph helpers (`F4.4`)** —
+  `tests/js/selection-snap.test.mjs` exists (45 tests pass); no UI
+  affordance in the source-coding view. The tests describe a feature
+  that isn't reachable from the page yet.
+
+- **W3.13 REFI-QDA / QDPX import (`F6.6`)** — `refi_qda_import.py`
+  is a complete module. No route, no UI. Add an import endpoint and
+  a "Import REFI-QDA" button on the projects-list page.
+
+- **W3.14 Anonymised export UI (`F6.7`)** — The endpoint exists
+  (server.py:1966); no button anywhere. Wire to the project-settings
+  danger zone (W1.7).
+
+- **W3.15 Model-tier picker UI (`F8.11`)** — Endpoints exist
+  (server.py:2306, 2318); no settings UI. The settings page (W4.2)
+  should expose tier picker + download manager.
+
+## D. Minor / cosmetic stragglers
+
+- **W4.1 `readme.html` palette** — Did not migrate to the field-journal
+  palette in the recent UI overhaul. Self-contained CSS still uses
+  the old slate/blue tokens. Should pick up `--bg`, `--accent`, etc.
+  from `_doc_styles.html` or inline the new palette. Pure cosmetic.
+
+- **W4.2 Top-level `/settings` page** — `settings.html` is four
+  wireframe cards: HF token (already in `index.html`), default
+  transcription profile, local-AI picker (F8.1 / F8.11), and a
+  read-only hardware backend summary (the only working card). Ship
+  the four cards as real working settings panels. The HF token UI
+  should *move here* (it's currently buried on the upload page) and
+  the upload page should link to it.
+
+- **W4.3 `project_subpage.html` — `+ New code/query/memo` buttons
+  are `alert("Stub: …")`** — Fix once W1.1 / W1.5 / the codebook
+  editor's W2.1 lifecycle ops land. The alerts are a deliberate
+  signal that the page hasn't graduated yet; remove them as each
+  page graduates.
+
+- **W4.4 Memo card on project home** — `project_home.html` shows
+  "Coming soon — once the memos UI graduates" in the recent-memos
+  card. Replace with real recent-memos list once W1.1 lands.
+
+## Phasing for the audit work
+
+This audit doesn't reorder Phases A–E in `PLANNING.md` above; it just
+fills in what's missing within each. Suggested priority:
+
+- **Quick wins (≤ a day each)** — W3.9, W3.12, W2.5, W4.1, W4.4. Pure
+  module exists, just need the wiring.
+- **Single-page graduations** — W2.1 → W2.4 (codebook editor expansion);
+  W1.1 (memos page); W1.5 (queries page minimum); W1.6 (audit page
+  minimum). Each is a self-contained chunk.
+- **Cross-cutting** — W3.1 (participants) before W2.7 (speaker-aware
+  source picker). W1.7 (project settings) is a hub for several
+  smaller pieces.
+- **Phase E unlocks** — W3.10 (multi-coder + ICR), W3.5 (AI second
+  coder), W3.6 / W3.7 / W3.8 (checkpoints, audit export, time-travel)
+  cluster around the audit/locked-codebook page.

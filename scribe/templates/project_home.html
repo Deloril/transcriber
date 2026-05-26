@@ -15,70 +15,374 @@
 {% endblock %}
 
 {% block extra_styles %}
-  .ph-grid {
-    display: grid; gap: 14px;
+  /* ============================================================
+     Project home — the "field journal" landing page.
+
+     Three sections, top to bottom:
+       1. Hero strip:  next-action banner + four stat tiles
+       2. Movements:   numbered constructivist-GT cadence with
+                       per-step readiness + CTA
+       3. Snapshot:    sources / codebook / coded segments / memos
+                       in a four-up grid
+
+     The constructivist-GT cadence is sequenced so the next thing
+     to DO is highlighted. The other steps stay visible so the
+     researcher can jump anywhere — academic coding is non-linear.
+     ============================================================ */
+
+  /* ---- Hero strip + next-action banner ---- */
+  .ph-hero {
+    margin-bottom: 22px;
+    padding: 22px 26px;
+    background:
+      radial-gradient(420px 220px at 0% 0%, rgba(217,154,63,.10), transparent 70%),
+      linear-gradient(180deg, rgba(42,36,33,.75) 0%, rgba(31,26,23,.75) 100%);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 12px;
+    box-shadow: var(--shadow-soft);
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+    gap: 28px;
+    align-items: center;
+  }
+  @media (max-width: 880px) { .ph-hero { grid-template-columns: 1fr; } }
+  .ph-hero .next-eyebrow {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: .18em;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+  .ph-hero .next-headline {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-variation-settings: "opsz" 36, "SOFT" 30;
+    font-size: 26px;
+    line-height: 1.18;
+    letter-spacing: -.015em;
+    color: var(--text-strong);
+    margin: 0 0 8px;
+  }
+  .ph-hero .next-headline em {
+    font-style: italic;
+    color: var(--accent);
+    font-variation-settings: "opsz" 36, "SOFT" 30, "WONK" 1;
+  }
+  .ph-hero .next-explain {
+    color: var(--muted);
+    font-size: 13.5px;
+    line-height: 1.55;
+    margin: 0 0 16px;
+    max-width: 56ch;
+  }
+  .ph-hero .next-cta { display: flex; gap: 10px; flex-wrap: wrap; }
+
+  .ph-hero .stats {
+    display: grid;
     grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .ph-hero .stat-tile {
+    background: rgba(31,26,23,.6);
+    padding: 14px 16px;
+    display: flex; flex-direction: column;
+    gap: 2px;
+  }
+  .ph-hero .stat-tile .num {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-variation-settings: "opsz" 30, "SOFT" 30;
+    font-size: 28px;
+    line-height: 1;
+    color: var(--text-strong);
+    font-variant-numeric: tabular-nums oldstyle-nums;
+  }
+  .ph-hero .stat-tile .lbl {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    font-weight: 500;
+  }
+  .ph-hero .stat-tile .sub {
+    font-size: 11.5px;
+    color: var(--muted-2);
+    margin-top: 2px;
+  }
+
+  /* ---- Movements ---- */
+  .movements-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin: 36px 0 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .movements-head h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-variation-settings: "opsz" 30, "SOFT" 30;
+    font-size: 20px;
+    margin: 0;
+    color: var(--text-strong);
+    letter-spacing: -.01em;
+  }
+  .movements-head .legend {
+    font-size: 11.5px;
+    color: var(--muted-2);
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: .12em;
+  }
+
+  .movements {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 28px;
+  }
+  @media (max-width: 1100px) { .movements { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 600px)  { .movements { grid-template-columns: 1fr; } }
+
+  .mv {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 16px 14px;
+    display: flex; flex-direction: column;
+    gap: 6px;
+    text-decoration: none;
+    color: inherit;
+    position: relative;
+    transition: border-color .15s, transform .15s, background .15s;
+    overflow: hidden;
+  }
+  .mv:hover {
+    border-color: var(--border-strong);
+    transform: translateY(-2px);
+    text-decoration: none;
+  }
+  .mv .roman {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-variation-settings: "opsz" 60, "SOFT" 30, "WONK" 1;
+    font-style: italic;
+    font-size: 30px;
+    line-height: 1;
+    color: var(--muted-2);
+    letter-spacing: -.01em;
+  }
+  .mv .name {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 17px;
+    color: var(--text-strong);
+    letter-spacing: -.005em;
+    margin-top: 2px;
+  }
+  .mv .desc {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+    flex: 1;
+    min-height: 30px;
+  }
+  .mv .state {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--muted-2);
+    margin-top: 4px;
+  }
+  /* Per-state highlight: locked (greyed), ready (default), now (ochre),
+     done (ink). Only "now" carries the visual emphasis. */
+  .mv.is-locked { opacity: .55; }
+  .mv.is-locked .state { color: var(--muted-2); }
+  .mv.is-now {
+    border-color: var(--accent);
+    background: linear-gradient(180deg, rgba(217,154,63,.10), rgba(217,154,63,.03));
+  }
+  .mv.is-now::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: var(--accent);
+  }
+  .mv.is-now .state { color: var(--accent); }
+  .mv.is-now .roman { color: var(--accent); }
+  .mv.is-done .state { color: var(--ok); }
+  .mv.is-done .roman { color: var(--ok); }
+
+  /* ---- Snapshot grid ---- */
+  .snap-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin: 28px 0 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .snap-head h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 20px;
+    margin: 0;
+    color: var(--text-strong);
+    letter-spacing: -.01em;
+  }
+  .snap-head .legend {
+    font-size: 11.5px;
+    color: var(--muted-2);
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: .12em;
+  }
+
+  .ph-grid {
+    display: grid; gap: 16px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   @media (max-width: 900px) { .ph-grid { grid-template-columns: 1fr; } }
-  .ph-card h2 { display: flex; align-items: center; gap: 8px; }
-  .ph-card h2 .count {
-    font-size: 11px; color: var(--muted);
-    background: var(--panel-2); border: 1px solid var(--border);
-    border-radius: 999px; padding: 1px 8px; font-weight: 500;
+
+  .ph-card {
+    padding: 18px 20px;
+  }
+  .ph-card h3 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-variation-settings: "opsz" 24, "SOFT" 30;
+    font-size: 16px;
+    margin: 0 0 10px;
+    color: var(--text-strong);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .ph-card h3 .count {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--muted);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 9px;
+    font-weight: 500;
+    letter-spacing: .06em;
   }
   .ph-card .item {
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
+    padding: 9px 0;
+    border-top: 1px solid var(--border);
     font-size: 13px;
+    display: flex; align-items: center; gap: 10px;
   }
-  .ph-card .item:last-child { border-bottom: 0; }
-  .ph-card .item a { color: var(--text); }
-  .ph-card .item a:hover { color: var(--accent); }
-  .ph-card .more { padding: 8px 10px; font-size: 12px; color: var(--muted); }
-  .ph-empty { color: var(--muted); font-size: 13px; padding: 8px 10px; }
+  .ph-card .item:first-of-type { border-top: 0; }
+  .ph-card .item a { color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ph-card .item a:hover { color: var(--accent-2); text-decoration: none; }
+  .ph-card .item .meta { color: var(--muted-2); font-size: 11.5px; flex-shrink: 0; }
+  .ph-card .more { padding: 10px 0 0; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); margin-top: 8px; }
+  .ph-card .more a { color: var(--accent-2); }
+  .ph-card .ph-empty { color: var(--muted); font-size: 13px; padding: 8px 0; font-style: italic; }
+  .ph-card .ph-empty a { color: var(--accent-2); font-style: normal; }
+  .ph-card .ph-actions {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    display: flex; gap: 8px; flex-wrap: wrap;
+  }
 {% endblock %}
 
 {% block body %}
-<nav style="display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap">
-  <a class="btn secondary" href="/projects/{{ project_id }}/sources">Sources</a>
-  <a class="btn secondary" href="/projects/{{ project_id }}/codebook">Codebook</a>
-  <a class="btn secondary" href="/projects/{{ project_id }}/queries">Queries</a>
-  <a class="btn secondary" href="/projects/{{ project_id }}/memos">Memos</a>
-  <a class="btn secondary" href="/projects/{{ project_id }}/ai">AI</a>
-  <a class="btn secondary" href="/projects/{{ project_id }}/audit">Audit</a>
-</nav>
+<!-- Hero: what to do next + at-a-glance counts ============================ -->
+<section class="ph-hero" id="phHero" aria-live="polite">
+  <div>
+    <div class="next-eyebrow" id="nextEyebrow">Loading…</div>
+    <h2 class="next-headline" id="nextHeadline">Setting up the field…</h2>
+    <p class="next-explain" id="nextExplain">Reading your project — a moment.</p>
+    <div class="next-cta" id="nextCta"></div>
+  </div>
+  <div class="stats" id="heroStats">
+    <div class="stat-tile"><span class="num" id="statSources">·</span><span class="lbl">Sources</span></div>
+    <div class="stat-tile"><span class="num" id="statCodes">·</span><span class="lbl">Codes</span></div>
+    <div class="stat-tile"><span class="num" id="statApps">·</span><span class="lbl">Coded</span></div>
+    <div class="stat-tile"><span class="num" id="statMemos">·</span><span class="lbl">Memos</span></div>
+  </div>
+</section>
 
+<!-- Movements: the constructivist-GT cadence ============================== -->
+<div class="movements-head">
+  <h2>The work, in five movements</h2>
+  <span class="legend" id="stageLegend">Stage · initial</span>
+</div>
+<div class="movements" id="movements">
+  <a class="mv" href="/projects/{{ project_id }}/sources" data-mv="gather">
+    <span class="roman">i</span>
+    <span class="name">Gather</span>
+    <span class="desc">Attach interview transcripts. The corpus is what you read against.</span>
+    <span class="state" data-state="gather">…</span>
+  </a>
+  <a class="mv" href="/projects/{{ project_id }}/sources" data-mv="open">
+    <span class="roman">ii</span>
+    <span class="name">Open code</span>
+    <span class="desc">Read line-by-line. Highlight what feels significant; name it.</span>
+    <span class="state" data-state="open">…</span>
+  </a>
+  <a class="mv" href="/projects/{{ project_id }}/codebook" data-mv="compare">
+    <span class="roman">iii</span>
+    <span class="name">Compare</span>
+    <span class="desc">Cluster, merge, retire. Constant comparison sharpens the codebook.</span>
+    <span class="state" data-state="compare">…</span>
+  </a>
+  <a class="mv" href="/projects/{{ project_id }}/memos" data-mv="memo">
+    <span class="roman">iv</span>
+    <span class="name">Memo</span>
+    <span class="desc">Write toward the categories. Half-thoughts now, theory later.</span>
+    <span class="state" data-state="memo">…</span>
+  </a>
+  <a class="mv" href="/projects/{{ project_id }}/audit" data-mv="theorise">
+    <span class="roman">v</span>
+    <span class="name">Theorise</span>
+    <span class="desc">Lock the codebook, run ICR, export REFI-QDA, stand by your account.</span>
+    <span class="state" data-state="theorise">…</span>
+  </a>
+</div>
+
+<!-- Snapshot: live counts + recent items =================================== -->
+<div class="snap-head">
+  <h2>The state of things</h2>
+  <span class="legend">Live · refreshes on load</span>
+</div>
 <div class="ph-grid">
   <div class="card ph-card">
-    <h2>Sources <span class="count" id="srcCount">…</span></h2>
-    <div id="srcList">
-      <div class="ph-empty">Loading…</div>
-    </div>
-    <div style="margin-top:10px">
+    <h3>Sources <span class="count" id="srcCount">…</span></h3>
+    <div id="srcList"><div class="ph-empty">Loading…</div></div>
+    <div class="ph-actions">
       <a class="btn" href="/projects/{{ project_id }}/sources/add">+ Add source</a>
       <a class="btn secondary" href="/projects/{{ project_id }}/sources">View all</a>
     </div>
   </div>
 
   <div class="card ph-card">
-    <h2>Codebook <span class="count" id="cbCount">…</span></h2>
-    <div id="cbList">
-      <div class="ph-empty">Loading…</div>
-    </div>
-    <div style="margin-top:10px">
+    <h3>Codebook <span class="count" id="cbCount">…</span></h3>
+    <div id="cbList"><div class="ph-empty">Loading…</div></div>
+    <div class="ph-actions">
       <a class="btn secondary" href="/projects/{{ project_id }}/codebook">Open codebook</a>
     </div>
   </div>
 
   <div class="card ph-card">
-    <h2>Coded segments <span class="count" id="appCount">…</span></h2>
-    <div id="appList">
-      <div class="ph-empty">Loading…</div>
-    </div>
+    <h3>Coded segments <span class="count" id="appCount">…</span></h3>
+    <div id="appList"><div class="ph-empty">Loading…</div></div>
   </div>
 
   <div class="card ph-card">
-    <h2>Recent memos <span class="count" id="memoCount">…</span></h2>
+    <h3>Recent memos <span class="count" id="memoCount">…</span></h3>
     <div id="memoList">
       <div class="ph-empty">Coming soon — once the memos UI graduates.</div>
     </div>
@@ -96,18 +400,30 @@ function escapeHtml(s) {
   }[c]));
 }
 
+// State the four async loads share so we can re-decide "what's next"
+// once each piece of data is in.
+const STATE = {
+  project: null,
+  sources: null,        // array
+  codes: null,          // array
+  applications: null,   // array
+};
+
 async function loadProject() {
   try {
     const r = await fetch(`/api/projects/${PROJECT_ID}`);
     if (!r.ok) return;
     const p = await r.json();
+    STATE.project = p;
     if (p.name) document.getElementById("hdrName").textContent = p.name;
     const subBits = [];
     if (p.methodology) subBits.push(p.methodology);
     if (p.codebook_stage) subBits.push("Stage: " + p.codebook_stage);
     if (p.research_question) subBits.push("RQ: " + p.research_question.substring(0, 80));
     document.getElementById("hdrSub").textContent = subBits.join(" · ");
+    document.getElementById("stageLegend").textContent = "Stage · " + (p.codebook_stage || "initial");
   } catch (_) {}
+  decideNext();
 }
 
 async function loadSources() {
@@ -118,21 +434,25 @@ async function loadSources() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     const arr = data.sources || [];
+    STATE.sources = arr;
     count.textContent = arr.length;
+    document.getElementById("statSources").textContent = arr.length;
     if (!arr.length) {
-      list.innerHTML = `<div class="ph-empty">No sources attached. Add one →</div>`;
+      list.innerHTML = `<div class="ph-empty">No sources attached. <a href="/projects/${PROJECT_ID}/sources/add">Add one →</a></div>`;
       return;
     }
-    const top = arr.slice(0, 5);
+    const top = arr.slice(0, 4);
     list.innerHTML = top.map(s =>
-      `<div class="item"><a href="/projects/${PROJECT_ID}/sources/${escapeHtml(s.id)}">${escapeHtml(s.name || "(unnamed)")}</a> <span class="hint">${escapeHtml(s.source_type || "transcript")}</span></div>`
+      `<div class="item"><a href="/projects/${PROJECT_ID}/sources/${escapeHtml(s.id)}">${escapeHtml(s.name || "(unnamed)")}</a><span class="meta">${escapeHtml(s.source_type || "transcript")}</span></div>`
     ).join("");
-    if (arr.length > 5) {
-      list.innerHTML += `<div class="more">+ ${arr.length - 5} more</div>`;
+    if (arr.length > 4) {
+      list.innerHTML += `<div class="more"><a href="/projects/${PROJECT_ID}/sources">+ ${arr.length - 4} more →</a></div>`;
     }
   } catch (e) {
+    STATE.sources = [];
     list.innerHTML = `<div class="ph-empty" style="color:var(--err)">Error: ${escapeHtml(e.message)}</div>`;
   }
+  decideNext();
 }
 
 async function loadCodebook() {
@@ -143,21 +463,25 @@ async function loadCodebook() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     const arr = data.codes || [];
+    STATE.codes = arr;
     count.textContent = arr.length;
+    document.getElementById("statCodes").textContent = arr.length;
     if (!arr.length) {
-      list.innerHTML = `<div class="ph-empty">No codes yet. Open the codebook to add one →</div>`;
+      list.innerHTML = `<div class="ph-empty">No codes yet. They'll appear as you highlight text in a source.</div>`;
       return;
     }
-    const top = arr.slice(0, 5);
+    const top = arr.slice(0, 4);
     list.innerHTML = top.map(c =>
-      `<div class="item"><strong>${escapeHtml(c.name)}</strong> <span class="hint">${escapeHtml(c.stage || "initial")}</span></div>`
+      `<div class="item"><a href="/projects/${PROJECT_ID}/codebook">${escapeHtml(c.name)}</a><span class="meta">${escapeHtml(c.stage || "initial")}</span></div>`
     ).join("");
-    if (arr.length > 5) {
-      list.innerHTML += `<div class="more">+ ${arr.length - 5} more</div>`;
+    if (arr.length > 4) {
+      list.innerHTML += `<div class="more"><a href="/projects/${PROJECT_ID}/codebook">+ ${arr.length - 4} more →</a></div>`;
     }
   } catch (e) {
+    STATE.codes = [];
     list.innerHTML = `<div class="ph-empty" style="color:var(--err)">Error: ${escapeHtml(e.message)}</div>`;
   }
+  decideNext();
 }
 
 async function loadApplications() {
@@ -168,15 +492,156 @@ async function loadApplications() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     const arr = data.applications || [];
+    STATE.applications = arr;
     count.textContent = arr.length;
+    document.getElementById("statApps").textContent = arr.length;
     if (!arr.length) {
-      list.innerHTML = `<div class="ph-empty">No coded segments yet. Open a source and highlight some text →</div>`;
+      list.innerHTML = `<div class="ph-empty">No coded segments yet. Open a source and drag-select some text →</div>`;
       return;
     }
-    list.innerHTML = `<div class="ph-empty">${arr.length} application${arr.length === 1 ? "" : "s"} across this project. Open a source to see them in context.</div>`;
+    list.innerHTML = `<div class="ph-empty" style="font-style:normal;color:var(--muted)">${arr.length} application${arr.length === 1 ? "" : "s"} across this project. Open a source to see them in context.</div>`;
   } catch (e) {
+    STATE.applications = [];
     list.innerHTML = `<div class="ph-empty" style="color:var(--err)">Error: ${escapeHtml(e.message)}</div>`;
   }
+  decideNext();
+}
+
+// ----------------------------------------------------------------------
+// "What's next?" — derive a single next action from the loaded state.
+//
+// Constructivist-GT cadence:
+//   1. Gather:   add at least one source
+//   2. Open:     do some hand-coding (so the AI gate F8.10 lifts)
+//   3. Compare:  refine the codebook once you have ~10+ codes
+//   4. Memo:     once you have applications, write memos
+//   5. Theorise: once codebook is locked / large, focus on synthesis
+//
+// We pick the lowest-numbered movement that isn't satisfied yet.
+// ----------------------------------------------------------------------
+function decideNext() {
+  const ready = STATE.sources != null && STATE.codes != null && STATE.applications != null;
+  if (!ready) return;
+
+  const srcCount = STATE.sources.length;
+  const codeCount = STATE.codes.length;
+  const appCount = STATE.applications.length;
+  const stage = (STATE.project && STATE.project.codebook_stage) || "initial";
+
+  // Decide movement state: locked / ready / now / done.
+  // "done" = clearly past it; "now" = current focus; "ready" = open
+  // but not the spotlight; "locked" = needs prereq.
+  const states = {
+    gather:   srcCount === 0 ? "now" : "done",
+    open:     srcCount === 0 ? "locked" : (appCount === 0 ? "now" : (appCount < 25 ? "now" : "done")),
+    compare:  appCount < 5 ? "locked" : (codeCount < 10 ? "ready" : (stage === "initial" ? "now" : "done")),
+    memo:     appCount < 5 ? "locked" : "ready",
+    theorise: stage === "locked" || codeCount >= 25 ? "now" : (appCount === 0 ? "locked" : "ready"),
+  };
+
+  // Only one "now" wins — keep it the lowest-numbered. Demote others.
+  const order = ["gather", "open", "compare", "memo", "theorise"];
+  let claimed = false;
+  for (const k of order) {
+    if (states[k] === "now") {
+      if (claimed) states[k] = "ready";
+      else claimed = true;
+    }
+  }
+  // If nothing claims "now", fall through: highlight memo if any apps,
+  // else theorise — neither a hard error nor a lock.
+  if (!claimed) {
+    if (appCount > 0) states.memo = "now";
+    else states.theorise = "now";
+  }
+
+  // Apply state classes + state strings.
+  const STATE_LABEL = { locked: "Locked", ready: "Ready", now: "Do now", done: "Done" };
+  for (const [k, s] of Object.entries(states)) {
+    const card = document.querySelector(`.mv[data-mv='${k}']`);
+    if (!card) continue;
+    card.classList.remove("is-locked", "is-now", "is-done", "is-ready");
+    card.classList.add("is-" + s);
+    const stEl = card.querySelector(`.state[data-state='${k}']`);
+    if (stEl) stEl.textContent = STATE_LABEL[s];
+  }
+
+  // Now write the hero banner — explain the active "now".
+  const active = order.find(k => states[k] === "now");
+  renderHero(active, { srcCount, codeCount, appCount, stage });
+}
+
+function renderHero(activeMovement, ctx) {
+  const eyebrow = document.getElementById("nextEyebrow");
+  const headline = document.getElementById("nextHeadline");
+  const explain = document.getElementById("nextExplain");
+  const cta = document.getElementById("nextCta");
+  if (!activeMovement) {
+    eyebrow.textContent = "All caught up";
+    headline.innerHTML = "You're <em>between movements</em>.";
+    explain.textContent = "Nothing is blocking. Pick whichever step calls to you most.";
+    cta.innerHTML = `<a class="btn" href="/projects/${PROJECT_ID}/sources">Open a source</a>`;
+    return;
+  }
+  // Bold prose per movement — speaks as a methodologist, not a robot.
+  const SAY = {
+    gather: {
+      eyebrow: "Movement i · Gather",
+      headline: "Bring in your <em>first interview</em>.",
+      explain: "Before anything else, attach a transcribed source. Coding has nothing to compare against until there is at least one source on the bench.",
+      ctas: [
+        { label: "+ Add source", href: `/projects/${PROJECT_ID}/sources/add`, primary: true },
+        { label: "Upload a recording", href: "/", primary: false },
+      ],
+    },
+    open: {
+      eyebrow: "Movement ii · Open code",
+      headline: ctx.appCount === 0
+        ? "Read closely. <em>Name what catches</em>."
+        : "Keep going — <em>you're warming up</em>.",
+      explain: ctx.appCount === 0
+        ? "Open the source, drag-select a phrase, give it a code. Don't worry about the right name yet; constant comparison will refine it."
+        : `${ctx.appCount} segment${ctx.appCount===1?"":"s"} coded so far. The AI suggester wakes up around the 25-segment mark — keep handling it yourself for now so the corpus stays yours.`,
+      ctas: [
+        { label: "Open a source", href: `/projects/${PROJECT_ID}/sources`, primary: true },
+        { label: "+ Add another", href: `/projects/${PROJECT_ID}/sources/add`, primary: false },
+      ],
+    },
+    compare: {
+      eyebrow: "Movement iii · Compare",
+      headline: "<em>Cluster, merge, retire.</em>",
+      explain: `You have ${ctx.codeCount} code${ctx.codeCount===1?"":"s"} across ${ctx.appCount} segments. Time to sit with the codebook and ask: what's a duplicate, what splits, what wants a parent?`,
+      ctas: [
+        { label: "Open codebook", href: `/projects/${PROJECT_ID}/codebook`, primary: true },
+        { label: "Back to coding", href: `/projects/${PROJECT_ID}/sources`, primary: false },
+      ],
+    },
+    memo: {
+      eyebrow: "Movement iv · Memo",
+      headline: "Write <em>toward</em> the categories.",
+      explain: "Memos are how the codebook becomes a theory. Don't draft for an audience — draft for yourself, in fragments. Future-you will thank you.",
+      ctas: [
+        { label: "Open memos", href: `/projects/${PROJECT_ID}/memos`, primary: true },
+        { label: "Codebook", href: `/projects/${PROJECT_ID}/codebook`, primary: false },
+      ],
+    },
+    theorise: {
+      eyebrow: "Movement v · Theorise",
+      headline: "<em>Stand by your account.</em>",
+      explain: "Lock the codebook, run an ICR check with a second coder, export REFI-QDA. The audit trail is your evidence — make it neat enough to publish.",
+      ctas: [
+        { label: "Open audit", href: `/projects/${PROJECT_ID}/audit`, primary: true },
+        { label: "Codebook", href: `/projects/${PROJECT_ID}/codebook`, primary: false },
+      ],
+    },
+  };
+  const c = SAY[activeMovement];
+  eyebrow.textContent = c.eyebrow;
+  headline.innerHTML = c.headline;
+  explain.textContent = c.explain;
+  cta.innerHTML = c.ctas.map(b =>
+    `<a class="btn ${b.primary ? "" : "secondary"}" href="${b.href}">${escapeHtml(b.label)}</a>`
+  ).join("");
 }
 
 loadProject();

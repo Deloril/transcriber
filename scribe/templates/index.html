@@ -4,31 +4,91 @@
   <meta charset="utf-8">
   <title>Scribe — local transcription</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,30..100,0..1&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #0f1115;
-      --panel: #181b22;
-      --panel-2: #1f232c;
-      --border: #2a2f3a;
-      --text: #e7ebf2;
-      --muted: #8b94a7;
-      --accent: #7aa7ff;
-      --accent-2: #a78bfa;
-      --ok: #5fd49b;
-      --err: #ff7676;
-      --shadow: 0 8px 30px rgba(0,0,0,.4);
+      /* Warm-dark "ink on parchment" palette — kept identical to
+         _shell.html so every page in the app reads as one product. */
+      --bg: #14110f;
+      --bg-2: #1a1614;
+      --panel: #1f1a17;
+      --panel-2: #2a2421;
+      --border: #3a322d;
+      --border-strong: #4a4039;
+      --text: #f1ead6;
+      --text-strong: #fbf6e6;
+      --muted: #a09587;
+      --muted-2: #756a5e;
+      --accent: #d99a3f;          /* ochre */
+      --accent-2: #e8b864;
+      --accent-soft: rgba(217, 154, 63, .14);
+      --ok: #8db472;
+      --warn: #e0a04a;
+      --err: #d96a5a;
+      --shadow: 0 1px 0 rgba(255,235,200,.04) inset, 0 12px 38px rgba(0,0,0,.42);
+      --serif: "Fraunces", "Iowan Old Style", "Hoefler Text", Georgia, serif;
+      --sans: "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+      --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     }
     * { box-sizing: border-box; }
-    html, body { background: var(--bg); color: var(--text); margin: 0; height: 100%; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif; }
-    .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 80px; }
-    header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 24px; }
-    h1 { font-size: 22px; margin: 0; letter-spacing: -.01em; }
-    header .sub { color: var(--muted); font-size: 13px; }
+    html, body { color: var(--text); margin: 0; min-height: 100%; }
+    body {
+      font-family: var(--sans);
+      letter-spacing: .002em;
+      background:
+        radial-gradient(900px 520px at -8% -10%, rgba(217,154,63,.10), transparent 65%),
+        radial-gradient(720px 480px at 110% 110%, rgba(111,140,175,.08), transparent 60%),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
+      background-attachment: fixed;
+      min-height: 100vh;
+    }
+    body::before {
+      content: "";
+      position: fixed; inset: 0;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.97  0 0 0 0 0.91  0 0 0 0 0.78  0 0 0 0.04 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+      opacity: .35;
+      mix-blend-mode: overlay;
+      pointer-events: none;
+      z-index: 0;
+    }
+    body > * { position: relative; z-index: 1; }
+    ::selection { background: var(--accent-soft); color: var(--text-strong); }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 36px 24px 96px; }
+    header {
+      display: flex; align-items: baseline; gap: 12px; margin-bottom: 28px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--border);
+      position: relative;
+    }
+    header::after {
+      content: "";
+      position: absolute; left: 0; bottom: -1px;
+      width: 56px; height: 2px;
+      background: var(--accent); border-radius: 2px;
+    }
+    h1 {
+      font-family: var(--serif);
+      font-weight: 500;
+      font-variation-settings: "opsz" 56, "SOFT" 30;
+      font-size: 36px;
+      line-height: 1.05;
+      margin: 0;
+      letter-spacing: -.02em;
+      color: var(--text-strong);
+      display: inline-flex; align-items: baseline; gap: 10px;
+    }
+    h1::before {
+      content: "❦";
+      color: var(--accent);
+      font-size: 22px;
+    }
+    header .sub { color: var(--muted); font-size: 13px; letter-spacing: .005em; }
     .card {
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 14px;
+      border-radius: 12px;
       padding: 24px;
       box-shadow: var(--shadow);
       margin-bottom: 20px;
@@ -41,11 +101,17 @@
       cursor: pointer;
       transition: border-color .15s, background .15s;
     }
-    .drop:hover, .drop.drag { border-color: var(--accent); background: rgba(122,167,255,.06); }
-    .drop strong { color: var(--text); }
-    .drop small { color: var(--muted); display: block; margin-top: 6px; }
-    .file-info { margin-top: 12px; color: var(--muted); font-size: 13px; }
-    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .drop:hover, .drop.drag { border-color: var(--accent); background: var(--accent-soft); }
+    .drop strong {
+      color: var(--text-strong);
+      font-family: var(--serif);
+      font-weight: 500;
+      font-size: 18px;
+      letter-spacing: -.005em;
+    }
+    .drop small { color: var(--muted); display: block; margin-top: 8px; font-size: 12.5px; }
+    .file-info { margin-top: 12px; color: var(--accent-2); font-size: 13px; font-family: var(--mono); }
+    label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .08em; font-weight: 500; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
     select, input[type="text"], input[type="number"] {
@@ -59,16 +125,21 @@
     }
     select:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
     button {
-      background: linear-gradient(180deg, var(--accent), #5b87e6);
-      color: #0b1020;
-      border: 0;
-      border-radius: 9px;
-      padding: 11px 18px;
+      background: var(--accent);
+      color: #1c1611;
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      padding: 10px 18px;
       font-weight: 600;
+      font-family: inherit;
       cursor: pointer;
-      font-size: 14px;
+      font-size: 13px;
+      letter-spacing: .005em;
+      transition: background .15s, transform .12s, border-color .15s;
     }
-    button[disabled] { opacity: .5; cursor: not-allowed; }
+    button:hover { background: var(--accent-2); border-color: var(--accent-2); transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    button[disabled] { opacity: .5; cursor: not-allowed; transform: none; }
     .progress-wrap { margin-top: 14px; }
     .progress {
       height: 8px;
@@ -82,6 +153,7 @@
       background: linear-gradient(90deg, var(--accent), var(--accent-2));
       width: 0%;
       transition: width .25s ease;
+      box-shadow: 0 0 12px var(--accent-soft);
     }
     .progress-msg { color: var(--muted); font-size: 13px; margin-top: 8px; }
     .downloads a {
@@ -265,7 +337,15 @@
       display: flex; align-items: baseline; justify-content: space-between;
       gap: 12px; margin-bottom: 12px;
     }
-    .stats-head h2 { margin: 0; font-size: 16px; }
+    .stats-head h2 {
+      margin: 0;
+      font-family: var(--serif);
+      font-weight: 500;
+      font-variation-settings: "opsz" 24, "SOFT" 30;
+      font-size: 18px;
+      color: var(--text-strong);
+      letter-spacing: -.005em;
+    }
     .stats-head .name {
       color: var(--muted);
       font-size: 13px;
@@ -707,9 +787,9 @@
 
     <div id="resultCard" class="card hidden">
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 12px;">
-        <h2 style="margin:0;font-size:16px;">Transcript</h2>
+        <h2 style="margin:0;font-family:var(--serif);font-weight:500;font-size:18px;color:var(--text-strong);letter-spacing:-.005em;">Transcript</h2>
         <div style="display: flex; align-items: center; gap: 10px;">
-          <a id="openEditor" href="#" style="display:inline-block;padding:7px 14px;background:linear-gradient(180deg,var(--accent),#5b87e6);color:#0b1020;border-radius:8px;text-decoration:none;font-weight:600;font-size:13px;">Open in editor →</a>
+          <a id="openEditor" href="#" style="display:inline-block;padding:8px 14px;background:var(--accent);color:#1c1611;border:1px solid var(--accent);border-radius:8px;text-decoration:none;font-weight:600;font-size:13px;">Open in editor →</a>
           <div id="meta" class="hint"></div>
         </div>
       </div>
@@ -1245,9 +1325,9 @@
       svg.innerHTML = `
         <defs>
           <linearGradient id="wf-grad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="#7aa7ff" stop-opacity="0.95" />
-            <stop offset="0.5" stop-color="#a78bfa" stop-opacity="0.85" />
-            <stop offset="1" stop-color="#7aa7ff" stop-opacity="0.95" />
+            <stop offset="0" stop-color="#d99a3f" stop-opacity="0.95" />
+            <stop offset="0.5" stop-color="#e8b864" stop-opacity="0.85" />
+            <stop offset="1" stop-color="#d99a3f" stop-opacity="0.95" />
           </linearGradient>
         </defs>
         <line class="axis" x1="0" y1="${mid}" x2="${W}" y2="${mid}" />

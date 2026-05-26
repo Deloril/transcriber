@@ -8,8 +8,11 @@
     {% block actions %}<a class="btn" href="...">Action</a>{% endblock %}
     {% block body %}<div>page content</div>{% endblock %}
 
-  The visual language matches the existing index.html / library.html so the
-  old and new screens don't clash visually during the migration.
+  Aesthetic: warm-dark "field journal" — Fraunces display + Geist body,
+  ochre accent. The CSS variables below are the single source of truth
+  for the new UI; the older self-contained pages (index.html / library.html
+  / editor.html) carry their own copies of the same palette so the look
+  is consistent across the whole app.
 #}
 <!doctype html>
 <html lang="en">
@@ -17,89 +20,230 @@
   <meta charset="utf-8">
   <title>Scribe — {% block title %}{{ page_title or "Scribe" }}{% endblock %}</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,30..100,0..1&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #0f1115;
-      --panel: #181b22;
-      --panel-2: #1f232c;
-      --border: #2a2f3a;
-      --text: #e7ebf2;
-      --muted: #8b94a7;
-      --accent: #7aa7ff;
-      --accent-2: #a78bfa;
-      --ok: #5fd49b;
-      --warn: #f5b672;
-      --err: #ff7676;
-      --shadow: 0 8px 30px rgba(0,0,0,.4);
+      /* Warm-dark "ink on parchment" palette. Bg gradient layers a hint
+         of plum into the deep ink so panels feel paper-pressed rather
+         than slab-flat. */
+      --bg: #14110f;
+      --bg-2: #1a1614;
+      --panel: #1f1a17;
+      --panel-2: #2a2421;
+      --panel-3: #36302c;
+      --border: #3a322d;
+      --border-strong: #4a4039;
+      --text: #f1ead6;          /* warm cream — easier on the eyes than #fff */
+      --text-strong: #fbf6e6;
+      --muted: #a09587;
+      --muted-2: #756a5e;
+
+      /* Ochre is the protagonist; ink-blue is the foil. */
+      --accent: #d99a3f;
+      --accent-2: #e8b864;
+      --accent-soft: rgba(217, 154, 63, .14);
+      --ink: #6f8caf;
+      --ink-soft: rgba(111, 140, 175, .14);
+
+      --ok: #8db472;
+      --warn: #e0a04a;
+      --err: #d96a5a;
+
+      --shadow: 0 1px 0 rgba(255,235,200,.04) inset, 0 12px 38px rgba(0,0,0,.42);
+      --shadow-soft: 0 1px 0 rgba(255,235,200,.03) inset, 0 6px 20px rgba(0,0,0,.28);
+
+      --serif: "Fraunces", "Iowan Old Style", "Hoefler Text", Georgia, serif;
+      --sans: "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+      --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     }
     * { box-sizing: border-box; }
-    html, body { background: var(--bg); color: var(--text); margin: 0; min-height: 100%; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.5;
+      letter-spacing: .002em;
+      /* Layered atmosphere: a top-left ochre wash + a low-right ink wash
+         + a faint paper-grain via SVG noise. */
+      background:
+        radial-gradient(900px 520px at -8% -10%, rgba(217,154,63,.10), transparent 65%),
+        radial-gradient(720px 480px at 110% 110%, rgba(111,140,175,.08), transparent 60%),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
+      background-attachment: fixed;
+      min-height: 100vh;
+    }
+    /* Subtle paper grain — applied as a fixed pseudo-layer so it never
+       moves on scroll. SVG keeps it tiny + scalable. Pointer-events
+       off so it's purely cosmetic. */
+    body::before {
+      content: "";
+      position: fixed; inset: 0;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.97  0 0 0 0 0.91  0 0 0 0 0.78  0 0 0 0.04 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+      opacity: .35;
+      mix-blend-mode: overlay;
+      pointer-events: none;
+      z-index: 0;
+    }
+    body > * { position: relative; z-index: 1; }
+
+    ::selection { background: var(--accent-soft); color: var(--text-strong); }
 
     /* ---- Top app bar ---- */
     .appbar {
-      background: var(--panel);
+      background: linear-gradient(180deg, rgba(31,26,23,.96), rgba(31,26,23,.82));
       border-bottom: 1px solid var(--border);
-      padding: 10px 20px;
-      display: flex; align-items: center; gap: 16px;
+      padding: 14px 28px;
+      display: flex; align-items: center; gap: 22px;
       position: sticky; top: 0; z-index: 50;
+      backdrop-filter: blur(12px) saturate(1.1);
+      -webkit-backdrop-filter: blur(12px) saturate(1.1);
     }
     .appbar .brand {
-      font-size: 15px; font-weight: 700; letter-spacing: -.01em;
-      color: var(--text); text-decoration: none;
-      padding: 4px 10px; border-radius: 7px;
+      font-family: var(--serif);
+      font-weight: 600;
+      font-variation-settings: "opsz" 24, "SOFT" 50, "WONK" 1;
+      font-size: 22px;
+      letter-spacing: -.015em;
+      color: var(--text-strong);
+      text-decoration: none;
+      display: inline-flex; align-items: baseline; gap: 8px;
     }
-    .appbar .brand:hover { background: var(--panel-2); }
-    .appbar nav { display: flex; gap: 4px; }
+    .appbar .brand::before {
+      content: "❦";  /* hedera — book ornament */
+      color: var(--accent);
+      font-size: 16px;
+      transform: translateY(-1px);
+      display: inline-block;
+    }
+    .appbar .brand:hover { color: var(--accent-2); }
+    .appbar nav {
+      display: flex; gap: 2px;
+      border-left: 1px solid var(--border);
+      padding-left: 22px;
+    }
     .appbar nav a {
       color: var(--muted);
       text-decoration: none;
-      padding: 6px 12px;
-      border-radius: 7px;
+      padding: 7px 13px;
+      border-radius: 6px;
       font-size: 13px;
+      font-weight: 500;
+      letter-spacing: .005em;
+      transition: color .15s, background .15s;
+      position: relative;
     }
-    .appbar nav a:hover { color: var(--text); background: var(--panel-2); }
-    .appbar nav a.active { color: var(--text); background: var(--panel-2); border: 1px solid var(--border); }
+    .appbar nav a:hover { color: var(--text); }
+    .appbar nav a.active {
+      color: var(--text-strong);
+    }
+    .appbar nav a.active::after {
+      content: "";
+      position: absolute;
+      left: 13px; right: 13px; bottom: -2px;
+      height: 2px;
+      background: var(--accent);
+      border-radius: 2px;
+    }
     .appbar .spacer { flex: 1; }
     .appbar .right { display: flex; gap: 8px; align-items: center; }
     .appbar .right a, .appbar .right button {
       color: var(--text);
-      background: var(--panel-2);
+      background: transparent;
       border: 1px solid var(--border);
       border-radius: 7px;
-      padding: 6px 11px;
-      font-size: 13px;
+      padding: 7px 13px;
+      font-size: 12.5px;
+      font-weight: 500;
+      font-family: inherit;
       text-decoration: none;
       cursor: pointer;
+      transition: border-color .15s, background .15s, color .15s;
     }
-    .appbar .right a:hover, .appbar .right button:hover { border-color: var(--accent); }
+    .appbar .right a:hover, .appbar .right button:hover {
+      border-color: var(--accent);
+      color: var(--accent-2);
+      background: var(--accent-soft);
+    }
+    .appbar .right a.cta {
+      background: var(--accent);
+      color: #1c1611;
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+    .appbar .right a.cta:hover {
+      background: var(--accent-2);
+      border-color: var(--accent-2);
+      color: #1c1611;
+    }
 
     /* ---- Page chrome ---- */
     .page {
-      max-width: 1180px;
+      max-width: 1200px;
       margin: 0 auto;
-      padding: 28px 24px 80px;
+      padding: 36px 28px 96px;
     }
     .page-head {
-      display: flex; align-items: baseline; gap: 14px;
-      margin-bottom: 22px; flex-wrap: wrap;
+      display: flex; align-items: baseline; gap: 16px;
+      margin-bottom: 30px;
+      flex-wrap: wrap;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--border);
+      position: relative;
     }
-    .page-head h1 { font-size: 22px; margin: 0; letter-spacing: -.01em; }
-    .page-head .sub { color: var(--muted); font-size: 13px; }
-    .page-head .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+    .page-head::after {
+      content: "";
+      position: absolute;
+      left: 0; bottom: -1px;
+      width: 56px; height: 2px;
+      background: var(--accent);
+      border-radius: 2px;
+    }
+    .page-head h1 {
+      font-family: var(--serif);
+      font-weight: 500;
+      font-variation-settings: "opsz" 56, "SOFT" 30;
+      font-size: 36px;
+      line-height: 1.05;
+      margin: 0;
+      letter-spacing: -.02em;
+      color: var(--text-strong);
+    }
+    .page-head h1 em {
+      font-style: italic;
+      color: var(--accent);
+      font-variation-settings: "opsz" 56, "SOFT" 30, "WONK" 1;
+    }
+    .page-head .sub {
+      color: var(--muted);
+      font-size: 13px;
+      letter-spacing: .005em;
+    }
+    .page-head .actions { margin-left: auto; display: flex; gap: 10px; flex-wrap: wrap; }
 
-    /* ---- Cards / placeholder UI ---- */
+    /* ---- Cards / panels ---- */
     .card {
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 18px 20px;
-      box-shadow: var(--shadow);
-      margin-bottom: 16px;
+      border-radius: 12px;
+      padding: 22px 24px;
+      box-shadow: var(--shadow-soft);
+      margin-bottom: 18px;
+      position: relative;
     }
-    .card h2 { font-size: 15px; margin: 0 0 8px; }
-    .card .hint { color: var(--muted); font-size: 12px; }
-    .grid { display: grid; gap: 14px; }
+    .card h2 {
+      font-family: var(--serif);
+      font-weight: 500;
+      font-variation-settings: "opsz" 30, "SOFT" 30;
+      font-size: 18px;
+      letter-spacing: -.01em;
+      margin: 0 0 10px;
+      color: var(--text-strong);
+    }
+    .card .hint { color: var(--muted); font-size: 12.5px; }
+    .grid { display: grid; gap: 16px; }
     .grid.two { grid-template-columns: 1fr 1fr; }
     .grid.three { grid-template-columns: 1fr 1fr 1fr; }
     @media (max-width: 800px) {
@@ -108,64 +252,90 @@
 
     /* Placeholder banner — visible callout that a page is a wireframe stub. */
     .stub {
-      border: 1px dashed var(--border);
-      border-radius: 12px;
-      padding: 14px 16px;
-      margin-bottom: 18px;
-      background: rgba(245, 182, 114, .05);
+      border: 1px dashed var(--border-strong);
+      border-radius: 10px;
+      padding: 14px 18px;
+      margin-bottom: 22px;
+      background: rgba(224,160,74,.04);
       color: var(--muted);
       font-size: 13px;
-      line-height: 1.55;
+      line-height: 1.6;
     }
     .stub strong { color: var(--warn); font-weight: 600; }
     .stub code {
       background: var(--panel-2);
       border: 1px solid var(--border);
       border-radius: 4px;
-      padding: 1px 5px;
+      padding: 1px 6px;
       font-size: 12px;
-      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-family: var(--mono);
+      color: var(--text);
     }
 
     /* Buttons / links inside content */
     .btn {
-      display: inline-block;
-      background: linear-gradient(180deg, var(--accent), #5b87e6);
-      color: #0b1020;
-      border: 0; border-radius: 8px;
-      padding: 8px 14px;
-      font-weight: 600; font-size: 13px;
-      cursor: pointer; text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--accent);
+      color: #1c1611;
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      padding: 9px 16px;
+      font-weight: 600;
+      font-size: 13px;
+      font-family: inherit;
+      letter-spacing: .005em;
+      cursor: pointer;
+      text-decoration: none;
+      transition: background .15s, border-color .15s, color .15s, transform .12s;
     }
+    .btn:hover {
+      background: var(--accent-2);
+      border-color: var(--accent-2);
+      transform: translateY(-1px);
+    }
+    .btn:active { transform: translateY(0); }
     .btn.secondary {
-      background: var(--panel);
+      background: transparent;
       color: var(--text);
       border: 1px solid var(--border);
       font-weight: 500;
     }
-    .btn.secondary:hover { border-color: var(--accent); }
+    .btn.secondary:hover {
+      border-color: var(--accent);
+      color: var(--accent-2);
+      background: var(--accent-soft);
+    }
     .btn[disabled], .btn.disabled { opacity: .5; cursor: not-allowed; pointer-events: none; }
 
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
+    a { color: var(--accent-2); text-decoration: none; transition: color .15s; }
+    a:hover { color: var(--accent); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 
     /* Empty state */
     .empty {
       text-align: center;
-      padding: 38px 20px;
+      padding: 48px 28px;
       color: var(--muted);
     }
-    .empty h3 { color: var(--text); font-size: 16px; margin: 0 0 6px; }
-    .empty p { margin: 0 0 14px; font-size: 13px; }
+    .empty h3 {
+      color: var(--text-strong);
+      font-family: var(--serif);
+      font-weight: 500;
+      font-size: 20px;
+      margin: 0 0 8px;
+      letter-spacing: -.01em;
+    }
+    .empty p { margin: 0 0 16px; font-size: 13.5px; line-height: 1.6; }
 
     /* Wireframe block — used to communicate "this is roughly where X goes" */
     .wf {
-      border: 1px dashed var(--border);
+      border: 1px dashed var(--border-strong);
       border-radius: 10px;
       padding: 16px;
       color: var(--muted);
-      font-size: 12px;
-      background: rgba(122,167,255,.02);
+      font-size: 12.5px;
+      background: rgba(217,154,63,.025);
       min-height: 48px;
     }
     .wf strong { color: var(--text); font-weight: 600; }
@@ -173,9 +343,31 @@
       display: inline-block;
       font-size: 10px;
       text-transform: uppercase;
-      letter-spacing: .05em;
-      color: var(--muted);
-      margin-bottom: 6px;
+      letter-spacing: .12em;
+      color: var(--accent);
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    /* Small entrance animation — once on page load, no scattered
+       micro-fluff. Children stagger slightly via animation-delay set
+       inline (or use the .stagger-N utility classes below). */
+    @keyframes scribe-enter {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .page-head, .page > .card, .page > .grid, .page > nav {
+      animation: scribe-enter .5s cubic-bezier(.2, .7, .2, 1) both;
+    }
+    .page > .card { animation-delay: .08s; }
+    .page > .grid { animation-delay: .14s; }
+    .page > nav  { animation-delay: .04s; }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+      }
     }
 
     {% block extra_styles %}{% endblock %}
@@ -185,14 +377,15 @@
   <header class="appbar">
     <a class="brand" href="/">Scribe</a>
     <nav>
+      <a href="/" class="{% if active_nav == 'transcribe' %}active{% endif %}">Transcribe</a>
       <a href="/library" class="{% if active_nav == 'library' %}active{% endif %}">Library</a>
       <a href="/projects" class="{% if active_nav == 'projects' %}active{% endif %}">Projects</a>
     </nav>
     <span class="spacer"></span>
     <div class="right">
-      <a href="/" title="Upload a new recording">+ New transcription</a>
       <a href="/settings" class="{% if active_nav == 'settings' %}active{% endif %}">Settings</a>
-      <a href="/docs/readme" target="_blank" rel="noopener" title="Open docs in a new tab">Docs</a>
+      <a href="/docs/readme" target="_blank" rel="noopener" title="Open docs in a new tab">Docs ↗</a>
+      <a class="cta" href="/" title="Upload a new recording">+ New</a>
     </div>
   </header>
 

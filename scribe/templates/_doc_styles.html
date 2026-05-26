@@ -2,17 +2,20 @@
 <style>
   .doc {
     color: var(--text);
-    font-size: 14.5px;
-    line-height: 1.65;
+    font-family: var(--reader, var(--serif, Georgia), Georgia, serif);
+    font-size: 15.5px;
+    line-height: 1.7;
     word-wrap: break-word;
   }
   .doc h1, .doc h2, .doc h3, .doc h4 {
-    color: var(--text);
-    font-weight: 650;
-    letter-spacing: -.005em;
+    color: var(--text-strong, var(--text));
+    font-family: var(--serif, Georgia), Georgia, serif;
+    font-weight: 500;
+    font-variation-settings: "opsz" 36, "SOFT" 30;
+    letter-spacing: -.01em;
     margin-top: 1.7em;
     margin-bottom: .55em;
-    line-height: 1.25;
+    line-height: 1.18;
   }
   .doc h1:first-child { margin-top: 0; }
   .doc h1 { font-size: 1.7em; border-bottom: 1px solid var(--border); padding-bottom: .25em; }
