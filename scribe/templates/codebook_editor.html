@@ -130,6 +130,86 @@
   }
   details.cb-advanced > summary:hover { color: var(--text); }
 
+  /* F2.4: codebook lock/unlock banner */
+  .cb-lock-banner {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 14px; flex-wrap: wrap;
+    margin: 0 0 14px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    font-size: 13px;
+  }
+  .cb-lock-banner.is-locked {
+    border-color: var(--accent);
+    background: rgba(167, 139, 250, .08);
+  }
+  .cb-lock-banner .cb-lock-text {
+    flex: 1; min-width: 200px;
+    color: var(--text);
+  }
+  .cb-lock-banner .cb-lock-text .stage-badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin-right: 6px;
+  }
+  .cb-lock-banner.is-locked .stage-badge {
+    background: var(--accent);
+    color: var(--panel);
+    border-color: var(--accent);
+  }
+  .cb-lock-banner .cb-lock-hint {
+    color: var(--muted); font-size: 12px; display: block;
+    margin-top: 2px;
+  }
+  .cb-lock-banner .cb-lock-actions { display: flex; gap: 8px; }
+  .cb-lock-banner .cb-lock-log-btn {
+    background: transparent; color: var(--muted);
+    border: 0; cursor: pointer; padding: 4px 10px;
+    font-size: 12px; border-radius: 4px;
+  }
+  .cb-lock-banner .cb-lock-log-btn:hover { color: var(--text); background: var(--panel); }
+  .cb-lock-log {
+    margin: 0 0 14px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px dashed var(--border);
+    background: var(--panel);
+    font-size: 12px;
+    display: none;
+  }
+  .cb-lock-log.open { display: block; }
+  .cb-lock-log .cb-lock-log-row {
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .cb-lock-log .cb-lock-log-row:last-child { border-bottom: 0; }
+  .cb-lock-log .cb-lock-log-row .action {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    margin-right: 8px;
+    color: var(--accent);
+  }
+  .cb-lock-log .cb-lock-log-row .when {
+    color: var(--muted); font-size: 11px;
+  }
+  .cb-lock-log .cb-lock-log-row .reason {
+    margin-top: 2px; color: var(--text);
+  }
+  .cb-lock-log .cb-lock-log-row .memo {
+    margin-top: 2px; color: var(--muted); font-style: italic;
+  }
+
   /* F2.2: revision history panel */
   .cb-history-panel {
     margin-top: 18px;
@@ -176,6 +256,44 @@
 {% endblock %}
 
 {% block body %}
+{#
+  F2.4 — codebook lock banner. Shows the current codebook stage with a
+  toggle button: 🔒 Lock codebook (when unlocked) or 🔓 Unlock with
+  reason… (when locked). The lock log discloser surfaces the audit
+  trail of every lock / unlock event with reason + methodological memo.
+  Locking is a deliberate methodological move; unlocking requires a
+  written justification (the "breaking the seal" invariant from the
+  spec). When locked, the create/edit form is disabled and the lifecycle
+  ops 409 from the server.
+#}
+<div id="cb-lock-banner" class="cb-lock-banner" data-test-feature="F2.4">
+  <div class="cb-lock-text">
+    <span class="stage-badge" id="cb-lock-stage">initial</span>
+    <span id="cb-lock-status">Loading lock state…</span>
+    <span class="cb-lock-hint" id="cb-lock-hint"></span>
+  </div>
+  <div class="cb-lock-actions">
+    <button
+      type="button"
+      class="cb-lock-log-btn"
+      id="cb-lock-log-btn"
+      title="Show the lock / unlock audit trail"
+    >📜 Log</button>
+    <button
+      type="button"
+      class="btn secondary"
+      id="cb-lock-toggle-btn"
+      title="Lock the codebook (freeze structural edits)"
+    >🔒 Lock codebook</button>
+  </div>
+</div>
+<section
+  id="cb-lock-log"
+  class="cb-lock-log"
+  aria-live="polite"
+  aria-label="Codebook lock log"
+></section>
+
 <div class="cb-grid">
   <div class="card">
     <h2 style="margin-top:0">Codes <span id="codeCount" class="hint" style="margin-left:6px"></span></h2>
@@ -922,10 +1040,194 @@ document.getElementById("newCodeForm").addEventListener("submit", async (e) => {
   }
 });
 
+// --------------------------------------------------------------------- //
+// F2.4 — Codebook lock / unlock toggle
+//
+// The codebook editor's banner shows the current stage and a toggle
+// button. Locking requires a non-empty reason; unlocking requires both
+// a reason and a methodological memo (the "breaking the seal" rule).
+// While locked, the create-code form is disabled and the per-row ⋮
+// lifecycle ops 409 from the server (see _lifecycle_lock_guard /
+// _codebook_lock.assert_codebook_unlocked in scribe/server.py).
+// --------------------------------------------------------------------- //
+
+let lockState = { locked: false, stage: "initial", log: [] };
+
+function fmtLockTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString();
+}
+
+function renderLockBanner() {
+  const banner = document.getElementById("cb-lock-banner");
+  const stageBadge = document.getElementById("cb-lock-stage");
+  const status = document.getElementById("cb-lock-status");
+  const hint = document.getElementById("cb-lock-hint");
+  const toggleBtn = document.getElementById("cb-lock-toggle-btn");
+  const submit = document.getElementById("cb-submit");
+
+  stageBadge.textContent = lockState.stage || "initial";
+  if (lockState.locked) {
+    banner.classList.add("is-locked");
+    status.textContent = "🔒 Codebook locked";
+    hint.textContent =
+      "New codes, edits, and lifecycle ops are blocked. Unlock to resume — requires a reason + methodological memo.";
+    toggleBtn.textContent = "🔓 Unlock with reason…";
+    toggleBtn.title = "Unlock the codebook (requires a reason and a methodological memo)";
+    submit.disabled = true;
+    submit.title = "Codebook is locked. Unlock to add or edit codes.";
+  } else {
+    banner.classList.remove("is-locked");
+    status.textContent = "Codebook is unlocked";
+    hint.textContent =
+      "Lock when you're done iterating on the codebook itself — typically before final coding or releasing to a co-coder team.";
+    toggleBtn.textContent = "🔒 Lock codebook";
+    toggleBtn.title = "Lock the codebook (freeze structural edits)";
+    submit.disabled = false;
+    submit.title = "";
+  }
+  renderLockLog();
+}
+
+function renderLockLog() {
+  const box = document.getElementById("cb-lock-log");
+  if (!lockState.log || lockState.log.length === 0) {
+    box.innerHTML = '<p class="hint" style="margin:0">No lock / unlock events yet.</p>';
+    return;
+  }
+  // Reverse-chronological — most recent event first.
+  const rows = lockState.log.slice().reverse().map(ev => {
+    const action = (ev.action || "").toUpperCase();
+    const when = fmtLockTime(ev.created_at);
+    const fromTo = ev.prior_stage && ev.new_stage
+      ? `<span class="hint">(${escapeHtml(ev.prior_stage)} → ${escapeHtml(ev.new_stage)})</span>`
+      : "";
+    const reason = ev.reason
+      ? `<div class="reason">${escapeHtml(ev.reason)}</div>`
+      : "";
+    const memo = ev.methodological_memo
+      ? `<div class="memo">Memo: ${escapeHtml(ev.methodological_memo)}</div>`
+      : "";
+    return `
+      <div class="cb-lock-log-row">
+        <span class="action">${escapeHtml(action)}</span>
+        ${fromTo}
+        <span class="when">${escapeHtml(when)}</span>
+        ${reason}
+        ${memo}
+      </div>
+    `;
+  }).join("");
+  box.innerHTML = rows;
+}
+
+async function loadLockState() {
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/codebook/lock`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const body = await r.json();
+    lockState = {
+      locked: !!body.locked,
+      stage: body.stage || "initial",
+      log: Array.isArray(body.log) ? body.log : [],
+    };
+  } catch (err) {
+    // Render whatever we have; don't block the rest of the page.
+    document.getElementById("cb-lock-status").textContent =
+      `Couldn't load lock state: ${err.message}`;
+  }
+  renderLockBanner();
+}
+
+async function doLock() {
+  const reason = prompt(
+    "Lock the codebook. Why are you locking now? (a one-line rationale lands in the audit log)",
+    "ready for final coding"
+  );
+  if (reason === null) return;
+  const trimmed = (reason || "").trim();
+  if (!trimmed) {
+    alert("A reason is required to lock the codebook.");
+    return;
+  }
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/codebook/lock`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ reason: trimmed }),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    await loadLockState();
+    await refreshCodes();
+  } catch (err) {
+    alert(`Couldn't lock: ${err.message}`);
+  }
+}
+
+async function doUnlock() {
+  const reason = prompt(
+    "Unlock — what changed that justifies reopening the codebook?",
+    ""
+  );
+  if (reason === null) return;
+  const reasonTrim = (reason || "").trim();
+  if (!reasonTrim) {
+    alert("A reason is required to unlock.");
+    return;
+  }
+  const memo = prompt(
+    "Methodological memo — the longer 'why this is justified'. This goes into the audit log as evidence.",
+    ""
+  );
+  if (memo === null) return;
+  const memoTrim = (memo || "").trim();
+  if (!memoTrim) {
+    alert("A methodological memo is required to unlock the codebook.");
+    return;
+  }
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/codebook/unlock`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        reason: reasonTrim,
+        methodological_memo: memoTrim,
+      }),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    await loadLockState();
+    await refreshCodes();
+  } catch (err) {
+    alert(`Couldn't unlock: ${err.message}`);
+  }
+}
+
+document.getElementById("cb-lock-toggle-btn").addEventListener("click", () => {
+  if (lockState.locked) {
+    doUnlock();
+  } else {
+    doLock();
+  }
+});
+
+document.getElementById("cb-lock-log-btn").addEventListener("click", () => {
+  document.getElementById("cb-lock-log").classList.toggle("open");
+});
+
 refreshCodes().catch(err => {
   document.getElementById("codesEmpty").style.display = "";
   document.getElementById("codesEmpty").textContent = `Couldn't load codes: ${err.message}`;
   document.getElementById("codesEmpty").style.color = "var(--err)";
 });
+
+loadLockState();
 </script>
 {% endblock %}

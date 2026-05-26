@@ -1434,6 +1434,16 @@ async def create_code_endpoint(project_id: str, request: Request) -> JSONRespons
         raise HTTPException(400, "Expected JSON object")
     with PROJECTS_LOCK:
         _project_must_exist(project_id)
+        # F2.4: a locked codebook refuses new codes. The patch endpoint
+        # already has the same guard; creating a brand-new code is just
+        # another structural write that breaks the audit trail if it
+        # silently lands while locked.
+        try:
+            _codebook_lock.assert_codebook_unlocked(
+                _projects_root(), project_id
+            )
+        except _codebook_lock.LockedCodebookError as e:
+            raise HTTPException(409, str(e))
         try:
             code = _codes.Code.new(
                 project_id=project_id,
@@ -1867,6 +1877,146 @@ async def split_code_endpoint(
     return JSONResponse({
         "source": source.to_dict(),
         "new_codes": [c.to_dict() for c in new_codes],
+    })
+
+
+# --------------------------------------------------------------------------- #
+# F2.4 — Codebook lock / unlock toggle
+#
+# The pure module (`scribe.codebook_lock`) shipped in ed0cf5db with
+# 57 tests; the lock guard is already wired into the codes /
+# code-lifecycle / memo-promote endpoints. What was missing was a way
+# for the user to *flip* the toggle: locking is a deliberate
+# methodological move, and unlocking requires a written
+# justification + memo. These three endpoints surface that workflow
+# so the codebook editor can render a stage banner with a working
+# "🔒 Lock codebook" / "🔓 Unlock with reason…" affordance.
+#
+# Shape:
+#   GET  /api/projects/<pid>/codebook/lock       — current state
+#                                                  ({locked, stage, log})
+#   POST /api/projects/<pid>/codebook/lock       — body {"reason": "..."}
+#   POST /api/projects/<pid>/codebook/unlock     — body
+#       {"reason": "...", "methodological_memo": "...", "new_stage"?}
+#
+# Validation errors map to 400; "already locked" / "not locked" map to
+# 409 (state conflict, not a bad request).
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/api/projects/{project_id}/codebook/lock")
+async def get_codebook_lock_state_endpoint(project_id: str) -> JSONResponse:
+    """Return the current lock state of the codebook + the lock log.
+
+    The codebook editor uses this to render the stage banner ("Stage:
+    locked" / "Stage: focused") and the appropriate toggle button. The
+    log is the audit trail of every lock / unlock event with the
+    reason and (for unlocks) the methodological memo.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        project = _projects.load_project(_projects_root(), project_id)
+        log = _codebook_lock.read_lock_log(_projects_root(), project_id)
+    return JSONResponse({
+        "project_id": project_id,
+        "locked": project.codebook_stage == _codebook_lock.LOCKED_STAGE,
+        "stage": project.codebook_stage,
+        "log": [asdict(ev) for ev in log],
+    })
+
+
+@app.post("/api/projects/{project_id}/codebook/lock")
+async def lock_codebook_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    """Lock the codebook (F2.4).
+
+    Body: ``{"reason": "..."}``. ``reason`` is required and non-empty.
+    Returns 409 if the codebook is already locked (no-op locks would
+    pollute the audit log without changing state — re-locking is the
+    "wait, did I already?" footgun the spec deliberately rejects).
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    reason = str(body.get("reason", "") or "").strip()
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            project, event = _codebook_lock.lock_codebook(
+                _projects_root(), project_id, reason=reason
+            )
+        except _codebook_lock.LockedCodebookError as e:
+            # Already-locked is a state conflict, not a bad request.
+            raise HTTPException(409, str(e))
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({
+        "project": project.to_dict(),
+        "event": asdict(event),
+    })
+
+
+@app.post("/api/projects/{project_id}/codebook/unlock")
+async def unlock_codebook_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    """Unlock the codebook (F2.4).
+
+    Body: ``{"reason": "...", "methodological_memo": "...",
+    "new_stage": "..." (optional)}``. Both ``reason`` and
+    ``methodological_memo`` are required and non-empty — the "breaking
+    the seal" invariant from the spec.
+
+    ``new_stage`` defaults to the most recent prior stage from the
+    lock log (or ``"theoretical"`` if no history). Pass an explicit
+    stage to land in a specific phase (initial / focused / axial /
+    theoretical). Passing ``"locked"`` is rejected.
+
+    Returns 409 if the codebook is not currently locked.
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    reason = str(body.get("reason", "") or "").strip()
+    memo = str(body.get("methodological_memo", "") or "").strip()
+    raw_new_stage = body.get("new_stage")
+    new_stage = (
+        str(raw_new_stage).strip()
+        if raw_new_stage is not None and str(raw_new_stage).strip()
+        else None
+    )
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        # The pure helper raises ProjectValidationError when the project
+        # isn't currently locked. That's *state-shaped* (not the request
+        # itself being invalid), so we sniff the message to map it to
+        # 409 vs 400; clean separation matches the lock-already-set
+        # branch above.
+        try:
+            project, event = _codebook_lock.unlock_codebook(
+                _projects_root(), project_id,
+                reason=reason,
+                methodological_memo=memo,
+                new_stage=new_stage,
+            )
+        except _projects.ProjectValidationError as e:
+            msg = str(e)
+            if "is not locked" in msg:
+                raise HTTPException(409, msg)
+            raise HTTPException(400, msg)
+    return JSONResponse({
+        "project": project.to_dict(),
+        "event": asdict(event),
     })
 
 
