@@ -345,6 +345,28 @@ async def project_source_add_page(request: Request, project_id: str) -> HTMLResp
     })
 
 
+@app.get("/projects/{project_id}/sources/schema", response_class=HTMLResponse)
+async def project_source_schema_page(
+    request: Request, project_id: str
+) -> HTMLResponse:
+    """Source-attribute schema editor (F3.2).
+
+    The pure data layer in ``scribe/source_schema.py`` lets a project
+    declare typed columns (key / label / type / required / options /
+    description) for each source's ``custom_attributes``. Without this
+    UI the schema is unreachable: only the JSON PUT endpoint accepted
+    it. This page renders the form that reads + writes the schema via
+    ``GET / PUT /api/projects/<pid>/source_schema`` and the resulting
+    columns are surfaced in the sources list (F1.2).
+    """
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "source_schema.html", {
+        "project_id": pid,
+        "page_title": "Source attribute schema",
+        "subtitle": "Declare typed columns for the sources in this project.",
+    })
+
+
 @app.get("/projects/{project_id}/sources/{source_id}", response_class=HTMLResponse)
 async def project_source_coding_page(request: Request, project_id: str, source_id: str) -> HTMLResponse:
     pid = _project_id_or_404(project_id)
@@ -1222,6 +1244,68 @@ async def delete_source_endpoint(project_id: str, source_id: str) -> JSONRespons
     if not ok:
         raise HTTPException(404, "Source not found")
     return JSONResponse({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
+# Source attribute schema (F3.2) — user-defined columns per source.
+#
+# F1.2 already gave each Source a free-form ``custom_attributes`` slot.
+# F3.2 layers a project-level schema on top: a typed list of attribute
+# definitions (``key``, ``label``, ``type``, ``required``, ``options``,
+# ``description``) so the eventual sources-table view renders consistent
+# columns, validation catches typos, and exports get a uniform shape.
+#
+# Storage: a single file at ``PROJECTS_DIR/<pid>/source_schema.json``.
+# GET returns the existing schema (or an empty schema for projects that
+# never set one — the UI doesn't need to distinguish "missing" from
+# "empty"). PUT replaces the schema atomically.
+# --------------------------------------------------------------------------- #
+
+from . import source_schema as _source_schema  # noqa: E402  (after module-level state)
+
+
+@app.get("/api/projects/{project_id}/source_schema")
+async def get_source_schema_endpoint(project_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        schema = _source_schema.load_or_empty_source_schema(
+            _projects_root(), project_id
+        )
+    return JSONResponse(schema.to_dict())
+
+
+@app.put("/api/projects/{project_id}/source_schema")
+async def put_source_schema_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    raw_attrs = body.get("attributes")
+    if raw_attrs is None:
+        raw_attrs = []
+    if not isinstance(raw_attrs, list):
+        raise HTTPException(400, "attributes must be a list")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            schema = _source_schema.SourceAttributeSchema.new(
+                project_id=project_id,
+                attributes=raw_attrs,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid schema payload: {e}")
+        _source_schema.save_source_schema(_projects_root(), schema)
+    return JSONResponse(schema.to_dict())
 
 
 # --------------------------------------------------------------------------- #

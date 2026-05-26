@@ -1,0 +1,317 @@
+{#
+  Source attribute schema editor (F3.2).
+
+  PLANNING.md F3.2:
+    > Source attribute schema (user-defined columns per source).
+
+  F1.2 gave each Source a free-form ``custom_attributes`` dict. F3.2
+  layers a project-level schema on top: a typed list of attribute
+  definitions (``key``, ``label``, ``type``, ``required``, ``options``,
+  ``description``) so the eventual sources-table renders consistent
+  columns, validation catches typos, and exports get a uniform shape.
+
+  This page is the user-facing surface for the schema. Without it the
+  pure-Python module ``scribe/source_schema.py`` is unreachable from
+  the UI — only a JSON client could POST to the PUT endpoint.
+
+  Reads via:  GET  /api/projects/<pid>/source_schema
+  Writes via: PUT  /api/projects/<pid>/source_schema
+#}
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Source attribute schema{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}/sources">← Sources</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}">Project home</a>
+{% endblock %}
+
+{% block extra_styles %}
+  .field-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .field-input, select.field-input, textarea.field-input {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+    font: inherit; font-size: 13.5px;
+  }
+  .ss-help {
+    color: var(--muted);
+    font-size: 12.5px;
+    margin: 4px 0 0;
+    line-height: 1.5;
+  }
+  .ss-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 0.7fr 0.5fr 1.4fr auto;
+    gap: 8px;
+    align-items: end;
+    margin-bottom: 10px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+  }
+  @media (max-width: 1100px) {
+    .ss-row {
+      grid-template-columns: 1fr 1fr;
+    }
+    .ss-row .ss-options-cell { grid-column: 1 / -1; }
+    .ss-row .ss-actions-cell { grid-column: 1 / -1; justify-self: end; }
+  }
+  .ss-row .checkbox-row {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--text); font-size: 13px;
+    cursor: pointer;
+    padding: 8px 0;
+  }
+  .ss-row .checkbox-row input[type=checkbox] { width: 16px; height: 16px; }
+  .ss-actions-cell { display: flex; gap: 6px; align-items: center; }
+  .btn-icon {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+  }
+  .btn-icon:hover { border-color: var(--accent); color: var(--accent); }
+  .ss-empty {
+    padding: 24px;
+    text-align: center;
+    color: var(--muted);
+    font-style: italic;
+  }
+  .ss-toolbar {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-top: 14px;
+  }
+  .ss-required-badge {
+    background: var(--accent-soft);
+    color: var(--accent);
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    margin-left: 6px;
+  }
+{% endblock %}
+
+{% block body %}
+<div id="loading" class="card hint">Loading schema…</div>
+<div id="errorState" class="card" style="display:none;color:var(--err)"></div>
+
+<div id="ssCard" class="card" style="display:none" data-test-feature="F3.2">
+  <h2 style="margin-top:0">Source attribute schema</h2>
+  <p class="ss-help">
+    Declare the typed columns each source in this project should
+    carry. The keys you set here become the dict keys on each source's
+    <code>custom_attributes</code>. Existing source values are
+    preserved when you change the schema — schema edits are a guide,
+    not a migration.
+  </p>
+
+  <form id="ssForm" style="margin-top:14px">
+    <div id="ssRows"></div>
+    <div id="ssEmpty" class="ss-empty" style="display:none">
+      No attributes defined yet. Click <strong>+ Add attribute</strong> to start a column.
+    </div>
+
+    <div class="ss-toolbar">
+      <button type="button" id="ss-add-row" class="btn secondary" data-test-id="ss-add-row">
+        + Add attribute
+      </button>
+      <span style="flex:1"></span>
+      <button id="ss-submit" class="btn" type="submit" data-test-id="ss-submit">
+        Save schema
+      </button>
+      <span id="ss-msg" class="hint" role="alert" aria-live="polite"></span>
+    </div>
+  </form>
+</div>
+
+<template id="ssRowTpl">
+  <div class="ss-row" data-row>
+    <div>
+      <label class="field-label">Key <span style="color:var(--err)">*</span></label>
+      <input type="text" class="field-input" data-field="key" maxlength="64"
+             placeholder="e.g. site" required>
+      <p class="ss-help">Letters, digits, underscore/hyphen/space.</p>
+    </div>
+    <div>
+      <label class="field-label">Label</label>
+      <input type="text" class="field-input" data-field="label" maxlength="200"
+             placeholder="Human-readable header">
+    </div>
+    <div>
+      <label class="field-label">Type</label>
+      <select class="field-input" data-field="type">
+        <option value="text">text</option>
+        <option value="number">number</option>
+        <option value="date">date (YYYY-MM-DD)</option>
+        <option value="boolean">boolean</option>
+        <option value="select">select (one of options)</option>
+      </select>
+    </div>
+    <div>
+      <label class="field-label">Required</label>
+      <label class="checkbox-row">
+        <input type="checkbox" data-field="required">
+        <span>required</span>
+      </label>
+    </div>
+    <div class="ss-options-cell" data-options-cell style="display:none">
+      <label class="field-label">Options <span class="hint">— comma-separated</span></label>
+      <input type="text" class="field-input" data-field="options"
+             placeholder="e.g. Hospital A, Hospital B, Clinic C">
+      <p class="ss-help">Required for the <code>select</code> type. Each option must be unique.</p>
+    </div>
+    <div class="ss-options-cell" data-description-cell>
+      <label class="field-label">Description</label>
+      <input type="text" class="field-input" data-field="description" maxlength="1000"
+             placeholder="Optional. Surfaces in tooltips on the sources list.">
+    </div>
+    <div class="ss-actions-cell">
+      <button type="button" class="btn-icon" data-action="up" title="Move up">↑</button>
+      <button type="button" class="btn-icon" data-action="down" title="Move down">↓</button>
+      <button type="button" class="btn-icon" data-action="remove" title="Remove">✕</button>
+    </div>
+  </div>
+</template>
+
+<script type="module">
+const PROJECT_ID = {{ project_id | tojson }};
+
+function setMsg(el, text, isError) {
+  el.textContent = text;
+  el.style.color = isError ? "var(--err)" : "var(--ok)";
+}
+
+function getRows() {
+  return Array.from(document.querySelectorAll("#ssRows [data-row]"));
+}
+
+function refreshEmptyState() {
+  const empty = document.getElementById("ssEmpty");
+  empty.style.display = getRows().length === 0 ? "" : "none";
+}
+
+function syncOptionsCellVisibility(row) {
+  const typeSel = row.querySelector('[data-field="type"]');
+  const optsCell = row.querySelector('[data-options-cell]');
+  if (typeSel.value === "select") {
+    optsCell.style.display = "";
+    optsCell.querySelector('[data-field="options"]').required = true;
+  } else {
+    optsCell.style.display = "none";
+    optsCell.querySelector('[data-field="options"]').required = false;
+  }
+}
+
+function addRow(prefill) {
+  const tpl = document.getElementById("ssRowTpl");
+  const node = tpl.content.firstElementChild.cloneNode(true);
+  if (prefill) {
+    node.querySelector('[data-field="key"]').value = prefill.key || "";
+    node.querySelector('[data-field="label"]').value = prefill.label || "";
+    node.querySelector('[data-field="type"]').value = prefill.type || "text";
+    node.querySelector('[data-field="required"]').checked = !!prefill.required;
+    node.querySelector('[data-field="options"]').value =
+      Array.isArray(prefill.options) ? prefill.options.join(", ") : "";
+    node.querySelector('[data-field="description"]').value =
+      prefill.description || "";
+  }
+  // Type → options visibility
+  const typeSel = node.querySelector('[data-field="type"]');
+  typeSel.addEventListener("change", () => syncOptionsCellVisibility(node));
+
+  // Action buttons.
+  node.querySelector('[data-action="up"]').addEventListener("click", () => {
+    const prev = node.previousElementSibling;
+    if (prev) node.parentNode.insertBefore(node, prev);
+  });
+  node.querySelector('[data-action="down"]').addEventListener("click", () => {
+    const next = node.nextElementSibling;
+    if (next) node.parentNode.insertBefore(next, node);
+  });
+  node.querySelector('[data-action="remove"]').addEventListener("click", () => {
+    node.remove();
+    refreshEmptyState();
+  });
+
+  document.getElementById("ssRows").appendChild(node);
+  syncOptionsCellVisibility(node);
+  refreshEmptyState();
+  return node;
+}
+
+function rowToAttrPayload(row) {
+  const key = row.querySelector('[data-field="key"]').value.trim();
+  const label = row.querySelector('[data-field="label"]').value.trim();
+  const type = row.querySelector('[data-field="type"]').value;
+  const required = !!row.querySelector('[data-field="required"]').checked;
+  const description = row.querySelector('[data-field="description"]').value.trim();
+  const optionsRaw = row.querySelector('[data-field="options"]').value;
+  const options = type === "select"
+    ? optionsRaw.split(",").map(s => s.trim()).filter(Boolean)
+    : [];
+  return { key, label, type, required, options, description };
+}
+
+async function load() {
+  const loading = document.getElementById("loading");
+  const card = document.getElementById("ssCard");
+  const error = document.getElementById("errorState");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/source_schema`);
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const data = await r.json();
+    loading.style.display = "none";
+    card.style.display = "";
+    const attrs = (data && Array.isArray(data.attributes)) ? data.attributes : [];
+    attrs.forEach(a => addRow(a));
+    refreshEmptyState();
+  } catch (e) {
+    loading.style.display = "none";
+    error.textContent = `Couldn't load schema: ${e.message}`;
+    error.style.display = "";
+  }
+}
+
+document.getElementById("ss-add-row").addEventListener("click", () => addRow());
+
+document.getElementById("ssForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const submit = document.getElementById("ss-submit");
+  const msg = document.getElementById("ss-msg");
+  const attributes = getRows().map(rowToAttrPayload);
+
+  submit.disabled = true;
+  setMsg(msg, "Saving…", false);
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/source_schema`, {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ attributes }),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    setMsg(msg, "Saved", false);
+  } catch (err) {
+    setMsg(msg, `Couldn't save: ${err.message}`, true);
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+load();
+</script>
+{% endblock %}

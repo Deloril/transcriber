@@ -1,9 +1,31 @@
+{#
+  Sources list (F1.2 base + F3.2 schema-driven columns).
+
+  F1.2 shipped the Source entity; this page lists sources attached to
+  a project. F3.2 layers a project-level attribute schema on top
+  (``scribe/source_schema.py``): a typed list of attribute definitions
+  the researcher declares for the project so the table here renders
+  consistent columns across every source.
+
+  When the schema has at least one attribute, this page surfaces the
+  attribute columns to the right of the built-in Name/Type/Language/
+  Added columns. Without a schema, the page falls back to the
+  built-in columns and offers a CTA to define one.
+#}
 {% extends "_shell.html" %}
 {% set active_nav = "projects" %}
 {% block title %}Sources{% endblock %}
 
 {% block actions %}
   <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+  {# F3.2: link to the schema editor so the user-defined column set
+     is reachable from the listing it controls. #}
+  <a class="btn secondary"
+     href="/projects/{{ project_id }}/sources/schema"
+     title="Define typed columns (key/label/type/required) for the sources in this project."
+     data-test-id="src-schema-link">
+    🧬 Edit columns
+  </a>
   <a class="btn" href="/projects/{{ project_id }}/sources/add">+ Add source</a>
 {% endblock %}
 
@@ -24,18 +46,37 @@
     vertical-align: middle;
   }
   table.src tbody tr:hover { background: rgba(122,167,255,.04); }
+  table.src td.attr-cell {
+    color: var(--text);
+    font-size: 13px;
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  table.src td.attr-cell.attr-empty {
+    color: var(--muted);
+    font-style: italic;
+  }
+  table.src th.attr-col[title] { cursor: help; }
+  .attr-required-mark {
+    color: var(--err);
+    margin-left: 2px;
+  }
 {% endblock %}
 
 {% block body %}
-<div id="sourcesCard" class="card" style="display:none">
+<div id="sourcesCard" class="card" style="display:none" data-test-feature="F3.2">
   <table class="src">
-    <thead><tr>
-      <th>Name</th>
-      <th>Type</th>
-      <th>Language</th>
-      <th>Added</th>
-      <th></th>
-    </tr></thead>
+    <thead id="sourcesHead">
+      <tr>
+        <th>Name</th>
+        <th>Type</th>
+        <th>Language</th>
+        <th>Added</th>
+        <th></th>
+      </tr>
+    </thead>
     <tbody id="sourcesBody"></tbody>
   </table>
 </div>
@@ -46,6 +87,11 @@
   <h3>No sources attached yet</h3>
   <p>Pick an existing transcription from your library, or upload a new recording.</p>
   <a class="btn" href="/projects/{{ project_id }}/sources/add">+ Add a source</a>
+  <p class="hint" style="margin-top:14px">
+    Tip: declare typed columns up front via
+    <a href="/projects/{{ project_id }}/sources/schema">🧬 Edit columns</a>
+    so every source carries the same attributes.
+  </p>
 </div>
 
 <div id="errorState" class="card" style="display:none;color:var(--err)"></div>
@@ -67,30 +113,107 @@ function fmtDate(s) {
   } catch (_) { return s; }
 }
 
+function fmtAttrValue(raw, attrType) {
+  // Values are stored as strings on disk per scribe.source_schema's
+  // canonical form. Boolean comes through as "true" / "false" — we
+  // render those as ✓ / · so the column reads at a glance.
+  if (raw === undefined || raw === null || raw === "") return null;
+  const s = String(raw);
+  if (attrType === "boolean") {
+    if (s === "true") return "✓";
+    if (s === "false") return "·";
+  }
+  return s;
+}
+
+function renderHead(schema) {
+  const head = document.getElementById("sourcesHead");
+  head.innerHTML = "";
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <th>Name</th>
+    <th>Type</th>
+    <th>Language</th>
+    <th>Added</th>
+  `;
+  // F3.2 — append a column per schema attribute, in declared order.
+  (schema.attributes || []).forEach(a => {
+    const th = document.createElement("th");
+    th.className = "attr-col";
+    th.dataset.attrKey = a.key;
+    const label = a.label || a.key;
+    th.innerHTML = escapeHtml(label) + (a.required
+      ? `<span class="attr-required-mark" title="required">*</span>`
+      : "");
+    if (a.description) {
+      th.title = a.description;
+    }
+    tr.appendChild(th);
+  });
+  // Trailing actions column.
+  const actionTh = document.createElement("th");
+  tr.appendChild(actionTh);
+  head.appendChild(tr);
+}
+
+function renderRow(s, schema) {
+  const tr = document.createElement("tr");
+  const cells = [
+    `<td><a href="/projects/${PROJECT_ID}/sources/${escapeHtml(s.id)}"><strong>${escapeHtml(s.name || "(unnamed)")}</strong></a></td>`,
+    `<td>${escapeHtml(s.source_type || "transcript")}</td>`,
+    `<td>${escapeHtml((s.language || "—").toUpperCase())}</td>`,
+    `<td class="hint">${fmtDate(s.created_at)}</td>`,
+  ];
+  const attrs = (s.custom_attributes && typeof s.custom_attributes === "object")
+    ? s.custom_attributes
+    : {};
+  (schema.attributes || []).forEach(a => {
+    const v = fmtAttrValue(attrs[a.key], a.type);
+    if (v === null) {
+      cells.push(`<td class="attr-cell attr-empty" data-attr-key="${escapeHtml(a.key)}">—</td>`);
+    } else {
+      cells.push(`<td class="attr-cell" data-attr-key="${escapeHtml(a.key)}" title="${escapeHtml(v)}">${escapeHtml(v)}</td>`);
+    }
+  });
+  cells.push(`<td><a class="btn secondary" href="/projects/${PROJECT_ID}/sources/${escapeHtml(s.id)}">Code</a></td>`);
+  tr.innerHTML = cells.join("");
+  return tr;
+}
+
+async function fetchSchema() {
+  // F3.2: load the schema. Empty/missing → empty schema (no extra cols).
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/source_schema`);
+    if (!r.ok) return { attributes: [] };
+    const data = await r.json();
+    return {
+      attributes: Array.isArray(data && data.attributes) ? data.attributes : [],
+    };
+  } catch (_) {
+    return { attributes: [] };
+  }
+}
+
 async function load() {
   const loading = document.getElementById("loading");
   const card = document.getElementById("sourcesCard");
   const empty = document.getElementById("emptyState");
   const error = document.getElementById("errorState");
   try {
-    const r = await fetch(`/api/projects/${PROJECT_ID}/sources`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    const list = data.sources || [];
+    const [sourcesResp, schema] = await Promise.all([
+      fetch(`/api/projects/${PROJECT_ID}/sources`).then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+      fetchSchema(),
+    ]);
+    const list = sourcesResp.sources || [];
     loading.style.display = "none";
     if (!list.length) { empty.style.display = ""; return; }
+    renderHead(schema);
     const body = document.getElementById("sourcesBody");
-    list.forEach(s => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td><a href="/projects/${PROJECT_ID}/sources/${escapeHtml(s.id)}"><strong>${escapeHtml(s.name || "(unnamed)")}</strong></a></td>
-        <td>${escapeHtml(s.source_type || "transcript")}</td>
-        <td>${escapeHtml((s.language || "—").toUpperCase())}</td>
-        <td class="hint">${fmtDate(s.created_at)}</td>
-        <td><a class="btn secondary" href="/projects/${PROJECT_ID}/sources/${escapeHtml(s.id)}">Code</a></td>
-      `;
-      body.appendChild(tr);
-    });
+    body.innerHTML = "";
+    list.forEach(s => body.appendChild(renderRow(s, schema)));
     card.style.display = "";
   } catch (e) {
     loading.style.display = "none";
