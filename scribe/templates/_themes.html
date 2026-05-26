@@ -259,6 +259,11 @@
     display: flex; flex-direction: column;
     gap: 2px;
   }
+  /* `display: flex` above has the same specificity as the browser's
+     default `[hidden] { display: none }` and comes later, so it wins
+     and the menu stays visible after JS sets `menu.hidden = true`.
+     Explicit override pins the hidden state. */
+  .theme-menu[hidden] { display: none; }
   .theme-menu button {
     background: transparent;
     color: var(--text);
