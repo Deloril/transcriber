@@ -35,6 +35,20 @@
           data-test-id="src-orphan-queue-count"
           style="font-size:11px;margin-left:4px"></span>
   </a>
+  {# F8.6 — Whole-transcript AI review pass.
+     Sweeps every paragraph (default) of this source's transcript and
+     produces a list of pending CodeSuggestions for the researcher to
+     review one-by-one — never auto-applies. Gated by F8.10 like every
+     other AI feature. The data-test-feature marker anchors the
+     reachability test in tests/test_server_transcript_review.py. #}
+  <button id="reviewPassBtn"
+          class="btn secondary"
+          type="button"
+          data-test-feature="F8.6"
+          data-test-id="src-review-pass"
+          title="Walk the whole transcript with the AI and queue suggestions for review (F8.6)">
+    ✨ Review whole transcript
+  </button>
 {% endblock %}
 
 {% block extra_styles %}
@@ -972,6 +986,70 @@
       <div id="similarSeed" class="seed" data-test-id="src-similar-seed"></div>
       <div id="similarStatus" class="status" data-test-id="src-similar-status"></div>
       <div id="similarMatches" class="match-list" data-test-id="src-similar-matches"></div>
+    </div>
+  </div>
+</div>
+
+<!-- F8.6 — Whole-transcript AI review pass modal. The "✨ Review whole
+     transcript" page-action button opens this modal. The body shows a
+     progress bar (succeeded / failed / pending) and the running list of
+     suggestions the engine has produced so far. Each suggestion row
+     carries an Accept / Reject button so the researcher can triage
+     without leaving the page. Pending pass state is persisted in
+     `projects/<pid>/review_passes/<rpid>.json` so a refresh recovers
+     mid-pass. The data-test-feature=F8.6 marker anchors the
+     reachability test in tests/test_server_transcript_review.py. -->
+<div id="reviewModal"
+     class="similar-modal-overlay"
+     role="dialog"
+     aria-modal="true"
+     aria-label="Whole-transcript AI review pass"
+     data-test-feature="F8.6"
+     data-test-id="src-review-modal">
+  <div class="similar-modal">
+    <header>
+      <h3>✨ Whole-transcript review</h3>
+      <button type="button"
+              id="reviewCloseBtn"
+              class="close-btn"
+              data-test-id="src-review-close"
+              aria-label="Close">×</button>
+    </header>
+    <div class="body">
+      <div id="reviewIntro" class="seed" data-test-id="src-review-intro">
+        Sweeps every paragraph of this transcript with the AI, producing a list
+        of <em>pending</em> code suggestions. Nothing is auto-applied — every
+        suggestion needs an explicit Accept.
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label class="hint" for="reviewGranularity" style="font-size:11px">Granularity</label>
+        <select id="reviewGranularity" data-test-id="src-review-granularity"
+                style="background:var(--panel-2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px">
+          <option value="paragraph" selected>Paragraph (default)</option>
+          <option value="sentence">Sentence</option>
+        </select>
+        <label class="hint" for="reviewSkipCoded" style="font-size:11px;display:inline-flex;align-items:center;gap:4px">
+          <input type="checkbox" id="reviewSkipCoded" checked
+                 data-test-id="src-review-skip-coded">
+          Skip already-coded spans
+        </label>
+        <button id="reviewStartBtn" type="button" class="btn"
+                data-test-id="src-review-start"
+                style="font-size:12px;padding:4px 10px">Start review</button>
+        <button id="reviewRunMoreBtn" type="button" class="btn secondary"
+                data-test-id="src-review-run-more"
+                style="font-size:12px;padding:4px 10px;display:none">Process next batch</button>
+        <button id="reviewCancelBtn" type="button" class="btn secondary"
+                data-test-id="src-review-cancel"
+                style="font-size:12px;padding:4px 10px;display:none">Cancel pass</button>
+      </div>
+      <div id="reviewStatus" class="status" data-test-id="src-review-status"></div>
+      <div id="reviewProgress"
+           data-test-id="src-review-progress"
+           style="margin:6px 0 10px;display:none;font-size:11px;color:var(--muted)"></div>
+      <div id="reviewItems"
+           class="match-list"
+           data-test-id="src-review-items"></div>
     </div>
   </div>
 </div>
@@ -2936,6 +3014,397 @@ similarModalEl().addEventListener("click", (e) => {
   // Click outside the inner panel closes the modal — mirrors the memo
   // modal's overlay-click behaviour.
   if (e.target === similarModalEl()) hideSimilarModal();
+});
+
+// ---------- F8.6 Whole-transcript review pass ----------
+//
+// "✨ Review whole transcript" enumerates every paragraph (or sentence)
+// in the source's transcript and asks the F8.3 engine for a code
+// suggestion against each, accumulating a list the researcher can then
+// triage. The route POST /api/projects/<pid>/sources/<sid>/review starts
+// the pass and drives it forward by ``max_steps`` items per request; the
+// UI then polls /run to keep things moving without blocking the request
+// for minutes on a long transcript. Nothing is auto-applied — each item
+// produces a CodeSuggestion in the same pending decision lifecycle as
+// the per-span F8.3 surface. Accept / Reject reuse the existing F8.3
+// suggestion routes so the audit trail is the same shape.
+let _REVIEW_PASS = null;            // current ReviewPass dict (after start/run)
+let _REVIEW_SUGGESTIONS = {};        // suggestion_id → CodeSuggestion dict
+let _REVIEW_BUSY = false;
+const _REVIEW_BATCH_SIZE = 5;
+
+function reviewModalEl() { return document.getElementById("reviewModal"); }
+function showReviewModal() { reviewModalEl().classList.add("open"); }
+function hideReviewModal() {
+  reviewModalEl().classList.remove("open");
+}
+
+function renderReviewProgress() {
+  const p = _REVIEW_PASS;
+  const wrap = document.getElementById("reviewProgress");
+  const cancelBtn = document.getElementById("reviewCancelBtn");
+  const runMoreBtn = document.getElementById("reviewRunMoreBtn");
+  const startBtn = document.getElementById("reviewStartBtn");
+  if (!p) {
+    wrap.style.display = "none";
+    cancelBtn.style.display = "none";
+    runMoreBtn.style.display = "none";
+    startBtn.style.display = "";
+    return;
+  }
+  const total = (p.items || []).length;
+  let succeeded = 0, failed = 0, pending = 0;
+  for (const it of (p.items || [])) {
+    if (it.suggestion_id) succeeded += 1;
+    else if (it.error) failed += 1;
+    else pending += 1;
+  }
+  wrap.style.display = "";
+  wrap.textContent =
+    `Pass ${p.id.slice(0, 6)} · status ${p.status} · ` +
+    `${succeeded}/${total} processed (${failed} per-item error${failed === 1 ? "" : "s"}, ` +
+    `${pending} pending) · granularity ${p.granularity}`;
+  // Surface action buttons depending on state.
+  const terminal = (p.status === "completed" || p.status === "cancelled" || p.status === "failed");
+  cancelBtn.style.display = terminal ? "none" : "";
+  runMoreBtn.style.display = (!terminal && pending > 0) ? "" : "none";
+  startBtn.style.display = terminal ? "" : "none";
+}
+
+function renderReviewItems() {
+  const list = document.getElementById("reviewItems");
+  const p = _REVIEW_PASS;
+  if (!p || !(p.items || []).length) {
+    list.innerHTML = `<div class="hint">No items yet. Click "Start review" to begin.</div>`;
+    return;
+  }
+  list.innerHTML = (p.items || []).map((it, idx) => {
+    const sug = it.suggestion_id ? _REVIEW_SUGGESTIONS[it.suggestion_id] : null;
+    const preview = escapeHtml((it.text_preview || "").slice(0, 240));
+    let body;
+    if (it.error) {
+      body =
+        `<div class="match-meta">` +
+          `<span class="kind-pill">item ${idx + 1}</span>` +
+          `<span class="row-label">error</span>` +
+          `<span class="score">err</span>` +
+        `</div>` +
+        `<div class="match-text">"${preview}"</div>` +
+        `<div class="hint" style="color:var(--err);margin-top:4px">` +
+          escapeHtml(it.error) + `</div>`;
+    } else if (sug) {
+      const decided = sug.decision && sug.decision !== "pending";
+      const cands = (sug.candidates || []).slice(0, 3);
+      const candsHtml = cands.length
+        ? cands.map(c => {
+            const code = CODES.find(cc => cc.id === c.code_id);
+            const codeName = code ? code.name : `(deleted code ${c.code_id.slice(0,8)})`;
+            const score = (Number(c.combined_score || 0) * 100).toFixed(0);
+            return `<div class="hint" style="font-size:11px">` +
+              `<strong>${escapeHtml(codeName)}</strong> · ${score}%</div>`;
+          }).join("")
+        : `<div class="hint" style="font-size:11px">No candidate above threshold.</div>`;
+      const actions = decided
+        ? `<span class="hint" style="font-size:11px">decision: ${escapeHtml(sug.decision)}</span>`
+        : (cands.length
+          ? `<button type="button" class="btn"
+                     data-act="review-accept"
+                     data-suggestion-id="${escapeHtml(sug.id)}"
+                     data-test-id="src-review-accept"
+                     style="font-size:11px;padding:2px 8px">Accept top</button>` +
+             `<button type="button" class="btn secondary"
+                     data-act="review-reject"
+                     data-suggestion-id="${escapeHtml(sug.id)}"
+                     data-test-id="src-review-reject"
+                     style="font-size:11px;padding:2px 8px;margin-left:6px">Reject</button>`
+          : `<button type="button" class="btn secondary"
+                     data-act="review-reject"
+                     data-suggestion-id="${escapeHtml(sug.id)}"
+                     data-test-id="src-review-reject"
+                     style="font-size:11px;padding:2px 8px">Reject (no candidates)</button>`);
+      body =
+        `<div class="match-meta">` +
+          `<span class="kind-pill">item ${idx + 1}</span>` +
+          `<span class="row-label">suggestion</span>` +
+          `<span class="score">ok</span>` +
+        `</div>` +
+        `<div class="match-text">"${preview}"</div>` +
+        `<div style="margin-top:4px">${candsHtml}</div>` +
+        `<div style="margin-top:6px">${actions}</div>`;
+    } else {
+      body =
+        `<div class="match-meta">` +
+          `<span class="kind-pill">item ${idx + 1}</span>` +
+          `<span class="row-label">pending</span>` +
+          `<span class="score">…</span>` +
+        `</div>` +
+        `<div class="match-text">"${preview}"</div>`;
+    }
+    return `<div class="match"
+                 data-test-id="src-review-item"
+                 data-suggestion-id="${escapeHtml(it.suggestion_id || "")}"
+                 data-status="${it.suggestion_id ? "ok" : (it.error ? "err" : "pending")}">
+      ${body}
+    </div>`;
+  }).join("");
+}
+
+async function _hydrateReviewSuggestions(passDict) {
+  // For each item that has a suggestion_id, fetch the CodeSuggestion
+  // dict so the UI can render the candidate list. Cache locally so we
+  // don't refetch known ids on every poll.
+  const ids = (passDict.items || [])
+    .map(it => it.suggestion_id)
+    .filter(Boolean)
+    .filter(id => !_REVIEW_SUGGESTIONS[id]);
+  if (!ids.length) return;
+  // The list endpoint returns all suggestions for the project; we
+  // grab them in bulk and index by id. This is cheap given the per-
+  // pass scale (≤ MAX_ITEMS = 5000) and avoids n round-trips.
+  try {
+    const r = await fetch(
+      `/api/projects/${encodeURIComponent(PROJECT_ID)}/ai/suggestions` +
+      `?source_id=${encodeURIComponent(SOURCE_ID)}`);
+    if (!r.ok) return;
+    const body = await r.json();
+    for (const s of (body.suggestions || [])) {
+      _REVIEW_SUGGESTIONS[s.id] = s;
+    }
+  } catch (_) { /* best-effort */ }
+}
+
+async function startReviewPass() {
+  if (_REVIEW_BUSY) return;
+  _REVIEW_BUSY = true;
+  const startBtn = document.getElementById("reviewStartBtn");
+  const status = document.getElementById("reviewStatus");
+  startBtn.disabled = true;
+  status.innerHTML = "Starting review…";
+  status.className = "status";
+  try {
+    const granularity = document.getElementById("reviewGranularity").value;
+    const skipCoded = document.getElementById("reviewSkipCoded").checked;
+    const r = await fetch(
+      `/api/projects/${encodeURIComponent(PROJECT_ID)}/sources/${encodeURIComponent(SOURCE_ID)}/review`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          granularity,
+          skip_already_coded: skipCoded,
+          max_steps: _REVIEW_BATCH_SIZE,
+        }),
+      },
+    );
+    if (!r.ok) {
+      let detail = {};
+      try { detail = await r.json(); } catch (_) {}
+      const inner = (detail && detail.detail) || detail;
+      const msg = (typeof inner === "object" && inner)
+        ? (inner.gate && inner.gate.message) || inner.detail || JSON.stringify(inner)
+        : (inner || `HTTP ${r.status}`);
+      status.innerHTML = `<span class="err">${escapeHtml(msg)}</span>`;
+      return;
+    }
+    const body = await r.json();
+    _REVIEW_PASS = body.pass;
+    _REVIEW_SUGGESTIONS = {};
+    await _hydrateReviewSuggestions(_REVIEW_PASS);
+    renderReviewProgress();
+    renderReviewItems();
+    status.innerHTML = "Review started.";
+  } catch (err) {
+    status.innerHTML = `<span class="err">${escapeHtml(err.message || String(err))}</span>`;
+  } finally {
+    _REVIEW_BUSY = false;
+    startBtn.disabled = false;
+  }
+}
+
+async function runReviewPassMore() {
+  if (_REVIEW_BUSY || !_REVIEW_PASS) return;
+  _REVIEW_BUSY = true;
+  const runMore = document.getElementById("reviewRunMoreBtn");
+  const status = document.getElementById("reviewStatus");
+  runMore.disabled = true;
+  status.innerHTML = "Processing next batch…";
+  try {
+    const r = await fetch(
+      `/api/projects/${encodeURIComponent(PROJECT_ID)}/review-passes/${encodeURIComponent(_REVIEW_PASS.id)}/run`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ max_steps: _REVIEW_BATCH_SIZE }),
+      },
+    );
+    if (!r.ok) {
+      let detail = {};
+      try { detail = await r.json(); } catch (_) {}
+      const inner = (detail && detail.detail) || detail;
+      const msg = (typeof inner === "object" && inner)
+        ? (inner.gate && inner.gate.message) || inner.detail || JSON.stringify(inner)
+        : (inner || `HTTP ${r.status}`);
+      status.innerHTML = `<span class="err">${escapeHtml(msg)}</span>`;
+      return;
+    }
+    const body = await r.json();
+    _REVIEW_PASS = body.pass;
+    await _hydrateReviewSuggestions(_REVIEW_PASS);
+    renderReviewProgress();
+    renderReviewItems();
+    status.innerHTML = "";
+  } catch (err) {
+    status.innerHTML = `<span class="err">${escapeHtml(err.message || String(err))}</span>`;
+  } finally {
+    _REVIEW_BUSY = false;
+    runMore.disabled = false;
+  }
+}
+
+async function cancelReviewPass() {
+  if (!_REVIEW_PASS) return;
+  if (!confirm("Cancel this review pass? Suggestions already produced stay in the audit log.")) return;
+  const status = document.getElementById("reviewStatus");
+  try {
+    const r = await fetch(
+      `/api/projects/${encodeURIComponent(PROJECT_ID)}/review-passes/${encodeURIComponent(_REVIEW_PASS.id)}/cancel`,
+      { method: "POST" },
+    );
+    if (!r.ok) {
+      let detail = {};
+      try { detail = await r.json(); } catch (_) {}
+      status.innerHTML = `<span class="err">${escapeHtml((detail && detail.detail) || `HTTP ${r.status}`)}</span>`;
+      return;
+    }
+    const body = await r.json();
+    _REVIEW_PASS = body.pass;
+    renderReviewProgress();
+    renderReviewItems();
+    status.innerHTML = "Pass cancelled.";
+  } catch (err) {
+    status.innerHTML = `<span class="err">${escapeHtml(err.message || String(err))}</span>`;
+  }
+}
+
+async function reviewItemAccept(suggestionId) {
+  // Reuse the F8.3 accept route — picks the top candidate by default.
+  const status = document.getElementById("reviewStatus");
+  try {
+    const r = await fetch(
+      `/api/projects/${encodeURIComponent(PROJECT_ID)}/ai/suggestions/${encodeURIComponent(suggestionId)}/accept`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({}),
+      },
+    );
+    if (!r.ok) {
+      let detail = {};
+      try { detail = await r.json(); } catch (_) {}
+      status.innerHTML = `<span class="err">${escapeHtml((detail && detail.detail) || `HTTP ${r.status}`)}</span>`;
+      return;
+    }
+    const body = await r.json();
+    if (body.suggestion) _REVIEW_SUGGESTIONS[body.suggestion.id] = body.suggestion;
+    // Refresh the parent transcript's applications so the new
+    // application paints in the gutter immediately.
+    if (typeof loadAll === "function") {
+      try { await reloadApplications(); } catch (_) {}
+    }
+    renderReviewItems();
+    status.innerHTML = "Accepted.";
+  } catch (err) {
+    status.innerHTML = `<span class="err">${escapeHtml(err.message || String(err))}</span>`;
+  }
+}
+
+async function reviewItemReject(suggestionId) {
+  const status = document.getElementById("reviewStatus");
+  try {
+    const r = await fetch(
+      `/api/projects/${encodeURIComponent(PROJECT_ID)}/ai/suggestions/${encodeURIComponent(suggestionId)}/reject`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({}),
+      },
+    );
+    if (!r.ok) {
+      let detail = {};
+      try { detail = await r.json(); } catch (_) {}
+      status.innerHTML = `<span class="err">${escapeHtml((detail && detail.detail) || `HTTP ${r.status}`)}</span>`;
+      return;
+    }
+    const body = await r.json();
+    if (body.suggestion) _REVIEW_SUGGESTIONS[body.suggestion.id] = body.suggestion;
+    renderReviewItems();
+    status.innerHTML = "Rejected.";
+  } catch (err) {
+    status.innerHTML = `<span class="err">${escapeHtml(err.message || String(err))}</span>`;
+  }
+}
+
+async function reloadApplications() {
+  // Best-effort refresh of APPS / SPANS / gutter after an Accept turns
+  // a suggestion into an Application.
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(PROJECT_ID)}/applications?source_id=${encodeURIComponent(SOURCE_ID)}`);
+    if (r.ok) {
+      const body = await r.json();
+      APPS = body.applications || [];
+      paintApplications();
+      renderApps();
+      refreshSpans();
+      renderGutter();
+    }
+  } catch (_) {}
+}
+
+document.getElementById("reviewPassBtn").addEventListener("click", () => {
+  // Open the modal and surface the most recent pass (if any) for this
+  // source so the user sees their progress on a return visit.
+  document.getElementById("reviewStatus").innerHTML = "";
+  showReviewModal();
+  // Best-effort: pull the most recent pass for this source.
+  fetch(`/api/projects/${encodeURIComponent(PROJECT_ID)}/review-passes?source_id=${encodeURIComponent(SOURCE_ID)}`)
+    .then(r => r.ok ? r.json() : { passes: [] })
+    .then(async body => {
+      const passes = body.passes || [];
+      if (!passes.length) {
+        renderReviewProgress();
+        renderReviewItems();
+        return;
+      }
+      _REVIEW_PASS = passes[passes.length - 1];
+      _REVIEW_SUGGESTIONS = {};
+      await _hydrateReviewSuggestions(_REVIEW_PASS);
+      renderReviewProgress();
+      renderReviewItems();
+    })
+    .catch(() => { renderReviewProgress(); renderReviewItems(); });
+});
+
+document.getElementById("reviewStartBtn").addEventListener("click", startReviewPass);
+document.getElementById("reviewRunMoreBtn").addEventListener("click", runReviewPassMore);
+document.getElementById("reviewCancelBtn").addEventListener("click", cancelReviewPass);
+document.getElementById("reviewCloseBtn").addEventListener("click", hideReviewModal);
+reviewModalEl().addEventListener("click", (e) => {
+  if (e.target === reviewModalEl()) hideReviewModal();
+});
+
+document.getElementById("reviewItems").addEventListener("click", (e) => {
+  const acc = e.target.closest("button[data-act='review-accept']");
+  const rej = e.target.closest("button[data-act='review-reject']");
+  if (acc) {
+    e.preventDefault();
+    reviewItemAccept(acc.dataset.suggestionId);
+    return;
+  }
+  if (rej) {
+    e.preventDefault();
+    reviewItemReject(rej.dataset.suggestionId);
+    return;
+  }
 });
 
 // F4.6 — Click delegation on the transcript root: lane-bar clicks

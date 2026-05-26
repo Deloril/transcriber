@@ -7695,6 +7695,423 @@ async def get_quote_search_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Whole-transcript AI review pass (F8.6)
+#
+# The engine module ``scribe.transcript_review`` shipped in 167b8c6 with a
+# full ReviewPass / ReviewItem data model and a step-at-a-time processor,
+# but had no FastAPI surface, no UI button, no integration test — so a
+# user could not invoke it. This block wires the route layer the engine
+# was designed for, mirroring the F8.3 / F8.5 split (engine pure, server
+# is a thin shell).
+#
+# Endpoints:
+#
+#   POST /api/projects/<pid>/sources/<sid>/review
+#         Start a fresh pass on this source's transcript and (by
+#         default) drive it forward up to ``max_steps`` items so the
+#         user sees suggestions on the very first request. Returns the
+#         persisted ReviewPass dict including items + status.
+#         Body (all optional):
+#           {
+#             "granularity": "paragraph" | "sentence",  # default paragraph
+#             "skip_already_coded": true,
+#             "top_k": 5, "min_score": 0.0,
+#             "max_steps": 5,    # how many items to process this call;
+#                                # null/0 means start-and-leave-pending so
+#                                # the client can drive run_pass itself.
+#             "notes": "optional"
+#           }
+#
+#   POST /api/projects/<pid>/review-passes/<rpid>/run
+#         Resume an existing pass. Same ``max_steps`` knob; the route
+#         drives that many items and returns the (possibly still-
+#         running) pass. Calling this on a terminal pass is a 409.
+#
+#   POST /api/projects/<pid>/review-passes/<rpid>/cancel
+#         Move a non-terminal pass to ``cancelled`` so the user can
+#         abandon a long sweep. 409 if already terminal.
+#
+#   GET  /api/projects/<pid>/review-passes
+#         List all passes in the project. Optional ``source_id`` and
+#         ``status`` filters. Sorted by created_at asc.
+#
+#   GET  /api/projects/<pid>/review-passes/<rpid>
+#         Single-pass fetch. 404 if missing, 400 if id is malformed.
+#
+# All write routes are gated by F8.10 (412 + structured gate body) like
+# the existing suggestion endpoints. Each pass start is also recorded as
+# an AIEvent of feature=transcript_review so the F9.6 audit log carries
+# the request invocation.
+# --------------------------------------------------------------------------- #
+
+from . import transcript_review as _transcript_review  # noqa: E402
+
+
+# Default cap on items processed per HTTP request. Keeping it small
+# means a request never blocks longer than (max_steps * per-item-time).
+# The client polls ``/run`` to drive the rest.
+_REVIEW_DEFAULT_MAX_STEPS = 5
+_REVIEW_HARD_MAX_STEPS = 100
+
+
+def _coerce_review_max_steps(raw: Any) -> int:
+    """Return a sane integer max_steps from an arbitrary body value.
+
+    Falls back to the module default. A negative or zero value is
+    treated as "process zero items this call" so the client can drive
+    the loop itself; ``None``/missing produces the default.
+    """
+    if raw is None:
+        return _REVIEW_DEFAULT_MAX_STEPS
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "max_steps must be an integer")
+    if n < 0:
+        raise HTTPException(400, "max_steps must be ≥ 0")
+    if n > _REVIEW_HARD_MAX_STEPS:
+        raise HTTPException(
+            400,
+            f"max_steps must be ≤ {_REVIEW_HARD_MAX_STEPS}",
+        )
+    return n
+
+
+def _drive_review_pass(
+    pass_record: "_transcript_review.ReviewPass",
+    *,
+    project_id: str,
+    cfg: "_ai_backend.BackendConfig",
+    backend: "_ai_backend.ModelBackend",
+    max_steps: int,
+) -> "_transcript_review.ReviewPass":
+    """Drive a pass forward up to ``max_steps`` items.
+
+    Translates backend errors into HTTPExceptions so the caller doesn't
+    have to repeat the boilerplate. Per-item failures are recorded by
+    the engine as ``ReviewItem.error`` strings and don't raise; pass-
+    level failures (backend unavailable from the start, validation
+    error) DO raise — we mark the pass failed and re-raise so the
+    client sees the structured error.
+    """
+    if max_steps <= 0:
+        return pass_record
+    if pass_record.status in _transcript_review.REVIEW_TERMINAL_STATUSES:
+        return pass_record
+    try:
+        embed_fn, generate_fn, _emb, _gen = (
+            _make_embed_and_generate_fns(cfg, backend)
+        )
+    except _ai_backend.BackendValidationError as e:
+        # Couldn't even build the closure — mark the pass failed for
+        # the audit trail, then re-raise as 400.
+        try:
+            _transcript_review.mark_review_pass_failed(
+                pass_record,
+                projects_root=_projects_root(),
+                error_message=str(e)[:_transcript_review.MAX_ERROR_MESSAGE_LEN],
+            )
+        except _projects.ProjectValidationError:
+            pass
+        raise HTTPException(400, str(e))
+
+    codes = _codes.list_codes(_projects_root(), project_id)
+    applications = _applications.list_applications(
+        _projects_root(), project_id,
+    )
+    try:
+        _transcript_review.run_review_pass(
+            pass_record,
+            projects_root=_projects_root(),
+            codes=codes,
+            applications=applications,
+            embed_fn=embed_fn,
+            generate_fn=generate_fn,
+            max_steps=max_steps,
+        )
+    except _projects.ProjectValidationError as e:
+        # Validation error mid-loop is a genuine pass-level failure.
+        try:
+            _transcript_review.mark_review_pass_failed(
+                pass_record,
+                projects_root=_projects_root(),
+                error_message=str(e)[:_transcript_review.MAX_ERROR_MESSAGE_LEN],
+            )
+        except _projects.ProjectValidationError:
+            pass
+        raise HTTPException(400, str(e))
+    except _ai_backend.BackendUnavailable as e:
+        raise HTTPException(502, f"Backend unavailable: {e}")
+    except _ai_backend.BackendError as e:
+        raise HTTPException(500, str(e))
+    return pass_record
+
+
+@app.post("/api/projects/{project_id}/sources/{source_id}/review")
+async def start_review_pass_endpoint(
+    project_id: str, source_id: str, request: Request,
+) -> JSONResponse:
+    """F8.6 — start a whole-transcript AI review pass on this source.
+
+    Enumerates review items via :func:`transcript_review.start_review_pass`
+    (paragraph by default), persists the new ReviewPass, and drives it
+    forward up to ``max_steps`` items so the first poll returns useful
+    suggestions. The pass is gated by F8.10.
+    """
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body and not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    body = body or {}
+
+    granularity = (
+        body.get("granularity") or _transcript_review.REVIEW_GRANULARITY_PARAGRAPH
+    )
+    if granularity not in _transcript_review.REVIEW_GRANULARITIES:
+        raise HTTPException(
+            400,
+            f"granularity must be one of "
+            f"{list(_transcript_review.REVIEW_GRANULARITIES)}",
+        )
+    skip_already_coded = bool(body.get("skip_already_coded", True))
+    top_k = body.get("top_k", _code_suggestions.DEFAULT_TOP_K)
+    min_score = body.get("min_score", 0.0)
+    notes = body.get("notes") or ""
+    max_steps = _coerce_review_max_steps(body.get("max_steps"))
+    try:
+        top_k_i = int(top_k)
+        min_score_f = float(min_score)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "top_k must be int and min_score must be float")
+    if top_k_i < 1 or top_k_i > 50:
+        raise HTTPException(400, "top_k must be in [1, 50]")
+    if min_score_f < -1.0 or min_score_f > 1.0:
+        raise HTTPException(400, "min_score must be in [-1, 1]")
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            source = _sources.load_source(
+                _projects_root(), project_id, source_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+
+        # F8.10 gate.
+        try:
+            gate = _ai_gate.evaluate_project_ai_gate(
+                _projects_root(), project_id,
+                feature=_ai_provenance.AI_FEATURE_TRANSCRIPT_REVIEW,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        if not gate.allowed:
+            raise HTTPException(412, {
+                "detail": "AI gate not satisfied",
+                "gate": gate.to_dict(),
+            })
+
+        # Backend.
+        try:
+            cfg, backend = _resolve_suggestion_backend(project)
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+
+        # The engine needs the source's transcript segments + the
+        # project's existing applications (so skip_already_coded works).
+        segments = _load_segments_for_source_speaker_map(source) or []
+        applications = _applications.list_applications(
+            _projects_root(), project_id,
+        )
+
+        # Persist a fresh pass record. enumerate_review_items runs
+        # inside start_review_pass and freezes the items onto disk.
+        try:
+            pass_record = _transcript_review.start_review_pass(
+                projects_root=_projects_root(),
+                project_id=project_id,
+                source_id=source_id,
+                segments=segments,
+                applications=applications,
+                granularity=granularity,
+                skip_already_coded=skip_already_coded,
+                embedding_model=cfg.default_embedding_model,
+                generation_model=cfg.default_model,
+                top_k=top_k_i,
+                min_score=min_score_f,
+                notes=str(notes or "")[:_transcript_review.MAX_NOTES_LEN],
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+        # F9.6 audit — log the request side. Best-effort; a logging
+        # failure must not break the user's workflow.
+        try:
+            _ai_invocation_log.record_request_event_for_review_pass(
+                _projects_root(),
+                pass_record,
+                backend=getattr(backend, "name", "") or "",
+            )
+        except Exception:
+            pass
+
+        # Drive forward so the first request returns suggestions.
+        _drive_review_pass(
+            pass_record,
+            project_id=project_id,
+            cfg=cfg,
+            backend=backend,
+            max_steps=max_steps,
+        )
+
+    return JSONResponse({"pass": pass_record.to_dict()})
+
+
+@app.post("/api/projects/{project_id}/review-passes/{pass_id}/run")
+async def run_review_pass_endpoint(
+    project_id: str, pass_id: str, request: Request,
+) -> JSONResponse:
+    """F8.6 — drive an existing pass forward by ``max_steps`` items."""
+    _check_project_id(project_id)
+    if not _transcript_review.REVIEW_PASS_ID_RE.match(pass_id):
+        raise HTTPException(400, "Invalid review-pass id")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body and not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    body = body or {}
+    max_steps = _coerce_review_max_steps(body.get("max_steps"))
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            pass_record = _transcript_review.load_review_pass(
+                _projects_root(), project_id, pass_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Review pass not found")
+        if pass_record.status in _transcript_review.REVIEW_TERMINAL_STATUSES:
+            raise HTTPException(
+                409,
+                f"Pass already in terminal state: {pass_record.status}",
+            )
+
+        # F8.10 gate (revalidate on every request — the gate config
+        # may have changed between start and resume).
+        try:
+            gate = _ai_gate.evaluate_project_ai_gate(
+                _projects_root(), project_id,
+                feature=_ai_provenance.AI_FEATURE_TRANSCRIPT_REVIEW,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        if not gate.allowed:
+            raise HTTPException(412, {
+                "detail": "AI gate not satisfied",
+                "gate": gate.to_dict(),
+            })
+
+        try:
+            cfg, backend = _resolve_suggestion_backend(project)
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+
+        _drive_review_pass(
+            pass_record,
+            project_id=project_id,
+            cfg=cfg,
+            backend=backend,
+            max_steps=max_steps,
+        )
+
+    return JSONResponse({"pass": pass_record.to_dict()})
+
+
+@app.post("/api/projects/{project_id}/review-passes/{pass_id}/cancel")
+async def cancel_review_pass_endpoint(
+    project_id: str, pass_id: str,
+) -> JSONResponse:
+    """F8.6 — abandon a non-terminal pass."""
+    _check_project_id(project_id)
+    if not _transcript_review.REVIEW_PASS_ID_RE.match(pass_id):
+        raise HTTPException(400, "Invalid review-pass id")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            pass_record = _transcript_review.load_review_pass(
+                _projects_root(), project_id, pass_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Review pass not found")
+        if pass_record.status == _transcript_review.REVIEW_STATUS_CANCELLED:
+            return JSONResponse({"pass": pass_record.to_dict()})
+        if pass_record.status in _transcript_review.REVIEW_TERMINAL_STATUSES:
+            raise HTTPException(
+                409,
+                f"Pass already in terminal state: {pass_record.status}",
+            )
+        try:
+            _transcript_review.cancel_review_pass(
+                pass_record, projects_root=_projects_root(),
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({"pass": pass_record.to_dict()})
+
+
+@app.get("/api/projects/{project_id}/review-passes")
+async def list_review_passes_endpoint(
+    project_id: str,
+    source_id: str = "",
+    status: str = "",
+) -> JSONResponse:
+    """F8.6 — list past review passes for a project."""
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            passes = _transcript_review.list_review_passes(
+                _projects_root(), project_id,
+                source_id=source_id or None,
+                status=status or None,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({"passes": [p.to_dict() for p in passes]})
+
+
+@app.get("/api/projects/{project_id}/review-passes/{pass_id}")
+async def get_review_pass_endpoint(
+    project_id: str, pass_id: str,
+) -> JSONResponse:
+    """F8.6 — fetch a single persisted review pass by id."""
+    _check_project_id(project_id)
+    if not _transcript_review.REVIEW_PASS_ID_RE.match(pass_id):
+        raise HTTPException(400, "Invalid review-pass id")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            pass_record = _transcript_review.load_review_pass(
+                _projects_root(), project_id, pass_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Review pass not found")
+    return JSONResponse({"pass": pass_record.to_dict()})
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 

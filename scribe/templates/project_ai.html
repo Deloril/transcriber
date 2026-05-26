@@ -262,10 +262,16 @@
       embedding-space nearest-neighbour search over the F8.2 index, so
       this is the safest of the AI features.
     </li>
-    <li>
+    <li data-test-feature="F8.6" data-test-id="ai-surface-f8-6">
       <strong>Whole-transcript review pass</strong> (<code>F8.6</code>) —
-      background job; result list will surface here.
-      <span class="ai-pill">queue UI pending</span>
+      open any source's coding view and click "✨ Review whole transcript"
+      in the page actions. The pass walks every paragraph (or sentence,
+      with the granularity dropdown), produces one pending
+      <code>CodeSuggestion</code> per span, and surfaces them in the
+      modal with Accept / Reject buttons. Pass state is persisted to
+      <code>review_passes/&lt;rpid&gt;.json</code> so a refresh resumes
+      where the worker left off, and the F9.6 audit log records the
+      invocation.
     </li>
     <li>
       <strong>AI second coder</strong> (<code>F8.7</code>) — runs on a locked
