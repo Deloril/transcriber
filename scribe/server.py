@@ -364,6 +364,59 @@ async def project_codebook_page(request: Request, project_id: str) -> HTMLRespon
         "page_title": "Codebook",
     })
 
+
+# --------------------------------------------------------------------------- #
+# Participants (F1.3) — UI surface
+#
+# The data layer + REST API for participants shipped in caa3553. This block
+# wires the user-facing pages so a researcher can list, create, and edit
+# participants from the project shell. The API endpoints below in this
+# file (POST/GET/PATCH/DELETE /api/projects/<pid>/participants[/<part_id>])
+# are the same surface tests/test_server.py::TestParticipantsAPI covers.
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/projects/{project_id}/participants", response_class=HTMLResponse)
+async def project_participants_page(
+    request: Request, project_id: str
+) -> HTMLResponse:
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "participants_list.html", {
+        "project_id": pid,
+        "page_title": "Participants",
+    })
+
+
+@app.get("/projects/{project_id}/participants/new", response_class=HTMLResponse)
+async def project_participant_new_page(
+    request: Request, project_id: str
+) -> HTMLResponse:
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "participant_new.html", {
+        "project_id": pid,
+        "page_title": "New participant",
+    })
+
+
+@app.get(
+    "/projects/{project_id}/participants/{participant_id}",
+    response_class=HTMLResponse,
+)
+async def project_participant_detail_page(
+    request: Request, project_id: str, participant_id: str
+) -> HTMLResponse:
+    pid = _project_id_or_404(project_id)
+    # Reuse the same shape-check as the API (12-char hex). Don't 404 on
+    # missing — the page shows a friendly error so the user can navigate
+    # back without a hard server error.
+    if not _participants.PARTICIPANT_ID_RE.match(participant_id):
+        raise HTTPException(400, "Invalid participant id")
+    return templates.TemplateResponse(request, "participant_detail.html", {
+        "project_id": pid,
+        "participant_id": participant_id,
+        "page_title": "Participant",
+    })
+
 @app.get("/projects/{project_id}/queries", response_class=HTMLResponse)
 async def project_queries_page(request: Request, project_id: str) -> HTMLResponse:
     return _render_subpage(

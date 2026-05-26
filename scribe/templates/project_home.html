@@ -382,6 +382,15 @@
   </div>
 
   <div class="card ph-card">
+    <h3>Participants <span class="count" id="partCount">…</span></h3>
+    <div id="partList"><div class="ph-empty">Loading…</div></div>
+    <div class="ph-actions">
+      <a class="btn" href="/projects/{{ project_id }}/participants/new">+ New participant</a>
+      <a class="btn secondary" href="/projects/{{ project_id }}/participants">View all</a>
+    </div>
+  </div>
+
+  <div class="card ph-card">
     <h3>Recent memos <span class="count" id="memoCount">…</span></h3>
     <div id="memoList">
       <div class="ph-empty">Coming soon — once the memos UI graduates.</div>
@@ -482,6 +491,32 @@ async function loadCodebook() {
     list.innerHTML = `<div class="ph-empty" style="color:var(--err)">Error: ${escapeHtml(e.message)}</div>`;
   }
   decideNext();
+}
+
+async function loadParticipants() {
+  const list = document.getElementById("partList");
+  const count = document.getElementById("partCount");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/participants`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const arr = data.participants || [];
+    count.textContent = arr.length;
+    if (!arr.length) {
+      list.innerHTML = `<div class="ph-empty">No participants yet. <a href="/projects/${PROJECT_ID}/participants/new">Add one →</a></div>`;
+      return;
+    }
+    const top = arr.slice(0, 4);
+    list.innerHTML = top.map(p => {
+      const linkCount = (p.source_ids || []).length;
+      return `<div class="item"><a href="/projects/${PROJECT_ID}/participants/${escapeHtml(p.id)}">${escapeHtml(p.name || "(unnamed)")}</a><span class="meta">${linkCount} source${linkCount === 1 ? "" : "s"}</span></div>`;
+    }).join("");
+    if (arr.length > 4) {
+      list.innerHTML += `<div class="more"><a href="/projects/${PROJECT_ID}/participants">+ ${arr.length - 4} more →</a></div>`;
+    }
+  } catch (e) {
+    list.innerHTML = `<div class="ph-empty" style="color:var(--err)">Error: ${escapeHtml(e.message)}</div>`;
+  }
 }
 
 async function loadApplications() {
@@ -648,5 +683,6 @@ loadProject();
 loadSources();
 loadCodebook();
 loadApplications();
+loadParticipants();
 </script>
 {% endblock %}

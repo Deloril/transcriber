@@ -1,0 +1,214 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Participant{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}/participants">← Participants</a>
+{% endblock %}
+
+{% block extra_styles %}
+  .demo-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; margin-bottom: 8px; }
+  .demo-row input {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+    font: inherit; font-size: 13px;
+  }
+  .demo-row .rm-btn {
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px;
+    cursor: pointer; font: inherit; font-size: 12px;
+  }
+  .demo-row .rm-btn:hover { color: var(--err); border-color: var(--err); }
+  .field-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .field-input {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+    font: inherit; font-size: 14px;
+  }
+  .src-link {
+    display: inline-block;
+    margin: 2px 4px 2px 0;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text);
+    font-family: var(--mono);
+  }
+  .src-link:hover { border-color: var(--accent); color: var(--accent); }
+  .danger-zone {
+    border: 1px dashed var(--err);
+    padding: 14px 18px;
+    border-radius: 10px;
+  }
+  .danger-zone .btn.danger {
+    background: transparent; color: var(--err);
+    border: 1px solid var(--err);
+  }
+  .danger-zone .btn.danger:hover { background: var(--err); color: var(--bg); }
+{% endblock %}
+
+{% block body %}
+<div id="loading" class="card hint">Loading participant…</div>
+<div id="errorState" class="card" style="display:none;color:var(--err)"></div>
+
+<div id="partCard" class="card" style="display:none">
+  <form id="editPartForm" style="margin-top:4px">
+    <div style="margin-bottom:12px">
+      <label for="ed-name" class="field-label">Working name <span style="color:var(--err)">*</span></label>
+      <input id="ed-name" type="text" required maxlength="200" class="field-input">
+    </div>
+    <div style="margin-bottom:12px">
+      <label for="ed-pseudonym" class="field-label">Pseudonym</label>
+      <input id="ed-pseudonym" type="text" maxlength="200" class="field-input">
+    </div>
+    <div style="margin-bottom:12px">
+      <label for="ed-notes" class="field-label">Notes</label>
+      <textarea id="ed-notes" rows="3" maxlength="4000" class="field-input"></textarea>
+    </div>
+
+    <div style="margin-bottom:14px">
+      <span class="field-label">Demographics</span>
+      <div id="demoRows"></div>
+      <button id="addDemoBtn" type="button" class="btn secondary" style="margin-top:6px;font-size:12px;padding:6px 12px">+ Add demographic</button>
+    </div>
+
+    <div style="margin-bottom:14px">
+      <span class="field-label">Linked sources</span>
+      <div id="srcLinks" class="hint">No sources linked.</div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px">
+      <button id="ed-submit" class="btn" type="submit">Save changes</button>
+      <span id="ed-msg" class="hint" role="alert" aria-live="polite"></span>
+    </div>
+  </form>
+</div>
+
+<div id="dangerCard" class="card danger-zone" style="display:none">
+  <h3 style="margin-top:0;color:var(--err)">Danger zone</h3>
+  <p class="hint">Removing a participant unlinks them from any sources but does not delete the sources themselves.</p>
+  <button id="deleteBtn" class="btn danger" type="button">Delete participant</button>
+</div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+const PARTICIPANT_ID = {{ participant_id | tojson }};
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+function setMsg(el, text, isError) {
+  el.textContent = text;
+  el.style.color = isError ? "var(--err)" : "var(--ok)";
+}
+
+const demoRows = document.getElementById("demoRows");
+const addBtn = document.getElementById("addDemoBtn");
+
+function addDemoRow(key, value) {
+  const row = document.createElement("div");
+  row.className = "demo-row";
+  row.innerHTML = `
+    <input class="demo-key" type="text" placeholder="Key" maxlength="64">
+    <input class="demo-value" type="text" placeholder="Value" maxlength="500">
+    <button type="button" class="rm-btn" aria-label="Remove">×</button>
+  `;
+  if (key !== undefined) row.querySelector(".demo-key").value = key;
+  if (value !== undefined) row.querySelector(".demo-value").value = value;
+  row.querySelector(".rm-btn").addEventListener("click", () => row.remove());
+  demoRows.appendChild(row);
+}
+addBtn.addEventListener("click", () => addDemoRow());
+
+function collectDemographics() {
+  const out = {};
+  demoRows.querySelectorAll(".demo-row").forEach(row => {
+    const k = (row.querySelector(".demo-key").value || "").trim();
+    const v = (row.querySelector(".demo-value").value || "").trim();
+    if (k) out[k] = v;
+  });
+  return out;
+}
+
+async function load() {
+  const loading = document.getElementById("loading");
+  const card = document.getElementById("partCard");
+  const danger = document.getElementById("dangerCard");
+  const error = document.getElementById("errorState");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/participants/${PARTICIPANT_ID}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const p = await r.json();
+    loading.style.display = "none";
+    document.getElementById("ed-name").value = p.name || "";
+    document.getElementById("ed-pseudonym").value = p.pseudonym || "";
+    document.getElementById("ed-notes").value = p.notes || "";
+    Object.entries(p.demographics || {}).forEach(([k, v]) => addDemoRow(k, v));
+    const links = (p.source_ids || []).map(sid =>
+      `<a class="src-link" href="/projects/${PROJECT_ID}/sources/${escapeHtml(sid)}">${escapeHtml(sid)}</a>`
+    );
+    if (links.length) {
+      document.getElementById("srcLinks").innerHTML = links.join(" ");
+    }
+    card.style.display = "";
+    danger.style.display = "";
+  } catch (e) {
+    loading.style.display = "none";
+    error.textContent = `Couldn't load participant: ${e.message}`;
+    error.style.display = "";
+  }
+}
+
+document.getElementById("editPartForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const submit = document.getElementById("ed-submit");
+  const msg = document.getElementById("ed-msg");
+  submit.disabled = true;
+  setMsg(msg, "Saving…", false);
+  const payload = {
+    name: document.getElementById("ed-name").value.trim(),
+    pseudonym: document.getElementById("ed-pseudonym").value.trim(),
+    notes: document.getElementById("ed-notes").value.trim(),
+    demographics: collectDemographics(),
+  };
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/participants/${PARTICIPANT_ID}`, {
+      method: "PATCH",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    setMsg(msg, "Saved.", false);
+  } catch (err) {
+    setMsg(msg, `Couldn't save: ${err.message}`, true);
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+document.getElementById("deleteBtn").addEventListener("click", async () => {
+  if (!confirm("Delete this participant? This won't delete any linked sources.")) return;
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/participants/${PARTICIPANT_ID}`, {
+      method: "DELETE",
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    window.location.href = `/projects/${PROJECT_ID}/participants`;
+  } catch (err) {
+    alert(`Couldn't delete: ${err.message}`);
+  }
+});
+
+load();
+</script>
+{% endblock %}

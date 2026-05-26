@@ -1,0 +1,140 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}New participant{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}/participants">← Participants</a>
+{% endblock %}
+
+{% block extra_styles %}
+  .demo-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; margin-bottom: 8px; }
+  .demo-row input {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+    font: inherit; font-size: 13px;
+  }
+  .demo-row .rm-btn {
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px;
+    cursor: pointer; font: inherit; font-size: 12px;
+  }
+  .demo-row .rm-btn:hover { color: var(--err); border-color: var(--err); }
+  .field-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .field-input {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+    font: inherit; font-size: 14px;
+  }
+{% endblock %}
+
+{% block body %}
+<div class="card">
+  <form id="newPartForm" style="margin-top:4px">
+    <div style="margin-bottom:12px">
+      <label for="np-name" class="field-label">
+        Working name <span style="color:var(--err)">*</span>
+        <span class="hint" style="margin-left:6px">— short label used inside the tool (e.g. "P03" or "Saira")</span>
+      </label>
+      <input id="np-name" type="text" required maxlength="200"
+             class="field-input"
+             placeholder="P01">
+    </div>
+    <div style="margin-bottom:12px">
+      <label for="np-pseudonym" class="field-label">
+        Pseudonym <span class="hint">(optional — used for anonymised exports, F6.7)</span>
+      </label>
+      <input id="np-pseudonym" type="text" maxlength="200"
+             class="field-input"
+             placeholder="Alex">
+    </div>
+    <div style="margin-bottom:12px">
+      <label for="np-notes" class="field-label">Notes <span class="hint">(optional)</span></label>
+      <textarea id="np-notes" rows="3" maxlength="4000"
+                class="field-input"
+                placeholder="Anything worth recording about this participant — sampling rationale, recruitment notes, etc."></textarea>
+    </div>
+
+    <div style="margin-bottom:14px">
+      <span class="field-label">Demographics <span class="hint">(optional — project-defined columns; F3.2 will schema this)</span></span>
+      <div id="demoRows"></div>
+      <button id="addDemoBtn" type="button" class="btn secondary" style="margin-top:6px;font-size:12px;padding:6px 12px">+ Add demographic</button>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px">
+      <button id="np-submit" class="btn" type="submit">Create participant</button>
+      <a class="btn secondary" href="/projects/{{ project_id }}/participants">Cancel</a>
+      <span id="np-msg" class="hint" role="alert" aria-live="polite"></span>
+    </div>
+  </form>
+</div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+const form = document.getElementById("newPartForm");
+const submit = document.getElementById("np-submit");
+const msg = document.getElementById("np-msg");
+const demoRows = document.getElementById("demoRows");
+const addBtn = document.getElementById("addDemoBtn");
+
+function setMsg(text, isError) {
+  msg.textContent = text;
+  msg.style.color = isError ? "var(--err)" : "var(--ok)";
+}
+
+function addDemoRow(key, value) {
+  const row = document.createElement("div");
+  row.className = "demo-row";
+  row.innerHTML = `
+    <input class="demo-key" type="text" placeholder="Key (e.g. age_band)" maxlength="64">
+    <input class="demo-value" type="text" placeholder="Value (e.g. 30-44)" maxlength="500">
+    <button type="button" class="rm-btn" aria-label="Remove">×</button>
+  `;
+  if (key !== undefined) row.querySelector(".demo-key").value = key;
+  if (value !== undefined) row.querySelector(".demo-value").value = value;
+  row.querySelector(".rm-btn").addEventListener("click", () => row.remove());
+  demoRows.appendChild(row);
+}
+
+addBtn.addEventListener("click", () => addDemoRow());
+
+function collectDemographics() {
+  const out = {};
+  demoRows.querySelectorAll(".demo-row").forEach(row => {
+    const k = (row.querySelector(".demo-key").value || "").trim();
+    const v = (row.querySelector(".demo-value").value || "").trim();
+    if (k) out[k] = v;
+  });
+  return out;
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = document.getElementById("np-name").value.trim();
+  if (!name) { setMsg("Working name is required", true); return; }
+  const payload = {
+    name,
+    pseudonym: document.getElementById("np-pseudonym").value.trim(),
+    notes: document.getElementById("np-notes").value.trim(),
+    demographics: collectDemographics(),
+  };
+  submit.disabled = true;
+  setMsg("Creating…", false);
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/participants`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const part = await r.json();
+    window.location.href = `/projects/${PROJECT_ID}/participants/${part.id}`;
+  } catch (err) {
+    setMsg(`Couldn't create participant: ${err.message}`, true);
+    submit.disabled = false;
+  }
+});
+</script>
+{% endblock %}

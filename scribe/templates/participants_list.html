@@ -1,0 +1,125 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Participants{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+  <a class="btn" href="/projects/{{ project_id }}/participants/new">+ New participant</a>
+{% endblock %}
+
+{% block extra_styles %}
+  table.parts {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  table.parts thead th {
+    text-align: left; font-weight: 600; font-size: 11px;
+    color: var(--muted); text-transform: uppercase;
+    letter-spacing: .04em; padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+  table.parts tbody td {
+    padding: 11px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  table.parts tbody tr:hover { background: var(--accent-soft); }
+  .demo-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    margin-right: 4px;
+  }
+{% endblock %}
+
+{% block body %}
+<div id="partsCard" class="card" style="display:none">
+  <table class="parts">
+    <thead><tr>
+      <th>Name</th>
+      <th>Pseudonym</th>
+      <th>Demographics</th>
+      <th>Sources</th>
+      <th>Added</th>
+      <th></th>
+    </tr></thead>
+    <tbody id="partsBody"></tbody>
+  </table>
+</div>
+
+<div id="loading" class="card hint">Loading participants…</div>
+
+<div id="emptyState" class="empty card" style="display:none">
+  <h3>No participants yet</h3>
+  <p>Participants are the humans behind your sources. Each one carries the project-defined demographic columns and links to the sources where they appear.</p>
+  <a class="btn" href="/projects/{{ project_id }}/participants/new">+ Add a participant</a>
+</div>
+
+<div id="errorState" class="card" style="display:none;color:var(--err)"></div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+function fmtDate(s) {
+  if (!s) return "—";
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  } catch (_) { return s; }
+}
+function fmtDemographics(demo) {
+  if (!demo || typeof demo !== "object") return "—";
+  const entries = Object.entries(demo);
+  if (!entries.length) return '<span class="hint">—</span>';
+  return entries.slice(0, 4).map(([k, v]) =>
+    `<span class="demo-pill">${escapeHtml(k)}: ${escapeHtml(v)}</span>`
+  ).join("");
+}
+
+async function load() {
+  const loading = document.getElementById("loading");
+  const card = document.getElementById("partsCard");
+  const empty = document.getElementById("emptyState");
+  const error = document.getElementById("errorState");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/participants`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const list = data.participants || [];
+    loading.style.display = "none";
+    if (!list.length) { empty.style.display = ""; return; }
+    const body = document.getElementById("partsBody");
+    list.forEach(p => {
+      const tr = document.createElement("tr");
+      const id = escapeHtml(p.id);
+      const linkCount = (p.source_ids || []).length;
+      tr.innerHTML = `
+        <td><a href="/projects/${PROJECT_ID}/participants/${id}"><strong>${escapeHtml(p.name || "(unnamed)")}</strong></a></td>
+        <td class="hint">${escapeHtml(p.pseudonym || "—")}</td>
+        <td>${fmtDemographics(p.demographics)}</td>
+        <td class="hint">${linkCount} source${linkCount === 1 ? "" : "s"}</td>
+        <td class="hint">${fmtDate(p.created_at)}</td>
+        <td><a class="btn secondary" href="/projects/${PROJECT_ID}/participants/${id}">Open</a></td>
+      `;
+      body.appendChild(tr);
+    });
+    card.style.display = "";
+  } catch (e) {
+    loading.style.display = "none";
+    error.textContent = `Couldn't load participants: ${e.message}`;
+    error.style.display = "";
+  }
+}
+load();
+</script>
+{% endblock %}
