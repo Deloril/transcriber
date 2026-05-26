@@ -5,6 +5,9 @@ Strategy
 --------
 - Whisper (faster-whisper / CTranslate2) device:
     - CUDA → "cuda" + float16 (or int8_float16 on small-VRAM cards)
+    - ROCm → "rocm" + float16 on RDNA 3 / RDNA 4 with ≥8 GB VRAM;
+      int8_float16 on RDNA 2 (Tier-2 conservative, see G5.2) and on
+      any AMD card with <8 GB VRAM.
     - Apple Silicon / CPU → "cpu" + int8 (CTranslate2 has no MPS backend;
       on M-series CPUs with Accelerate it's fast enough for offline batch
       use, and accuracy is identical to GPU).
@@ -578,6 +581,50 @@ def _diarization_device() -> str:
     return "cpu"
 
 
+# G5.2: VRAM threshold below which large-v3 in plain fp16 doesn't fit
+# comfortably alongside the alignment + diarization models. Cards under
+# this size drop to ``int8_float16`` so the whole pipeline still loads on
+# 6 GB / 8 GB laptop GPUs. Same threshold for CUDA and ROCm — CT2's ROCm
+# wheel uses the same fp16 / int8_float16 kernels, so the budget is
+# identical.
+_FP16_VRAM_THRESHOLD_GB: float = 8.0
+
+
+def _pick_compute_type(backend: str, vram_gb: float, *, rdna2: bool) -> str:
+    """Pick a CTranslate2 compute_type for a given backend / VRAM / arch.
+
+    Pure helper so the tiering is testable without going through
+    :func:`_whisper_device_and_compute` and its env-var plumbing.
+
+    Rules (G5.2):
+
+    * **CPU / MPS / unknown** → ``int8``. CT2 has no MPS backend and the
+      Apple-Silicon CPU path is the validated fallback.
+    * **GPU with <8 GB VRAM** (CUDA *or* ROCm) → ``int8_float16``. Keeps
+      large-v3 comfortably under the budget on laptop GPUs and 8 GB-class
+      AMD parts (RX 6600 / RX 7600).
+    * **ROCm + RDNA 2** (any VRAM) → ``int8_float16``. RDNA 2 is the
+      "Tier 2 / works with workarounds" bucket: it needs
+      ``CT2_CUDA_ALLOCATOR=cub_caching`` to load at all (G4.1) and the only
+      published RDNA 2 number we have (CT2 #2012, 5.5× realtime on a
+      gfx1032 RX 6600) was measured with int8 quants. Even when the card
+      has 16 GB (RX 6800/6900) we stay conservative because plain fp16
+      isn't a path AMD officially validates on RDNA 2.
+    * **GPU with ≥8 GB VRAM** (CUDA or RDNA 3 / RDNA 4 / CDNA) →
+      ``float16``. RDNA 3 24 GB cards (RX 7900 XTX) and any 16 GB+ NVIDIA
+      part land here.
+    """
+    if backend not in ("cuda", "rocm"):
+        return "int8"
+    if vram_gb < _FP16_VRAM_THRESHOLD_GB:
+        return "int8_float16"
+    if backend == "rocm" and rdna2:
+        # Tier-2 conservative: Navi 2x with the cub_caching workaround
+        # has only been validated end-to-end on int8-class compute types.
+        return "int8_float16"
+    return "float16"
+
+
 def _whisper_device_and_compute() -> tuple[str, str]:
     """
     faster-whisper device label + compute type.
@@ -588,8 +635,18 @@ def _whisper_device_and_compute() -> tuple[str, str]:
     the device flag because of HIP's CUDA-namespace shim — call sites
     translate with :func:`_to_torch_device_arg` at the model load.
 
-    We auto-pick ``int8_float16`` on smaller VRAM cards to keep large-v3
-    comfortably under the budget.
+    Compute-type tiering (G5.2) is delegated to :func:`_pick_compute_type`
+    so the architecture / VRAM matrix can be unit-tested without the
+    env-var plumbing. Summary:
+
+    * GPU + <8 GB VRAM → ``int8_float16`` (laptop / RX 6600 / RX 7600).
+    * ROCm + RDNA 2 (any VRAM) → ``int8_float16`` (Tier 2 conservative;
+      cub_caching path validated on int8 only).
+    * GPU + ≥8 GB VRAM otherwise → ``float16`` (CUDA, RDNA 3 / RDNA 4
+      including 7900 XTX 24 GB).
+    * CPU / MPS → ``int8``.
+
+    ``SCRIBE_COMPUTE_TYPE`` always wins when set.
     """
     forced_device = os.environ.get("SCRIBE_WHISPER_DEVICE", "").strip().lower()
     forced_compute = os.environ.get("SCRIBE_COMPUTE_TYPE", "").strip().lower()
@@ -606,9 +663,12 @@ def _whisper_device_and_compute() -> tuple[str, str]:
         return device, forced_compute
 
     if device in ("cuda", "rocm"):
-        # large-v3 fp16 wants ~6 GB; int8_float16 brings it under ~4 GB.
-        return device, "int8_float16" if _cuda_vram_gb() < 8 else "float16"
-    return device, "int8"
+        # Only consult the RDNA 2 detector on ROCm; on CUDA the gfx target
+        # is irrelevant and ``_is_rdna2()`` would never be True anyway, but
+        # skipping the call avoids the property-read for the common case.
+        rdna2 = _is_rdna2() if device == "rocm" else False
+        return device, _pick_compute_type(device, _cuda_vram_gb(), rdna2=rdna2)
+    return device, _pick_compute_type(device, 0.0, rdna2=False)
 
 
 def _to_torch_device_arg(label: str) -> str:

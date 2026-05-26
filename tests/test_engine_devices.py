@@ -260,6 +260,48 @@ class TestWhisperDeviceAndCompute:
         assert dev == "rocm"
         assert compute == "int8_float16"
 
+    def test_rocm_rdna3_24gb_picks_float16(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # G5.2: RDNA 3 24 GB cards (RX 7900 XTX) get plain float16.
+        # ``_is_rdna2`` is False so the high-VRAM branch picks fp16.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_cuda_vram_gb", lambda: 24.0)
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: False)
+        dev, compute = engine._whisper_device_and_compute()
+        assert dev == "rocm"
+        assert compute == "float16"
+
+    def test_rocm_rdna2_16gb_stays_on_int8_float16(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # G5.2: RDNA 2 is the Tier-2 "works with workarounds" bucket.
+        # Even on a 16 GB RX 6800 we stay on int8_float16 because the
+        # cub_caching path has only been validated end-to-end on
+        # int8-class compute types (CT2 issue #2012).
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_cuda_vram_gb", lambda: 16.0)
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        dev, compute = engine._whisper_device_and_compute()
+        assert dev == "rocm"
+        assert compute == "int8_float16"
+
+    def test_cuda_skips_rdna2_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # G5.2: the RDNA 2 detector is ROCm-specific. On CUDA we never
+        # call ``_is_rdna2`` — guard against a future bug where an NVIDIA
+        # card with a confusing ``gcnArchName`` could downgrade fp16.
+        called = {"flag": False}
+
+        def _spy() -> bool:
+            called["flag"] = True
+            return True  # would force int8_float16 if it were consulted
+
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")
+        monkeypatch.setattr(engine, "_cuda_vram_gb", lambda: 24.0)
+        monkeypatch.setattr(engine, "_is_rdna2", _spy)
+        dev, compute = engine._whisper_device_and_compute()
+        assert dev == "cuda"
+        assert compute == "float16"
+        assert called["flag"] is False
+
     def test_force_compute_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
         monkeypatch.setenv("SCRIBE_COMPUTE_TYPE", "float32")
@@ -280,6 +322,48 @@ class TestWhisperDeviceAndCompute:
         dev, compute = engine._whisper_device_and_compute()
         assert dev == "rocm"
         assert compute == "float16"
+
+
+class TestPickComputeType:
+    """G5.2: pure helper that resolves backend × VRAM × architecture
+    into a CTranslate2 compute-type string. Tested in isolation so we
+    can lock the AMD-specific tiering without going through the
+    env-var / autodetect plumbing in ``_whisper_device_and_compute``."""
+
+    @pytest.mark.parametrize("backend", ["cpu", "mps", "unknown"])
+    def test_non_gpu_backends_get_int8(self, backend: str) -> None:
+        # CPU + Apple Silicon both fall back to int8 — CT2 has no MPS
+        # backend and the M-series CPU path is the validated default.
+        assert engine._pick_compute_type(backend, 0.0, rdna2=False) == "int8"
+
+    @pytest.mark.parametrize("backend", ["cuda", "rocm"])
+    def test_low_vram_gpu_picks_int8_float16(self, backend: str) -> None:
+        # Any GPU with <8 GB VRAM goes int8_float16 to keep large-v3
+        # under the budget alongside the alignment + diarization models.
+        assert engine._pick_compute_type(backend, 6.0, rdna2=False) == "int8_float16"
+
+    @pytest.mark.parametrize("backend", ["cuda", "rocm"])
+    def test_high_vram_gpu_picks_float16(self, backend: str) -> None:
+        # Standard high-VRAM path: 16 GB / 24 GB cards (CUDA RTX 4090,
+        # RDNA 3 RX 7900 XTX) get plain fp16.
+        assert engine._pick_compute_type(backend, 24.0, rdna2=False) == "float16"
+
+    def test_rdna2_with_high_vram_stays_conservative(self) -> None:
+        # G5.2: RDNA 2 is conservative even on 16 GB parts. The
+        # cub_caching workaround (G4.1) is the only path that loads
+        # CT2 at all on Navi 2x, and the validated config is int8.
+        assert engine._pick_compute_type("rocm", 16.0, rdna2=True) == "int8_float16"
+
+    def test_rdna2_flag_ignored_on_cuda(self) -> None:
+        # The ``rdna2`` flag is a ROCm-only signal; an NVIDIA card with
+        # a confusing ``gcnArchName`` should never get downgraded.
+        assert engine._pick_compute_type("cuda", 24.0, rdna2=True) == "float16"
+
+    def test_threshold_is_eight_gb_inclusive(self) -> None:
+        # Boundary check: exactly 8 GB lands on the fp16 side. Locks
+        # the threshold so a refactor can't silently move it.
+        assert engine._pick_compute_type("cuda", 8.0, rdna2=False) == "float16"
+        assert engine._pick_compute_type("cuda", 7.999, rdna2=False) == "int8_float16"
 
 
 class TestToTorchDeviceArg:
