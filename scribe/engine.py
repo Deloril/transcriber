@@ -950,6 +950,139 @@ def rocm_lstm_dropout_patch_explanation() -> str:
 
 
 # --------------------------------------------------------------------------- #
+# G4.1 — RDNA 2 cub_caching allocator workaround user-facing surface
+# --------------------------------------------------------------------------- #
+#
+# ``apply_rocm_runtime_workarounds()`` (above) sets
+# ``CT2_CUDA_ALLOCATOR=cub_caching`` on RDNA 2 hardware to work around CT2
+# issue #2012 (default ``MallocAsync`` allocator crashes with "illegal
+# memory access" on RX 6000-series cards). The fix runs at engine import
+# time, but a worker subprocess that imports CTranslate2 *before*
+# ``scribe.engine`` can race past the helper and load CT2 with the bad
+# allocator. Until G4.1 was wired, a researcher had no way to confirm
+# the workaround was actually in their environment without dropping to
+# ``python -m scribe.devices`` — and even then, the CLI line is hidden
+# behind a terminal hop.
+#
+# The three helpers below project the live allocator state into the same
+# ``/api/capabilities`` → ``backendStatTile`` surface that G1.3 / G2.x /
+# G3.1 use. State machine:
+#
+#   * ``"auto"``               — env var is exactly ``"cub_caching"``;
+#                                this is what
+#                                :func:`apply_rocm_runtime_workarounds`
+#                                sets when it fires. The happy path on
+#                                RDNA 2 ROCm.
+#   * ``"user-overridden"``    — env var is set to a *non-cub_caching*
+#                                value. The user knows what they're
+#                                doing (we never clobber a user-supplied
+#                                value); we just echo the value so
+#                                support bundles show it.
+#   * ``"unset"``              — env var is unset. On RDNA 2 ROCm this
+#                                is the danger state — CT2 is about to
+#                                crash. The home page renders this as a
+#                                visible warning so a researcher can act
+#                                before kicking off a transcription.
+#   * ``None``                 — ROCm but not RDNA 2 hardware, OR a
+#                                non-ROCm backend. The allocator quirk
+#                                doesn't apply, so the segment is
+#                                irrelevant and the API / tile suppress
+#                                it cleanly.
+
+
+def rocm_allocator_state() -> str | None:
+    """Classify the live ``CT2_CUDA_ALLOCATOR`` env var on RDNA 2 ROCm.
+
+    Returns one of:
+
+    * ``"auto"`` — env var is exactly ``"cub_caching"`` (what
+      :func:`apply_rocm_runtime_workarounds` sets). Happy path.
+    * ``"user-overridden"`` — env var is set to anything else. Treated
+      as authoritative; we just surface the value for triage.
+    * ``"unset"`` — env var is missing. RDNA 2 ROCm crashes with this
+      state shortly after a CT2 model load (CT2 #2012); the home page
+      tile surfaces it as a warning so the user can call
+      :func:`apply_rocm_runtime_workarounds` (or export the var
+      themselves) before a transcription run.
+    * ``None`` — current backend is not ROCm, or the GPU is ROCm but
+      not RDNA 2. The allocator workaround is irrelevant outside RDNA 2,
+      so the field is null and the UI tile silently omits the segment.
+
+    Cheap to call repeatedly; no torch state mutation, just an env var
+    lookup and the existing :func:`is_rdna2` detector.
+    """
+    if not is_rocm():
+        return None
+    if not _is_rdna2():
+        return None
+    val = os.environ.get("CT2_CUDA_ALLOCATOR")
+    if val == "cub_caching":
+        return "auto"
+    if val:
+        return "user-overridden"
+    return "unset"
+
+
+def rocm_allocator_value() -> str | None:
+    """The literal ``CT2_CUDA_ALLOCATOR`` env var value on RDNA 2 ROCm.
+
+    Returns the string the user/Scribe set the variable to, or ``None``
+    when the variable is unset. Returns ``None`` on every non-ROCm
+    backend and on ROCm boxes that are not RDNA 2 — the allocator
+    workaround doesn't apply there, so reporting the value (which is
+    typically also unset) would just be noise. Pairs with
+    :func:`rocm_allocator_state`: ``"auto"`` ↔ ``"cub_caching"``;
+    ``"user-overridden"`` ↔ whatever string the user exported;
+    ``"unset"`` ↔ ``None``.
+    """
+    if not is_rocm():
+        return None
+    if not _is_rdna2():
+        return None
+    return os.environ.get("CT2_CUDA_ALLOCATOR") or None
+
+
+def rocm_allocator_explanation() -> str | None:
+    """One-line human-readable rationale for the active allocator state.
+
+    The string is what the home page Backend tile / CLI / support
+    bundle quote verbatim. Mirrors the three CLI lines in
+    ``scribe.devices`` so the two surfaces can never disagree, and
+    references CT2 issue #2012 so a researcher pasting the line into
+    a support thread has the searchable keyword chain
+    (CTranslate2 → cub_caching → #2012 → RDNA 2 illegal-memory-access).
+
+    Returns ``None`` on every backend / hardware where
+    :func:`rocm_allocator_state` returns ``None``.
+    """
+    state = rocm_allocator_state()
+    if state is None:
+        return None
+    if state == "auto":
+        return (
+            "CT2_CUDA_ALLOCATOR=cub_caching applied automatically for "
+            "RDNA 2 (works around CT2 #2012 illegal-memory-access on "
+            "RX 6000-series cards)"
+        )
+    if state == "user-overridden":
+        # Quote the user value so the line is self-explanatory in a
+        # support bundle without the reader having to cross-reference
+        # ``rocm_allocator_value``.
+        val = rocm_allocator_value() or ""
+        return (
+            f"CT2_CUDA_ALLOCATOR={val} (user-set; not clobbered). "
+            "RDNA 2 normally needs CT2_CUDA_ALLOCATOR=cub_caching "
+            "(CT2 #2012)"
+        )
+    # "unset"
+    return (
+        "CT2_CUDA_ALLOCATOR unset on RDNA 2 — CT2 is about to crash "
+        "(CT2 #2012). Call apply_rocm_runtime_workarounds() before "
+        "the CT2 import, or export CT2_CUDA_ALLOCATOR=cub_caching"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # WhisperX wrappers
 # --------------------------------------------------------------------------- #
 

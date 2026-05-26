@@ -1127,3 +1127,223 @@ class TestSafeLoadModel:
         assert "hotwords" not in calls[1]
         # None-valued keys are also dropped on retry.
         assert "initial_prompt" not in calls[1]
+
+
+class TestRocmAllocatorState:
+    """G4.1: classify the live ``CT2_CUDA_ALLOCATOR`` env var on RDNA 2 ROCm.
+
+    Tests the three documented states (``"auto"``, ``"user-overridden"``,
+    ``"unset"``) plus the ``None`` collapse on every other backend / GPU
+    configuration. The helper drives both the home page tile sub-line
+    segment and the warning banner the index template surfaces when the
+    state is ``"unset"`` (CT2 is about to crash on RDNA 2).
+    """
+
+    def test_returns_auto_when_env_is_cub_caching(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: True)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "cub_caching")
+        assert engine.rocm_allocator_state() == "auto"
+
+    def test_returns_user_overridden_when_env_is_other_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: True)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "MallocAsync")
+        assert engine.rocm_allocator_state() == "user-overridden"
+
+    def test_returns_unset_when_env_is_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: True)
+        monkeypatch.delenv("CT2_CUDA_ALLOCATOR", raising=False)
+        assert engine.rocm_allocator_state() == "unset"
+
+    def test_returns_none_on_non_rocm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for backend in ("cuda", "mps", "cpu"):
+            monkeypatch.setattr(engine, "gpu_backend", lambda b=backend: b)
+            monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+            monkeypatch.setattr(engine, "is_rdna2", lambda: True)
+            monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "cub_caching")
+            assert engine.rocm_allocator_state() is None, (
+                f"non-ROCm backend ({backend}) must collapse to None even "
+                "when the env var is set — the workaround doesn't apply"
+            )
+
+    def test_returns_none_on_rocm_but_not_rdna2(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # RX 7000-series / RX 9000-series / CDNA — the cub_caching
+        # workaround doesn't apply, so the field must be null even
+        # though we're on ROCm.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: False)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: False)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "cub_caching")
+        assert engine.rocm_allocator_state() is None
+
+    def test_returns_unset_when_env_is_empty_string(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An empty-string env var is treated as unset (matching the
+        # shell convention + ``apply_rocm_runtime_workarounds`` which
+        # checks ``not os.environ.get(...)``).
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: True)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "")
+        assert engine.rocm_allocator_state() == "unset"
+
+
+class TestRocmAllocatorValue:
+    """G4.1: literal env var value on RDNA 2 ROCm; None elsewhere."""
+
+    def test_returns_cub_caching_on_auto_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: True)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "cub_caching")
+        assert engine.rocm_allocator_value() == "cub_caching"
+
+    def test_returns_user_value_on_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: True)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "MallocAsync")
+        assert engine.rocm_allocator_value() == "MallocAsync"
+
+    def test_returns_none_when_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: True)
+        monkeypatch.delenv("CT2_CUDA_ALLOCATOR", raising=False)
+        assert engine.rocm_allocator_value() is None
+
+    def test_returns_none_on_non_rocm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: False)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: False)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "cub_caching")
+        assert engine.rocm_allocator_value() is None
+
+    def test_returns_none_on_rocm_non_rdna2(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: False)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: False)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "cub_caching")
+        assert engine.rocm_allocator_value() is None
+
+
+class TestRocmAllocatorExplanation:
+    """G4.1: human-readable rationale, mirrored to the CLI + tile."""
+
+    def test_returns_none_off_rocm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: False)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: False)
+        assert engine.rocm_allocator_explanation() is None
+
+    def test_returns_none_on_rocm_non_rdna2(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: False)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: False)
+        assert engine.rocm_allocator_explanation() is None
+
+    def test_auto_state_references_workaround(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: True)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "cub_caching")
+        text = engine.rocm_allocator_explanation()
+        assert text is not None
+        # Must reference cub_caching (the actual env value) so a researcher
+        # pasting the line into a thread can confirm the workaround at a glance.
+        assert "cub_caching" in text
+        # Must reference the upstream issue id so a researcher pasting the
+        # line into a CT2 issue tracker has the searchable keyword chain.
+        assert "2012" in text
+
+    def test_user_override_state_quotes_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: True)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "MallocAsync")
+        text = engine.rocm_allocator_explanation()
+        assert text is not None
+        # Quotes the user-supplied value so a support bundle is self-explanatory
+        # without the reader cross-referencing ``rocm_allocator_value``.
+        assert "MallocAsync" in text
+        assert "2012" in text
+
+    def test_unset_state_calls_out_the_action(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: True)
+        monkeypatch.delenv("CT2_CUDA_ALLOCATOR", raising=False)
+        text = engine.rocm_allocator_explanation()
+        assert text is not None
+        # The ``"unset"`` state is the actionable one — the message must
+        # tell the user how to fix it (call apply_rocm_runtime_workarounds()
+        # or export the env var).
+        assert "apply_rocm_runtime_workarounds" in text or "cub_caching" in text
+        assert "2012" in text
+
+    def test_explanation_aligned_with_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Sanity check: when state is None (e.g. CPU box), explanation
+        # is also None. When state is set, explanation is a non-empty
+        # string.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: False)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: False)
+        assert engine.rocm_allocator_state() is None
+        assert engine.rocm_allocator_explanation() is None
+
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(engine, "is_rdna2", lambda: True)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "cub_caching")
+        assert engine.rocm_allocator_state() == "auto"
+        assert isinstance(engine.rocm_allocator_explanation(), str)
+        assert engine.rocm_allocator_explanation()  # non-empty
+
+    def test_helpers_re_exported_from_top_level_scribe(self) -> None:
+        # Mirror the G3.1 precedent: helpers are useful to lab admins
+        # / smoke-test scripts / third-party integrations, so they're
+        # reachable from the top-level ``scribe`` namespace.
+        import scribe
+
+        assert hasattr(scribe, "rocm_allocator_state")
+        assert hasattr(scribe, "rocm_allocator_value")
+        assert hasattr(scribe, "rocm_allocator_explanation")
+        assert "rocm_allocator_state" in scribe.__all__
+        assert "rocm_allocator_value" in scribe.__all__
+        assert "rocm_allocator_explanation" in scribe.__all__

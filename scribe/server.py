@@ -966,6 +966,21 @@ async def capabilities() -> JSONResponse:
     when ``rocm_lstm_patch`` is truthy; the CLI surface
     (``python -m scribe.devices``) prints the same line under
     ``LSTM dropout patch:``.
+
+    G4.1: ``gpu.rocm_allocator_state`` (one of ``"auto"`` /
+    ``"user-overridden"`` / ``"unset"``), ``gpu.rocm_allocator_value``
+    (the literal ``CT2_CUDA_ALLOCATOR`` env var value), and
+    ``gpu.rocm_allocator_explanation`` (one-line rationale referencing
+    CT2 #2012) carry the live state of the RDNA 2 cub_caching
+    workaround. All three are ``None`` outside RDNA 2 ROCm — the
+    allocator quirk only affects RX 6000-series cards (and the RDNA 2
+    APUs), so reporting the state on RDNA 3 / CDNA / CUDA / MPS / CPU
+    would just be noise. The home page Backend tile appends an
+    ``"alloc cub_caching"`` / ``"alloc <user>"`` / ``"alloc unset"``
+    segment to the sub-line and surfaces a visible warning banner
+    when the state is ``"unset"`` (CT2 is about to crash); the CLI
+    surface (``python -m scribe.devices``) prints the same state
+    under ``Allocator:``.
     """
     from .parakeet import nemo_available
     from .engine import (
@@ -973,6 +988,9 @@ async def capabilities() -> JSONResponse:
         _gpu_device_name,
         _cuda_vram_gb,
         gpu_arch_name,
+        rocm_allocator_explanation,
+        rocm_allocator_state,
+        rocm_allocator_value,
         rocm_lstm_dropout_patch_active,
         rocm_lstm_dropout_patch_explanation,
     )
@@ -1036,6 +1054,16 @@ async def capabilities() -> JSONResponse:
     # so reporting "applies" elsewhere would be misleading).
     rocm_lstm_patch: bool | None = None
     rocm_lstm_patch_explanation_text: str | None = None
+    # G4.1: ROCm-only RDNA 2 cub_caching allocator workaround state.
+    # All three fields are ``None`` outside RDNA 2 ROCm — the helper
+    # already gates on backend == "rocm" + is_rdna2() so we don't have
+    # to second-guess it here, just call the helpers and let them
+    # decide. The home page tile uses the state field to pick a
+    # sub-line segment + warning banner; the CLI mirrors the same
+    # state under ``Allocator:``.
+    allocator_state: str | None = None
+    allocator_value: str | None = None
+    allocator_explanation_text: str | None = None
     if backend == "rocm":
         try:
             ct2_rocm_pin = pinned_ct2_rocm_version()
@@ -1079,6 +1107,20 @@ async def capabilities() -> JSONResponse:
         except Exception:  # noqa: BLE001
             rocm_lstm_patch = None
             rocm_lstm_patch_explanation_text = None
+        # G4.1: surface the RDNA 2 cub_caching allocator state. The
+        # helpers themselves return None outside RDNA 2 ROCm, so the
+        # JSON fields collapse to null on RDNA 3 / CDNA cards (and
+        # already-null on CUDA / MPS / CPU because we're inside the
+        # ``backend == "rocm"`` guard). Defensive against helper
+        # exceptions — collapse to None rather than 500.
+        try:
+            allocator_state = rocm_allocator_state()
+            allocator_value = rocm_allocator_value()
+            allocator_explanation_text = rocm_allocator_explanation()
+        except Exception:  # noqa: BLE001
+            allocator_state = None
+            allocator_value = None
+            allocator_explanation_text = None
     return JSONResponse({
         "parakeet": {
             "available": parakeet_runtime_ok,
@@ -1100,6 +1142,9 @@ async def capabilities() -> JSONResponse:
             "distro_tier_explanation": distro_tier_explanation_text,
             "rocm_lstm_patch": rocm_lstm_patch,
             "rocm_lstm_patch_explanation": rocm_lstm_patch_explanation_text,
+            "rocm_allocator_state": allocator_state,
+            "rocm_allocator_value": allocator_value,
+            "rocm_allocator_explanation": allocator_explanation_text,
         },
     })
 

@@ -281,6 +281,9 @@ class TestG3_1ApiCapabilitiesCarriesPatchStatus:
         # The home page tile reads the gpu payload by key. Pin the full
         # key set so a future response-shape drift fails this test
         # loudly — additive contract extension guard.
+        #
+        # The list grows as G-features wire new fields through to the
+        # tile (G4.1 added the three ``rocm_allocator_*`` fields).
         srv, client, _ = server_env
         _stub_rocm_branch(monkeypatch)
         body = client.get("/api/capabilities").json()
@@ -298,6 +301,9 @@ class TestG3_1ApiCapabilitiesCarriesPatchStatus:
             "distro_tier_explanation",
             "rocm_lstm_patch",
             "rocm_lstm_patch_explanation",
+            "rocm_allocator_state",
+            "rocm_allocator_value",
+            "rocm_allocator_explanation",
         }
 
 

@@ -219,12 +219,61 @@ export function backendStatTile(gpu) {
   if (gpu.rocm_lstm_patch === true) {
     parts.push("LSTM patched");
   }
+  // G4.1: surface the live RDNA 2 cub_caching allocator state as the
+  // final sub-line segment. ``rocm_allocator_state`` is null on every
+  // non-RDNA-2 backend (CUDA / MPS / CPU / RDNA 3 / CDNA) — the
+  // ``CT2_CUDA_ALLOCATOR=cub_caching`` workaround only applies to
+  // RX 6000-series cards (and the RDNA 2 APUs). The segment is
+  // rendered with one of three terse labels so a researcher pasting
+  // their machine info into a CT2 #2012 support thread can confirm
+  // the workaround is active at a glance:
+  //
+  //   - "auto"            → "alloc cub_caching" (happy path; the env
+  //                          var was set by Scribe itself)
+  //   - "user-overridden" → "alloc <value>" (user has set the var
+  //                          to something else; we never clobber a
+  //                          user value, just echo it for triage)
+  //   - "unset"           → "alloc unset" (RDNA 2 is about to crash;
+  //                          paired with a visible warning banner
+  //                          below — see ``warning`` field)
+  //   - missing / null    → segment omitted entirely
+  //
+  // The actual env var value (``rocm_allocator_value``) is read for
+  // the user-overridden label only; for the other two states the
+  // label is fixed.
+  const allocState = gpu.rocm_allocator_state;
+  if (allocState === "auto") {
+    parts.push("alloc cub_caching");
+  } else if (allocState === "user-overridden") {
+    const v = gpu.rocm_allocator_value;
+    parts.push(v ? `alloc ${String(v)}` : "alloc user-set");
+  } else if (allocState === "unset") {
+    parts.push("alloc unset");
+  }
   // G2.1 drift warning. Falsy ``ct2_drift_message`` (null / undefined /
   // empty string) means no drift — the tile renders without a warning
   // banner. Anything truthy is passed through verbatim; the server
   // already formats the human-readable text.
+  //
+  // G4.1 unset-allocator warning: when the RDNA 2 allocator is
+  // ``"unset"``, CT2 is about to crash with an illegal-memory-access
+  // fault (CT2 #2012). That state is just as actionable as a CT2 wheel
+  // drift, so we surface ``rocm_allocator_explanation`` through the same
+  // warning banner — the researcher sees a single warn line they can
+  // act on. If both warnings are present (drift *and* unset allocator)
+  // they're concatenated with a separator so neither gets swallowed.
   const drift = gpu.ct2_drift_message;
-  const warning = drift ? String(drift) : null;
+  const allocExplain = (allocState === "unset" && gpu.rocm_allocator_explanation)
+    ? String(gpu.rocm_allocator_explanation)
+    : null;
+  let warning = null;
+  if (drift && allocExplain) {
+    warning = `${String(drift)} — ${allocExplain}`;
+  } else if (drift) {
+    warning = String(drift);
+  } else if (allocExplain) {
+    warning = allocExplain;
+  }
   return {
     label: "Backend",
     value,

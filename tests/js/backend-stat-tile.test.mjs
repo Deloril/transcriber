@@ -933,3 +933,266 @@ describe("backendStatTile (G3.1 LSTM dropout patch)", () => {
     expect(tile.sub.split(" · ")).toContain("LSTM patched");
   });
 });
+
+// ---------- G4.1: RDNA 2 cub_caching allocator workaround state ----------
+//
+// G4.1 added three fields to the /api/capabilities payload —
+// ``gpu.rocm_allocator_state`` (one of ``"auto"`` /
+// ``"user-overridden"`` / ``"unset"``), ``gpu.rocm_allocator_value``
+// (the literal env var value when set), and
+// ``gpu.rocm_allocator_explanation`` (one-line rationale). All three
+// are ``null`` outside RDNA 2 ROCm — the cub_caching workaround only
+// applies to RX 6000-series cards (and the RDNA 2 APUs); on RDNA 3 /
+// CDNA / CUDA / MPS / CPU reporting the state would just be noise.
+//
+// The home page tile renders the state as a sub-line segment:
+//   - "auto"            → "alloc cub_caching"
+//   - "user-overridden" → "alloc <value>" (echoes whatever the user set)
+//   - "unset"           → "alloc unset" + warning banner with the
+//                         explanation (CT2 is about to crash; the
+//                         banner makes this glanceable)
+//   - null / missing    → segment omitted entirely
+//
+// When the unset state coincides with a CT2 wheel drift, both
+// warnings concatenate so neither gets swallowed.
+
+describe("backendStatTile (G4.1 cub_caching allocator)", () => {
+  it("appends 'alloc cub_caching' on a ROCm RDNA 2 tile (auto state)", () => {
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800 XT",
+      vram_gb: 16.0,
+      gfx_target: "gfx1030",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.7.2",
+      ct2_drift_message: null,
+      ct2_rocm_fallback_urls: [],
+      distro_tier: "first-class",
+      rocm_lstm_patch: true,
+      rocm_lstm_patch_explanation: "...",
+      rocm_allocator_state: "auto",
+      rocm_allocator_value: "cub_caching",
+      rocm_allocator_explanation: "CT2_CUDA_ALLOCATOR=cub_caching applied automatically (CT2 #2012)",
+    });
+    expect(tile.sub).toBe(
+      "AMD Radeon RX 6800 XT · 16 GB VRAM · gfx1030 · " +
+      "Ubuntu 24.04.4 LTS · CT2 v4.7.2 · first-class distro · " +
+      "LSTM patched · alloc cub_caching"
+    );
+    // Auto state must NOT trigger a warning — the workaround is in place.
+    expect(tile.warning).toBeNull();
+  });
+
+  it("appends 'alloc <value>' on user-overridden state", () => {
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800 XT",
+      vram_gb: 16.0,
+      rocm_allocator_state: "user-overridden",
+      rocm_allocator_value: "MallocAsync",
+      rocm_allocator_explanation:
+        "CT2_CUDA_ALLOCATOR=MallocAsync (user-set; not clobbered) (CT2 #2012)",
+    });
+    const segments = tile.sub.split(" · ");
+    expect(segments).toContain("alloc MallocAsync");
+    // User-overridden state quotes the user value rather than
+    // emitting a generic label — a researcher pasting the line into a
+    // support thread can see exactly what the runtime saw.
+    // We don't surface this through the warning banner (the user knows
+    // what they did); the segment is the only signal.
+    expect(tile.warning).toBeNull();
+  });
+
+  it("appends 'alloc unset' AND surfaces a warning on unset state", () => {
+    // The danger state: RDNA 2 box where CT2 is about to crash. The
+    // tile must:
+    //   1. carry an "alloc unset" sub-line segment (so quick-glance
+    //      readers see it next to the gfx target)
+    //   2. populate the ``warning`` field with the explanation (so
+    //      the home page's warning banner pops it visibly)
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800 XT",
+      vram_gb: 16.0,
+      gfx_target: "gfx1030",
+      rocm_allocator_state: "unset",
+      rocm_allocator_value: null,
+      rocm_allocator_explanation:
+        "CT2_CUDA_ALLOCATOR unset on RDNA 2 — CT2 is about to crash " +
+        "(CT2 #2012). Call apply_rocm_runtime_workarounds() before " +
+        "the CT2 import, or export CT2_CUDA_ALLOCATOR=cub_caching",
+    });
+    expect(tile.sub.split(" · ")).toContain("alloc unset");
+    expect(tile.warning).toContain("2012");
+    expect(tile.warning).toContain("CT2_CUDA_ALLOCATOR");
+  });
+
+  it("omits alloc segment when rocm_allocator_state is null", () => {
+    // Non-RDNA-2 ROCm box (e.g. RX 7900 XTX) — the workaround is
+    // irrelevant so all three fields are null.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      gfx_target: "gfx1100",
+      rocm_allocator_state: null,
+      rocm_allocator_value: null,
+      rocm_allocator_explanation: null,
+    });
+    expect(tile.sub).toBe(
+      "AMD Radeon RX 7900 XTX · 24 GB VRAM · gfx1100"
+    );
+    expect(tile.sub).not.toContain("alloc");
+    expect(tile.warning).toBeNull();
+  });
+
+  it("omits alloc segment when rocm_allocator_state is missing entirely", () => {
+    // Defensive: an older API version that doesn't carry the field
+    // shouldn't make the tile blow up.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800 XT",
+      vram_gb: 16.0,
+    });
+    expect(tile.sub).toBe("AMD Radeon RX 6800 XT · 16 GB VRAM");
+    expect(tile.sub).not.toContain("alloc");
+    expect(tile.warning).toBeNull();
+  });
+
+  it("omits alloc segment on non-ROCm backends (CUDA / MPS / CPU)", () => {
+    for (const backend of ["cuda", "mps", "cpu"]) {
+      const tile = backendStatTile({
+        backend,
+        device_name: "Some Device",
+        rocm_allocator_state: null,
+      });
+      expect(tile.sub == null || !tile.sub.includes("alloc")).toBe(true);
+    }
+  });
+
+  it("omits alloc segment on unknown / stray state strings (defensive)", () => {
+    // The helper switches on three documented states; a stray string
+    // (from a bad proxy / older client / test pollution) must not
+    // accidentally render a segment.
+    for (const stray of ["yes", "true", "on", 1, {}, [], "AUTO"]) {
+      const tile = backendStatTile({
+        backend: "rocm",
+        device_name: "AMD Radeon RX 6800 XT",
+        rocm_allocator_state: stray,
+      });
+      const sub = tile.sub || "";
+      expect(sub).not.toContain("alloc cub_caching");
+      expect(sub).not.toContain("alloc unset");
+    }
+  });
+
+  it("alloc segment appears after LSTM patched (last sub-line segment)", () => {
+    // Order pin: device → VRAM → gfx → distro → CT2 pin → mirrors →
+    // tier → LSTM patch → alloc. alloc is last because it's the
+    // most-specific-to-RDNA-2 bit; the LSTM patch is global to ROCm
+    // and stays as the second-to-last segment.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800 XT",
+      vram_gb: 16.0,
+      gfx_target: "gfx1030",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      distro_tier: "first-class",
+      rocm_lstm_patch: true,
+      rocm_allocator_state: "auto",
+      rocm_allocator_value: "cub_caching",
+    });
+    const segments = tile.sub.split(" · ");
+    expect(segments[segments.length - 1]).toBe("alloc cub_caching");
+    expect(segments[segments.length - 2]).toBe("LSTM patched");
+  });
+
+  it("preserves the GPU tile shape (label / value / sub / warning)", () => {
+    // Pin the contract: G4.1 is additive — the four-key tile shape
+    // is unchanged, only the sub-line composition gains a segment
+    // and the warning composition gains an extra source.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800 XT",
+      rocm_allocator_state: "auto",
+      rocm_allocator_value: "cub_caching",
+    });
+    expect(Object.keys(tile).sort()).toEqual(
+      ["label", "sub", "value", "warning"]
+    );
+  });
+
+  it("concatenates drift + unset-allocator warnings (worst-case ROCm)", () => {
+    // Realistic worst case: RDNA 2 box with both CT2 wheel drift
+    // (G2.1) AND the cub_caching env var unset (G4.1). Both warnings
+    // are independently actionable; the tile must surface them both
+    // through the warning banner (separator " — " between).
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800 XT",
+      vram_gb: 16.0,
+      gfx_target: "gfx1030",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.6.0",
+      ct2_drift_message:
+        "ctranslate2 v4.6.0 installed; pinned ROCm wheel is v4.7.2",
+      rocm_allocator_state: "unset",
+      rocm_allocator_explanation:
+        "CT2_CUDA_ALLOCATOR unset on RDNA 2 — CT2 is about to crash " +
+        "(CT2 #2012). Call apply_rocm_runtime_workarounds() before " +
+        "the CT2 import, or export CT2_CUDA_ALLOCATOR=cub_caching",
+    });
+    expect(tile.warning).toContain("v4.6.0");
+    expect(tile.warning).toContain("CT2_CUDA_ALLOCATOR unset");
+    // Both warnings are present — neither got swallowed by the other.
+    expect(tile.warning).toContain("2012");
+  });
+
+  it("no warning concatenation on auto state + drift (drift only)", () => {
+    // When the allocator state is auto / user-overridden, the warning
+    // field carries only the drift message — the alloc state is
+    // surfaced through the sub-line segment, not the banner.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800 XT",
+      ct2_drift_message:
+        "ctranslate2 v4.6.0 installed; pinned ROCm wheel is v4.7.2",
+      rocm_allocator_state: "auto",
+      rocm_allocator_value: "cub_caching",
+      rocm_allocator_explanation: "...",
+    });
+    expect(tile.warning).toContain("v4.6.0");
+    expect(tile.warning).not.toContain("CT2_CUDA_ALLOCATOR");
+  });
+
+  it("alloc segment uses the literal label 'alloc' (no localisation)", () => {
+    // The string is what a researcher copy-pastes into a support
+    // thread; it has to be greppable upstream. Pin the spelling so
+    // a future helpers refactor can't quietly change it to
+    // "allocator cub_caching" or similar.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800 XT",
+      rocm_allocator_state: "auto",
+      rocm_allocator_value: "cub_caching",
+    });
+    expect(tile.sub.split(" · ")).toContain("alloc cub_caching");
+  });
+
+  it("falls back to 'alloc user-set' when override has no value (defensive)", () => {
+    // If the API reports user-overridden but no value (shouldn't
+    // happen — server pairs the two — but defensive), the helper
+    // emits a generic label rather than "alloc undefined" or "alloc null".
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800 XT",
+      rocm_allocator_state: "user-overridden",
+      rocm_allocator_value: null,
+    });
+    expect(tile.sub.split(" · ")).toContain("alloc user-set");
+    expect(tile.sub).not.toContain("alloc null");
+    expect(tile.sub).not.toContain("alloc undefined");
+  });
+});
