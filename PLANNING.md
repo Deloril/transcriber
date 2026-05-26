@@ -66,6 +66,16 @@ The honest story:
 - **G6.1** Smoke test script (`scribe/scripts/check_rocm.py`) that loads a tiny Whisper model, runs alignment, runs diarization, reports timing. Run on user's machine after install.
 - **G6.2** In-house benchmark vs CUDA on a representative file before publishing performance claims.
 
+### Apple Silicon: GPU-accelerated transcription
+
+- **G7.1** **Pluggable transcription-engine backend.** Today `scribe.engine` is hard-wired to faster-whisper / CTranslate2. CT2 has no Metal backend, so on Apple Silicon Whisper falls back to `cpu` + `int8` and a 60-minute video takes ~60-70 minutes. Real user pain (Luke, M4 Max 24GB, 2026-05-26). Refactor the engine so a user-facing setting selects between:
+  - `faster-whisper` (current default; CUDA / ROCm / CPU)
+  - `whisper.cpp` (CPU + Metal + Vulkan; GGUF weights)
+  Engine selection lives next to the existing model picker. The pure logic (VAD chunking, alignment, diarization handoff) stays in `scribe.engine`; only the inference call routes through a `WhisperBackend` ABC. Acceptance: a fresh M4 Mac that picks `whisper.cpp` runs a 60-minute video in ≤15 minutes (target ~5-8× real-time per upstream benchmarks).
+- **G7.2** **whisper.cpp adapter.** Wrap `pywhispercpp` (or shell-out to the `main` binary if the Python bindings are unmaintained) as a `WhisperBackend`. Surface model + quant in the Settings page (large-v3, large-v3-turbo, medium; q5_0 / q8_0 / f16). GGUF model files cache under `~/.scribe/models/whisper.cpp/` so swapping doesn't redownload. Word-level timestamps via the `--max-len 1` mode so alignment + the editor's word-highlighting still work.
+- **G7.3** **Auto-recommend whisper.cpp on Apple Silicon.** When `gpu_backend() == "mps"`, the Settings page nudges toward whisper.cpp with a "GPU-accelerated transcription, ~5× faster" hint. faster-whisper stays available so users can A/B for accuracy, but the default flips. CUDA / ROCm boxes stay on faster-whisper.
+- **G7.4** **Benchmark + document.** Add a `scribe/scripts/bench_whisper.py` that runs the same audio through both backends, reports wall-clock + WER vs a reference transcript, and writes a small Markdown table the README can embed. The first run on Luke's M4 Max becomes the published baseline.
+
 ### Known issues to monitor (live upstream bugs)
 
 - [CT2 #2021](https://github.com/OpenNMT/CTranslate2/issues/2021) RX 9070 XT (gfx1201) crashes on Fedora 43 + ROCm 7.2. Open. Workaround: use Ubuntu 24.04 or wait for upstream fix.
