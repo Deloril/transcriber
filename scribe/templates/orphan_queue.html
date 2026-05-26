@@ -1,0 +1,276 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}{{ page_title }}{% endblock %}
+{% block heading %}{{ page_title }}{% endblock %}
+
+{% block subtitle_block %}
+  <span class="sub">{{ subtitle }}</span>
+{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/sources">Sources</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/codebook">Codebook</a>
+{% endblock %}
+
+{% block extra_styles %}
+  /* F4.5 — orphan-application review queue.
+     Each row carries enough context for triage: the original word-id
+     range, a snapshot of the anchored text, the planner's reason, and
+     when the orphan was detected. The two buttons are explicit
+     (no auto-action): "Delete application" hits F4.1's DELETE route;
+     "Dismiss" only removes the queue entry. */
+  table.orph {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  table.orph thead th {
+    text-align: left; font-weight: 600; font-size: 11px;
+    color: var(--muted); text-transform: uppercase;
+    letter-spacing: .04em; padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+  table.orph tbody td {
+    padding: 11px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  table.orph tbody tr.row-removed { opacity: .35; }
+
+  table.orph .quote {
+    font-family: var(--serif);
+    color: var(--text);
+    line-height: 1.45;
+    max-width: 48ch;
+    border-left: 2px solid var(--accent);
+    padding-left: 8px;
+    margin: 0;
+  }
+  table.orph .meta {
+    color: var(--muted-2); font-size: 11.5px; font-family: var(--mono);
+  }
+  table.orph .reason {
+    color: var(--muted); font-size: 12px;
+    max-width: 32ch;
+  }
+  table.orph .anchor-pill {
+    display: inline-block; font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin-right: 4px;
+  }
+  table.orph .row-actions {
+    display: flex; flex-direction: column; gap: 4px;
+    align-items: flex-end;
+  }
+  table.orph .row-actions button {
+    font-size: 11px; padding: 3px 9px;
+  }
+  .empty-card { text-align: center; padding: 36px 18px; color: var(--muted); }
+{% endblock %}
+
+{% block body %}
+<div id="loadingCard" class="card hint">Loading orphan queue…</div>
+<div id="errorCard" class="card" style="display:none;color:var(--err)"></div>
+
+<div id="emptyCard" class="card empty-card" style="display:none"
+     data-test-id="orphan-empty-state">
+  <h3 style="margin-top:0">Nothing orphaned 🎉</h3>
+  <p>
+    Code applications stay in this queue when a transcript edit deletes or
+    rewrites their anchored words. There's nothing to triage right now —
+    transcript edits since the last visit kept every code in place, or
+    relocated them by content match.
+  </p>
+</div>
+
+<div id="entriesCard" class="card" style="display:none">
+  <h2 style="margin-top:0">
+    Orphaned applications
+    <span id="entriesCount" class="hint" style="font-weight:400"></span>
+  </h2>
+  <p class="hint" style="margin:0 0 12px">
+    Listed oldest first. Each row is one code application whose
+    anchored text could no longer be located after a transcript edit.
+    Either delete the application or dismiss the entry to remove it
+    from the queue.
+  </p>
+  <table class="orph" data-test-id="orphan-table">
+    <thead><tr>
+      <th>Detected</th>
+      <th>Anchored text</th>
+      <th>Anchor / Reason</th>
+      <th></th>
+    </tr></thead>
+    <tbody id="entriesBody"></tbody>
+  </table>
+</div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+
+function fmtDate(s) {
+  if (!s) return "—";
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    return d.toLocaleString();
+  } catch (e) {
+    return s;
+  }
+}
+
+async function loadQueue() {
+  const loadingCard = document.getElementById("loadingCard");
+  const errorCard = document.getElementById("errorCard");
+  const emptyCard = document.getElementById("emptyCard");
+  const entriesCard = document.getElementById("entriesCard");
+  const tbody = document.getElementById("entriesBody");
+  const countLbl = document.getElementById("entriesCount");
+
+  loadingCard.style.display = "";
+  errorCard.style.display = "none";
+  emptyCard.style.display = "none";
+  entriesCard.style.display = "none";
+
+  let body;
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(PROJECT_ID)}/orphan_applications`);
+    if (!r.ok) {
+      throw new Error(`HTTP ${r.status}`);
+    }
+    body = await r.json();
+  } catch (e) {
+    loadingCard.style.display = "none";
+    errorCard.style.display = "";
+    errorCard.textContent = `Could not load orphan queue: ${e.message || e}`;
+    return;
+  }
+
+  const orphans = (body && Array.isArray(body.orphans)) ? body.orphans : [];
+  loadingCard.style.display = "none";
+  if (orphans.length === 0) {
+    emptyCard.style.display = "";
+    return;
+  }
+
+  entriesCard.style.display = "";
+  countLbl.textContent = `(${orphans.length})`;
+  tbody.innerHTML = orphans.map(renderRow).join("");
+  // Wire the row buttons.
+  tbody.querySelectorAll("button[data-action]").forEach(btn => {
+    btn.addEventListener("click", () => onRowAction(btn));
+  });
+}
+
+function renderRow(entry) {
+  const aid = entry.application_id || "";
+  const cid = entry.code_id || "";
+  const sid = entry.source_id || "";
+  const text = (entry.original_anchored_text || []).join(" ");
+  const reason = entry.reason || "";
+  const detected = fmtDate(entry.detected_at || "");
+  return `
+    <tr data-aid="${escapeHtml(aid)}" data-test-id="orphan-row-${escapeHtml(aid)}">
+      <td class="meta">${escapeHtml(detected)}</td>
+      <td><blockquote class="quote">${escapeHtml(text || "(empty)")}</blockquote></td>
+      <td>
+        <div>
+          <span class="anchor-pill">${escapeHtml(entry.old_anchor_start_word_id || "")}</span>
+          <span class="anchor-pill">${escapeHtml(entry.old_anchor_end_word_id || "")}</span>
+        </div>
+        <div class="reason">${escapeHtml(reason)}</div>
+        <div class="meta" style="margin-top:4px">
+          code:${escapeHtml(cid)} · source:${escapeHtml(sid)}
+        </div>
+      </td>
+      <td>
+        <div class="row-actions">
+          <button class="btn"
+                  data-action="delete-app"
+                  data-test-id="orphan-delete-app"
+                  type="button"
+                  title="Permanently delete the orphaned code application">
+            Delete application
+          </button>
+          <button class="btn secondary"
+                  data-action="dismiss"
+                  data-test-id="orphan-dismiss"
+                  type="button"
+                  title="Remove this entry from the queue without touching the application">
+            Dismiss
+          </button>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+async function onRowAction(btn) {
+  const tr = btn.closest("tr");
+  if (!tr) return;
+  const aid = tr.getAttribute("data-aid");
+  if (!aid) return;
+  const action = btn.getAttribute("data-action");
+  btn.disabled = true;
+  try {
+    if (action === "delete-app") {
+      // F4.1 DELETE — remove the application itself.
+      const r = await fetch(
+        `/api/projects/${encodeURIComponent(PROJECT_ID)}/applications/${encodeURIComponent(aid)}`,
+        { method: "DELETE" }
+      );
+      // Either way, also drop the queue entry. A 404 on the application
+      // (already gone) shouldn't block dismissing the orphan row.
+      await fetch(
+        `/api/projects/${encodeURIComponent(PROJECT_ID)}/orphan_applications/${encodeURIComponent(aid)}`,
+        { method: "DELETE" }
+      );
+      if (!r.ok && r.status !== 404) {
+        const text = await r.text();
+        alert(`Could not delete application: ${text}`);
+        btn.disabled = false;
+        return;
+      }
+    } else if (action === "dismiss") {
+      const r = await fetch(
+        `/api/projects/${encodeURIComponent(PROJECT_ID)}/orphan_applications/${encodeURIComponent(aid)}`,
+        { method: "DELETE" }
+      );
+      if (!r.ok) {
+        const text = await r.text();
+        alert(`Could not dismiss orphan: ${text}`);
+        btn.disabled = false;
+        return;
+      }
+    }
+    tr.classList.add("row-removed");
+    // Visually remove on the next paint; keep the row briefly for
+    // the screen reader to announce the change.
+    setTimeout(() => tr.remove(), 200);
+    // Update count + empty-state.
+    const remaining = document.querySelectorAll("#entriesBody tr:not(.row-removed)").length;
+    document.getElementById("entriesCount").textContent = `(${remaining})`;
+    if (remaining === 0) {
+      document.getElementById("entriesCard").style.display = "none";
+      document.getElementById("emptyCard").style.display = "";
+    }
+  } catch (e) {
+    alert(`Network error: ${e.message || e}`);
+    btn.disabled = false;
+  }
+}
+
+loadQueue();
+</script>
+{% endblock %}

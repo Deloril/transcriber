@@ -4075,6 +4075,283 @@ async def delete_application_endpoint(project_id: str, application_id: str) -> J
 
 
 # --------------------------------------------------------------------------- #
+# Re-anchor on transcript edit + orphan-application review queue (F4.5)
+#
+# F4.5 ships :mod:`scribe.application_reanchor` as a pure planner that
+# diffs old/new transcripts and decides per-application whether the
+# anchor is unchanged, can be re-anchored, or has been orphaned. The
+# data layer was complete in 2ce8928 (83 unit tests) but had no HTTP
+# surface. This block wires it up:
+#
+#   * ``put_transcript`` (PUT /api/job/<id>/transcript) now reads the
+#     pre-edit transcript before overwriting, computes a reanchor plan
+#     for every application across every project whose Source links to
+#     the edited job, applies the unchanged/reanchored outcomes in
+#     place, and queues orphans on the per-project orphan review queue.
+#     The PUT response gains a ``reanchor`` summary field listing the
+#     per-project counts so the editor can surface a toast.
+#   * ``GET /api/projects/<pid>/orphan_applications`` returns the queue
+#     (sorted oldest-first by ``detected_at``).
+#   * ``DELETE /api/projects/<pid>/orphan_applications/<aid>`` removes
+#     a queue entry — used after a researcher has triaged the orphan
+#     by hand (deleting the application, re-applying it, or accepting
+#     that it's truly gone).
+#   * ``GET /projects/<pid>/orphans`` renders the orphan-review page
+#     (``orphan_queue.html``).
+#   * ``source_coding.html`` exposes a "🛟 Orphan queue (N)" link in
+#     the page actions so a coder lands on the review page from the
+#     same screen they were coding on.
+#
+# Scope notes:
+#   * The reanchor pass is best-effort — a malformed application file
+#     or a project whose disk state has gone weird is logged and
+#     skipped, never crashes the transcript save. The user's edit is
+#     more important than perfect bookkeeping.
+#   * No UI re-prompt: the planner's outcomes are fully deterministic,
+#     and the orphan queue is the human-triage surface for the cases
+#     the planner couldn't resolve. We do not auto-delete orphaned
+#     applications — they keep their old anchors until a human acts.
+# --------------------------------------------------------------------------- #
+
+from . import application_reanchor as _application_reanchor  # noqa: E402
+
+
+def _reanchor_apps_for_job(
+    job_id: str,
+    old_segments: list[dict[str, Any]],
+    new_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Run the F4.5 reanchor planner across every project that links to ``job_id``.
+
+    For each project whose Source has ``transcript_job_id == job_id``:
+
+    * compute a :class:`scribe.application_reanchor.ReanchorPlan`
+      against the source's applications;
+    * apply ``unchanged`` outcomes as no-ops, ``reanchored`` outcomes
+      as in-place anchor updates (sub-word offsets dropped — the
+      docstring promise);
+    * persist orphaned outcomes to the project's
+      ``orphan_queue.json`` via
+      :func:`scribe.application_reanchor.append_orphan_entries`.
+
+    Returns one summary dict per project that had at least one
+    application checked. Each summary carries ``project_id``,
+    ``source_id``, and the three counts the editor can surface as a
+    toast. Errors per project are caught + logged so a single broken
+    project doesn't block the transcript save.
+
+    Pure file-system + lock-free; the caller already holds whatever
+    coarse locks the request needs. Within :func:`put_transcript` we
+    take :data:`PROJECTS_LOCK` around this call so a concurrent code-
+    application POST doesn't see half-rewritten files.
+    """
+    summaries: list[dict[str, Any]] = []
+    if not isinstance(old_segments, list) or not isinstance(new_segments, list):
+        return summaries
+    if not isinstance(job_id, str) or not job_id:
+        return summaries
+
+    try:
+        projects = _projects.list_projects(_projects_root())
+    except Exception:
+        return summaries
+
+    for project in projects:
+        try:
+            sources = _sources.list_sources(_projects_root(), project.id)
+        except Exception:
+            continue
+        for src in sources:
+            if (src.transcript_job_id or "") != job_id:
+                continue
+            try:
+                apps = _applications.list_applications(
+                    _projects_root(), project.id, source_id=src.id,
+                )
+            except Exception:
+                continue
+            if not apps:
+                continue
+            try:
+                plan = _application_reanchor.reanchor_applications(
+                    apps, old_segments, new_segments,
+                )
+            except Exception:
+                continue
+
+            updated_count = 0
+            unchanged_count = len(plan.unchanged)
+            orphaned_count = len(plan.orphaned)
+
+            # Apply unchanged/reanchored outcomes. Save only the
+            # reanchored ones; ``apply_reanchor_outcome`` returns the
+            # input as-is for unchanged outcomes, so saving those would
+            # only churn modified_at without a real change.
+            apps_by_id = {a.id: a for a in apps}
+            for outcome in plan.reanchored:
+                app = apps_by_id.get(outcome.application_id)
+                if app is None:
+                    continue
+                try:
+                    new_app = _application_reanchor.apply_reanchor_outcome(
+                        app, outcome,
+                    )
+                    _applications.save_application(_projects_root(), new_app)
+                    updated_count += 1
+                except Exception:
+                    continue
+
+            # Persist orphans (dedupes by application_id).
+            try:
+                _application_reanchor.record_orphans_from_plan(
+                    _projects_root(), project.id, plan, apps_by_id,
+                )
+            except Exception:
+                pass
+
+            summaries.append({
+                "project_id": project.id,
+                "source_id": src.id,
+                "checked": len(apps),
+                "unchanged": unchanged_count,
+                "reanchored": updated_count,
+                "orphaned": orphaned_count,
+            })
+    return summaries
+
+
+def _read_transcript_segments(out_dir: Path) -> list[dict[str, Any]]:
+    """Best-effort read of the transcript currently on disk for a job.
+
+    Prefers ``edited.json`` (the editor's authoritative version), falls
+    back to any ``*.json`` sibling that isn't ``edited.json`` (the same
+    rule the QDPX exporter and a few other readers use). Returns ``[]``
+    if nothing is readable — F4.5's planner treats every application
+    as orphaned in that case, which is the right thing: we have no
+    "old" reference to match against.
+    """
+    if not out_dir.exists():
+        return []
+    edited = out_dir / "edited.json"
+    candidates: list[Path] = []
+    if edited.is_file():
+        candidates.append(edited)
+    candidates.extend(
+        sorted(p for p in out_dir.glob("*.json") if p.name != "edited.json")
+    )
+    for p in candidates:
+        try:
+            payload = json.loads(p.read_text())
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            segs = payload.get("segments")
+            if isinstance(segs, list):
+                return segs
+    return []
+
+
+@app.get("/api/projects/{project_id}/orphan_applications")
+async def list_orphan_applications_endpoint(project_id: str) -> JSONResponse:
+    """List the project's orphan-review queue (F4.5).
+
+    Each entry carries enough context for a reviewer to relocate /
+    delete / re-apply the orphaned application even after further
+    edits: the original word-id range, a snapshot of the anchored
+    text, the failure ``reason`` from the planner, and ``detected_at``.
+
+    Sorted by ``detected_at`` ascending (oldest orphans first) so a
+    long-running project's review queue is FIFO.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            entries = _application_reanchor.load_orphan_queue(
+                _projects_root(), project_id,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({
+        "orphans": [e.to_dict() for e in entries],
+        "count": len(entries),
+    })
+
+
+@app.delete(
+    "/api/projects/{project_id}/orphan_applications/{application_id}"
+)
+async def remove_orphan_application_endpoint(
+    project_id: str, application_id: str,
+) -> JSONResponse:
+    """Remove one entry from the project's orphan queue (F4.5).
+
+    Used after a reviewer has triaged the orphan: deleting the
+    underlying application, re-applying it manually, or accepting
+    that the text is truly gone. 404 if the entry isn't there;
+    otherwise 200 with ``{"ok": true}``.
+
+    Note: this does *not* delete the underlying Application — that
+    goes through the existing
+    :func:`delete_application_endpoint`. The orphan queue is a
+    separate, append-add review surface.
+    """
+    _check_project_id(project_id)
+    _check_application_id(application_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            removed = _application_reanchor.remove_from_orphan_queue(
+                _projects_root(), project_id, application_id,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    if not removed:
+        raise HTTPException(404, "Orphan entry not found")
+    return JSONResponse({"ok": True})
+
+
+@app.get("/projects/{project_id}/orphans", response_class=HTMLResponse)
+async def project_orphans_page(
+    request: Request, project_id: str,
+) -> HTMLResponse:
+    """Orphan-review page (F4.5).
+
+    Lists every orphan-queue entry with its anchored text snapshot,
+    failure reason, and detection timestamp. Each row offers two
+    actions:
+
+    * **Delete application** — calls
+      ``DELETE /api/projects/<pid>/applications/<aid>`` (the F4.1
+      Remove route). If the application was already gone, the call
+      404s; we still let the reviewer dismiss the queue entry.
+    * **Dismiss from queue** — calls
+      ``DELETE /api/projects/<pid>/orphan_applications/<aid>``. Used
+      when the reviewer has re-applied the code by hand or accepts
+      the gap.
+
+    The page does **not** auto-delete; every action is explicit and
+    audit-trail-friendly.
+    """
+    pid = _project_id_or_404(project_id)
+    project = None
+    try:
+        with PROJECTS_LOCK:
+            project = _projects.load_project(_projects_root(), pid)
+    except Exception:
+        project = None
+    return templates.TemplateResponse(request, "orphan_queue.html", {
+        "project_id": pid,
+        "project_name": getattr(project, "name", None),
+        "page_title": "Orphan applications",
+        "subtitle": (
+            "Code applications whose anchored text could no longer "
+            "be located after a transcript edit. Triage one by one."
+        ),
+    })
+
+
+# --------------------------------------------------------------------------- #
 # Memos (F5.1) + right-click memo creation (F5.2)
 #
 # F5.1 added the on-disk Memo entity. F5.2 closes the loop with the
@@ -6548,6 +6825,15 @@ async def put_transcript(job_id: str, request: Request) -> JSONResponse:
             raise HTTPException(404, "Job not found")
         out_dir = job.output_dir.resolve()
         input_stem = job.input_path.stem
+        # Snapshot the existing transcript *before* we overwrite it.
+        # F4.5 (re-anchor on transcript edit) needs a copy of the
+        # pre-edit segments to diff against the new payload. Prefer
+        # the in-memory ``job.result`` over disk because it's cheaper
+        # and matches the editor's last view; fall back to disk when
+        # the server has restarted between edits.
+        previous_payload: dict[str, Any] | None = None
+        if isinstance(job.result, dict):
+            previous_payload = job.result
 
     if not _is_under(out_dir, OUTPUT_DIR):
         raise HTTPException(403, "Forbidden")
@@ -6564,6 +6850,20 @@ async def put_transcript(job_id: str, request: Request) -> JSONResponse:
 
     if not isinstance(payload, dict) or "segments" not in payload:
         raise HTTPException(400, "Expected JSON object with 'segments'")
+
+    # F4.5 — capture the *old* segments before we overwrite the file,
+    # so we can re-anchor any code applications that point at this
+    # transcript. The fall-back to disk runs only when JOBS doesn't
+    # carry a ``result`` (cold start after restart, unfinished job).
+    if previous_payload is None or not isinstance(
+        previous_payload.get("segments"), list,
+    ):
+        previous_payload = {
+            "segments": _read_transcript_segments(out_dir),
+        }
+    old_segments = previous_payload.get("segments")
+    if not isinstance(old_segments, list):
+        old_segments = []
 
     # Persist the edited JSON
     edited = _edited_path(out_dir)
@@ -6591,7 +6891,22 @@ async def put_transcript(job_id: str, request: Request) -> JSONResponse:
         # The JSON was saved; the regeneration failed — surface that to the client.
         raise HTTPException(500, f"Saved JSON but failed to regenerate sidecars: {e}")
 
-    return JSONResponse({"ok": True, "saved_at": datetime.utcnow().isoformat() + "Z"})
+    # F4.5 — fan out across every project whose Source links to this
+    # job. Errors per project are caught in the helper so a transcript
+    # save never fails because of an orphan-queue write.
+    new_segments = payload.get("segments")
+    if not isinstance(new_segments, list):
+        new_segments = []
+    with PROJECTS_LOCK:
+        reanchor_summaries = _reanchor_apps_for_job(
+            job_id, old_segments, new_segments,
+        )
+
+    return JSONResponse({
+        "ok": True,
+        "saved_at": datetime.utcnow().isoformat() + "Z",
+        "reanchor": reanchor_summaries,
+    })
 
 
 # --------------------------------------------------------------------------- #

@@ -7,6 +7,21 @@
 {% block actions %}
   <a class="btn secondary" href="/projects/{{ project_id }}/sources">← Sources</a>
   <a id="editLink" class="btn secondary" target="_blank" rel="noopener" href="#" style="display:none">Open in editor ↗</a>
+  {# F4.5 — orphan queue review surface. The badge is hydrated by JS
+     so a coder always sees the live count without a refresh. The
+     link is rendered unconditionally so the test harness can find
+     it; a count of zero is the natural "queue is clean" state. #}
+  <a id="orphanQueueLink" class="btn secondary"
+     href="/projects/{{ project_id }}/orphans"
+     data-test-feature="F4.5"
+     data-test-id="src-orphan-queue-link"
+     title="Orphaned code applications — anchors lost to a transcript edit">
+    🛟 Orphan queue
+    <span id="orphanQueueCount"
+          class="hint"
+          data-test-id="src-orphan-queue-count"
+          style="font-size:11px;margin-left:4px"></span>
+  </a>
 {% endblock %}
 
 {% block extra_styles %}
@@ -650,6 +665,32 @@ async function fetchJSON(url) {
   return r.json();
 }
 
+// F4.5 — orphan queue badge. The badge is updated from this hook;
+// the link itself always renders (so the user can always reach the
+// review surface, even when the queue is empty). On error we leave
+// the badge blank rather than spamming an alert; the link still
+// works and lands on a page that surfaces the failure.
+async function refreshOrphanQueueCount() {
+  const lbl = document.getElementById("orphanQueueCount");
+  if (!lbl) return;
+  try {
+    const r = await fetch(
+      `/api/projects/${encodeURIComponent(PROJECT_ID)}/orphan_applications`
+    );
+    if (!r.ok) {
+      lbl.textContent = "";
+      return;
+    }
+    const body = await r.json();
+    const count = (body && typeof body.count === "number")
+      ? body.count
+      : ((body && Array.isArray(body.orphans)) ? body.orphans.length : 0);
+    lbl.textContent = count > 0 ? `(${count})` : "";
+  } catch (e) {
+    lbl.textContent = "";
+  }
+}
+
 async function loadAll() {
   const loading = document.getElementById("loadingCard");
   const errorCard = document.getElementById("errorCard");
@@ -691,6 +732,10 @@ async function loadAll() {
     loadParticipantRoster();
     // F3.4 — speakers panel: same non-blocking contract.
     loadSpeakerMap();
+    // F4.5 — orphan queue badge: fire and forget. The link is always
+    // visible; this just hydrates the count so a coder sees pending
+    // triage without leaving the page.
+    refreshOrphanQueueCount();
   } catch (e) {
     loading.style.display = "none";
     errorCard.textContent = `Couldn't load: ${e.message}`;
