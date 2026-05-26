@@ -349,6 +349,160 @@ class TestCodebookEditorTemplate:
         for status in ("active", "draft", "retired"):
             assert f'value="{status}"' in text
 
+    def test_revision_history_button_renders(self, env) -> None:
+        """F2.2 surface: the codebook editor must expose a control that
+        opens the revision history panel and reads
+        GET /api/projects/<pid>/codes/<cid>/versions. Without this
+        button the F2.2 audit trail is invisible to the user."""
+        client, _ = env
+        pid = _new_project(client)
+        r = client.get(f"/projects/{pid}/codebook")
+        assert r.status_code == 200
+        text = r.text
+        # Button and panel containers.
+        assert 'id="cb-history-btn"' in text, (
+            "codebook editor missing the F2.2 'Revision history' button"
+        )
+        assert 'id="cb-history-panel"' in text
+        assert 'id="cb-history-list"' in text
+        # The change-note input drives F2.2 versioning; it's the
+        # companion field to the history button.
+        assert 'id="cb-change-note"' in text
+        # The JS fetch URL referencing the new endpoint must be
+        # inlined so the button actually calls something.
+        assert "/codes/${editingCodeId}/versions" in text
+
+
+# --------------------------------------------------------------------------- #
+# F2.2: Revision history endpoint
+# --------------------------------------------------------------------------- #
+
+
+class TestCodeVersionsEndpoint:
+    """GET /api/projects/<pid>/codes/<cid>/versions.
+
+    F2.2's append-only definition log is built by the loop's prior
+    work; this exposes it through HTTP so the codebook editor's
+    revision-history panel can render it. Without this endpoint, the
+    audit trail F4.1 / F9.2 depend on is invisible to the user.
+    """
+
+    def _make_code(self, client: TestClient, pid: str) -> str:
+        r = client.post(
+            f"/api/projects/{pid}/codes",
+            json={
+                "name": "managing pain",
+                "definition": "v1 — first pass",
+            },
+        )
+        assert r.status_code == 201, r.text
+        return r.json()["id"]
+
+    def test_lists_initial_version_after_create(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        cid = self._make_code(client, pid)
+        r = client.get(f"/api/projects/{pid}/codes/{cid}/versions")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "versions" in body
+        versions = body["versions"]
+        assert len(versions) == 1
+        v0 = versions[0]
+        assert v0["version"] == 1
+        assert v0["change_note"] == "initial"
+        # Definition + name were populated, so they appear in
+        # changed_fields for the initial snapshot.
+        assert "name" in v0["changed_fields"]
+        assert "definition" in v0["changed_fields"]
+        # Snapshot round-trips the full Code state.
+        assert v0["snapshot"]["id"] == cid
+        assert v0["snapshot"]["name"] == "managing pain"
+        # Version id is present and 12 hex chars.
+        assert isinstance(v0["id"], str)
+        assert len(v0["id"]) == 12
+
+    def test_lists_new_version_after_definition_edit(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        cid = self._make_code(client, pid)
+        # Edit the definition — should produce v2.
+        r = client.patch(
+            f"/api/projects/{pid}/codes/{cid}",
+            json={
+                "definition": "v2 — sharpened after focused pass",
+                "change_note": "broadened after focused pass",
+            },
+        )
+        assert r.status_code == 200, r.text
+        r = client.get(f"/api/projects/{pid}/codes/{cid}/versions")
+        assert r.status_code == 200
+        versions = r.json()["versions"]
+        assert len(versions) == 2
+        # v1 first (chronological order).
+        assert versions[0]["version"] == 1
+        assert versions[1]["version"] == 2
+        # The diff for v2 mentions only the field that actually changed.
+        assert versions[1]["changed_fields"] == ["definition"]
+        assert versions[1]["change_note"] == "broadened after focused pass"
+
+    def test_metadata_only_edit_does_not_record_new_version(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        cid = self._make_code(client, pid)
+        # Toggling colour / status / stage is metadata only — no new
+        # version line per F2.2's DEFINITION_FIELDS contract.
+        r = client.patch(
+            f"/api/projects/{pid}/codes/{cid}",
+            json={"colour": "#abcdef", "status": "draft"},
+        )
+        assert r.status_code == 200, r.text
+        r = client.get(f"/api/projects/{pid}/codes/{cid}/versions")
+        assert r.status_code == 200
+        versions = r.json()["versions"]
+        assert len(versions) == 1, (
+            f"metadata-only edit should not append a version; got "
+            f"{len(versions)}: {versions}"
+        )
+
+    def test_404_on_missing_code(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        r = client.get(f"/api/projects/{pid}/codes/aaaaaaaaaaaa/versions")
+        assert r.status_code == 404
+
+    def test_400_on_invalid_code_id(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        r = client.get(f"/api/projects/{pid}/codes/NOT-HEX/versions")
+        assert r.status_code == 400
+
+    def test_404_on_missing_project(self, env) -> None:
+        client, _ = env
+        r = client.get("/api/projects/aaaaaaaaaaaa/codes/bbbbbbbbbbbb/versions")
+        assert r.status_code == 404
+
+    def test_response_is_chronological(self, env) -> None:
+        """Three sequential definition edits should appear as v1, v2,
+        v3 in that order; the UI then reverses them for display, but
+        the API stays chronological so reports can rely on it."""
+        client, _ = env
+        pid = _new_project(client)
+        cid = self._make_code(client, pid)
+        for v_def, note in (
+            ("v2 second pass", "after re-reading"),
+            ("v3 third pass", "tightened exclusion"),
+        ):
+            r = client.patch(
+                f"/api/projects/{pid}/codes/{cid}",
+                json={"definition": v_def, "change_note": note},
+            )
+            assert r.status_code == 200, r.text
+        r = client.get(f"/api/projects/{pid}/codes/{cid}/versions")
+        body = r.json()
+        ordinals = [v["version"] for v in body["versions"]]
+        assert ordinals == [1, 2, 3]
+
 
 class TestApplicationsREST:
     def _setup(self, client: TestClient) -> tuple[str, str, str]:

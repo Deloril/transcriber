@@ -1546,6 +1546,65 @@ async def delete_code_endpoint(project_id: str, code_id: str) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+@app.get("/api/projects/{project_id}/codes/{code_id}/versions")
+async def list_code_versions_endpoint(
+    project_id: str, code_id: str
+) -> JSONResponse:
+    """Return the F2.2 revision history for a code.
+
+    Each entry exposes the version id, ordinal, timestamp, optional
+    change note, and a diff-summary listing which DEFINITION_FIELDS
+    changed relative to the previous version. The first version's diff
+    is the full set of populated fields ("initial").
+
+    The response is the surface the codebook editor's "Revision history"
+    panel consumes; F9.2's definition-at-apply audit reports get the
+    same data via :mod:`scribe.code_versions` directly.
+    """
+    _check_project_id(project_id)
+    _check_code_id(code_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        # Confirm the code itself still exists; an existing version log
+        # for a deleted code shouldn't be silently exposed.
+        try:
+            _codes.load_code(_projects_root(), project_id, code_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Code not found")
+        versions = _code_versions.read_code_versions(
+            _projects_root(), project_id, code_id
+        )
+
+    # Build a diff summary per version: which DEFINITION_FIELDS differ
+    # from the previous version. The first version's "diff" is the set
+    # of populated fields, marking it as the initial snapshot.
+    out: list[dict] = []
+    prev_sig: dict | None = None
+    for v in versions:
+        sig = _code_versions.definition_signature(v.snapshot)
+        if prev_sig is None:
+            changed = sorted(
+                f for f, val in sig.items()
+                if val not in (None, "", [], {})
+            )
+        else:
+            changed = sorted(
+                f for f in _code_versions.DEFINITION_FIELDS
+                if sig.get(f) != prev_sig.get(f)
+            )
+        out.append({
+            "id": v.id,
+            "version": v.version,
+            "created_at": v.created_at,
+            "change_note": v.change_note,
+            "changed_fields": changed,
+            "snapshot": v.snapshot,
+        })
+        prev_sig = sig
+
+    return JSONResponse({"versions": out})
+
+
 @app.get("/api/projects/{project_id}/applications")
 async def list_applications_endpoint(
     project_id: str, source_id: str = "", code_id: str = ""

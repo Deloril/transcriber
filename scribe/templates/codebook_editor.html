@@ -97,6 +97,50 @@
     padding: 4px 0; user-select: none;
   }
   details.cb-advanced > summary:hover { color: var(--text); }
+
+  /* F2.2: revision history panel */
+  .cb-history-panel {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--border);
+  }
+  .cb-history-panel h3 {
+    margin: 0 0 6px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--muted);
+  }
+  .cb-history-panel .hint { margin-top: 0; }
+  .cb-history-list {
+    display: flex; flex-direction: column; gap: 6px;
+    margin-top: 10px;
+  }
+  .cb-history-row {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+  .cb-history-row .cb-history-head {
+    display: flex; align-items: baseline; gap: 8px;
+    flex-wrap: wrap;
+  }
+  .cb-history-row .cb-history-version {
+    font-weight: 600; color: var(--text);
+  }
+  .cb-history-row .cb-history-when { color: var(--muted); font-size: 11px; }
+  .cb-history-row .cb-history-note {
+    margin-top: 4px; color: var(--text); font-style: italic;
+  }
+  .cb-history-row .cb-history-fields {
+    margin-top: 4px; color: var(--muted); font-size: 11px;
+  }
+  .cb-history-row .cb-history-fields code {
+    background: var(--panel); padding: 1px 5px; border-radius: 3px;
+    margin-right: 4px; font-size: 11px;
+  }
 {% endblock %}
 
 {% block body %}
@@ -190,9 +234,30 @@
 
       <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
         <button class="btn" type="submit" id="cb-submit">Add code</button>
+        <button class="btn secondary" type="button" id="cb-history-btn" style="display:none">📜 Revision history</button>
         <span id="cb-msg" class="hint" role="alert" aria-live="polite"></span>
       </div>
     </form>
+
+    <!--
+      F2.2 revision history panel. Toggled by the "Revision history"
+      button when a code is being edited; reads
+      GET /api/projects/<pid>/codes/<cid>/versions and renders one row
+      per immutable definition snapshot, marking the fields that
+      changed relative to the previous version. Definition-only edits
+      record a new version; cosmetic edits (colour, status) don't
+      pollute the log.
+    -->
+    <section
+      id="cb-history-panel"
+      class="cb-history-panel"
+      style="display:none"
+      aria-live="polite"
+    >
+      <h3>Revision history</h3>
+      <p class="hint" id="cb-history-hint">Loading…</p>
+      <div id="cb-history-list" class="cb-history-list"></div>
+    </section>
   </div>
 </div>
 {% endblock %}
@@ -378,8 +443,15 @@ function setMode(code) {
   const hint = document.getElementById("cb-edit-hint");
   const colourInput = document.getElementById("cb-colour");
   const changeNote = document.getElementById("cb-change-note");
+  const historyBtn = document.getElementById("cb-history-btn");
+  const historyPanel = document.getElementById("cb-history-panel");
+  // Always collapse the history panel when switching contexts; it's
+  // only meaningful for the currently-edited code.
+  historyPanel.style.display = "none";
+  document.getElementById("cb-history-list").innerHTML = "";
   if (code) {
     editingCodeId = code.id;
+    historyBtn.style.display = "";
     title.textContent = `Edit "${code.name}"`;
     submit.textContent = "Save changes";
     cancel.style.display = "";
@@ -409,6 +481,7 @@ function setMode(code) {
     );
   } else {
     editingCodeId = null;
+    historyBtn.style.display = "none";
     title.textContent = "New code";
     submit.textContent = "Add code";
     cancel.style.display = "none";
@@ -424,6 +497,83 @@ function setMode(code) {
   }
   renderList();
 }
+
+// --------------------------------------------------------------------- //
+// F2.2 — Revision history panel
+//
+// Toggled by the "Revision history" button when a code is being
+// edited. Pulls GET /api/projects/<pid>/codes/<cid>/versions and
+// renders one row per immutable definition snapshot. The panel is
+// read-only — it surfaces the audit trail; edits still happen through
+// the form above.
+// --------------------------------------------------------------------- //
+
+function renderHistoryRows(versions) {
+  const list = document.getElementById("cb-history-list");
+  list.innerHTML = "";
+  if (!versions.length) {
+    return;
+  }
+  // Reverse-chronological — most recent edit first is what a researcher
+  // wants to see when they pop the panel after a save.
+  const sorted = versions.slice().reverse();
+  sorted.forEach(v => {
+    const row = document.createElement("div");
+    row.className = "cb-history-row";
+    row.dataset.version = String(v.version);
+    const fields = (v.changed_fields || []).map(f =>
+      `<code>${escapeHtml(f)}</code>`
+    ).join("");
+    const noteHtml = v.change_note
+      ? `<div class="cb-history-note">“${escapeHtml(v.change_note)}”</div>`
+      : "";
+    const fieldsHtml = fields
+      ? `<div class="cb-history-fields">Changed: ${fields}</div>`
+      : `<div class="cb-history-fields">Initial definition</div>`;
+    row.innerHTML = `
+      <div class="cb-history-head">
+        <span class="cb-history-version">v${escapeHtml(String(v.version))}</span>
+        <span class="cb-history-when">${escapeHtml(v.created_at || "")}</span>
+      </div>
+      ${noteHtml}
+      ${fieldsHtml}
+    `;
+    list.appendChild(row);
+  });
+}
+
+async function toggleHistoryPanel() {
+  const panel = document.getElementById("cb-history-panel");
+  const hint = document.getElementById("cb-history-hint");
+  if (!editingCodeId) return;
+  const isOpen = panel.style.display !== "none";
+  if (isOpen) {
+    panel.style.display = "none";
+    return;
+  }
+  panel.style.display = "";
+  hint.textContent = "Loading…";
+  hint.style.color = "var(--muted)";
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/codes/${editingCodeId}/versions`
+    );
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const body = await r.json();
+    const versions = body.versions || [];
+    if (!versions.length) {
+      hint.textContent = "No revisions recorded yet.";
+      return;
+    }
+    hint.textContent = `${versions.length} revision${versions.length === 1 ? "" : "s"} recorded.`;
+    renderHistoryRows(versions);
+  } catch (err) {
+    hint.textContent = `Couldn't load history: ${err.message}`;
+    hint.style.color = "var(--err)";
+  }
+}
+
+document.getElementById("cb-history-btn").addEventListener("click", toggleHistoryPanel);
 
 document.getElementById("cb-cancel").addEventListener("click", () => setMode(null));
 
