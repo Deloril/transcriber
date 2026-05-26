@@ -2816,3 +2816,67 @@ export function formatSavedQueryRunSummary(sq, { nowFn } = {}) {
   } catch (_) { /* keep raw ISO */ }
   return `last run ${when} · ${count} ×`;
 }
+
+
+// ----------------------------------------------------------------------
+// F6.7 — Anonymised export rule parser.
+//
+// The project-settings page (project_settings.html) lets researchers
+// supply optional custom redaction rules alongside the participants'
+// pseudonyms before POSTing to /api/projects/<pid>/qdpx/anonymised.
+// Users type one rule per line in the format:
+//
+//   pattern => replacement           // literal substring rule
+//   re:pattern => replacement        // regex rule
+//
+// This helper turns that newline-delimited text into the JSON shape
+// the server endpoint accepts:
+//
+//   [{ pattern, replacement, regex? }]
+//
+// Returns ``{ rules, error }``. ``error`` is ``null`` on success and a
+// human-readable string on failure (so the page can show it inline);
+// ``rules`` is empty when ``error`` is non-null. Empty / whitespace-only
+// lines are skipped without error. The same logic lives inline in the
+// template's non-module script so the UI doesn't have to convert to
+// ``type="module"``; this is the canonical, Vitest-covered source.
+// ----------------------------------------------------------------------
+export function parseAnonymisedRulesText(raw) {
+  if (raw == null) return { rules: [], error: null };
+  if (typeof raw !== "string") {
+    return { rules: [], error: "input must be a string" };
+  }
+  const out = [];
+  const lines = raw.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const idx = line.indexOf("=>");
+    if (idx < 0) {
+      return {
+        rules: [],
+        error: `line ${i + 1}: expected "pattern => replacement"`,
+      };
+    }
+    let pattern = line.slice(0, idx).trim();
+    const replacement = line.slice(idx + 2).trim();
+    if (!pattern) {
+      return { rules: [], error: `line ${i + 1}: empty pattern` };
+    }
+    let regex = false;
+    if (pattern.startsWith("re:")) {
+      regex = true;
+      pattern = pattern.slice(3).trim();
+      if (!pattern) {
+        return {
+          rules: [],
+          error: `line ${i + 1}: empty regex pattern after "re:"`,
+        };
+      }
+    }
+    const rule = { pattern, replacement };
+    if (regex) rule.regex = true;
+    out.push(rule);
+  }
+  return { rules: out, error: null };
+}

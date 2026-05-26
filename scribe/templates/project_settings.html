@@ -194,6 +194,60 @@
   </p>
 </div>
 
+{# F6.7: Anonymised export.
+   The anonymised QDPX endpoint shipped in 086e0a1 (POST
+   /api/projects/<pid>/qdpx/anonymised) but no template surfaced it —
+   the only path to redacted exports was a curl POST. This card wires
+   the user-facing surface: each Participant's ``name → pseudonym``
+   pair becomes a redaction rule automatically, every speaker map's
+   resolved display name does too, and researchers can layer extra
+   rules via the textarea (one ``pattern → replacement`` per line, or
+   raw JSON). The note rides into the bundle's
+   ``Redactions/manifest.json`` for audit-trail purposes. The button
+   POSTs JSON, reads the response as a Blob, and triggers a download
+   without leaving the page. #}
+<div class="card ps-section" data-test-feature="F6.7">
+  <h2>Anonymised export (redacted REFI-QDA / QDPX)</h2>
+  <p class="ps-help">
+    Download a <strong>redacted</strong> REFI-QDA / QDPX archive: every
+    participant's <code>name → pseudonym</code>, plus your speaker-map
+    display names, are substituted across transcripts, codes, memos, and
+    the codebook before bundling. The archive carries a
+    <code>Redactions/manifest.json</code> sidecar listing match counts
+    (never the original identifiers — that would defeat the purpose).
+    Use this for pre-publication shares, IRB submissions, or any time the
+    raw identifiers must not leave your machine.
+  </p>
+  <details style="margin: 8px 0 12px">
+    <summary style="cursor:pointer; color: var(--muted); font-size: 12px;">
+      Add custom redaction rules (optional)
+    </summary>
+    <div style="margin-top: 10px">
+      <label for="anon-rules" class="field-label">Extra rules <span class="hint">— one per line, format <code>pattern =&gt; replacement</code>; lines starting with <code>re:</code> are regex</span></label>
+      <textarea id="anon-rules" rows="4" maxlength="8000" class="field-input"
+                placeholder="e.g.&#10;Mercy General =&gt; [hospital]&#10;re:\d{3}-\d{4} =&gt; [phone]"></textarea>
+      <p class="ps-help">Custom rules layer over the participant + speaker rules. Empty lines are ignored.</p>
+    </div>
+    <div style="margin-top: 10px">
+      <label for="anon-note" class="field-label">Note for the manifest <span class="hint">— audit trail only</span></label>
+      <input id="anon-note" type="text" maxlength="500" class="field-input"
+             placeholder="e.g. Pre-publication anon pass — IRB submission 2026-06">
+    </div>
+  </details>
+  <p>
+    <a class="ps-bundle-link"
+       href="#"
+       id="exportAnonymisedQdpxBtn"
+       data-test-id="ps-anonymised-qdpx-btn"
+       data-test-feature="F6.7"
+       data-endpoint="/api/projects/{{ project_id }}/qdpx/anonymised"
+       title="POST a JSON body to /api/projects/<pid>/qdpx/anonymised and download the redacted .qdpx archive.">
+      ⬇ Download anonymised QDPX
+    </a>
+    <span id="anonymisedMsg" class="hint" role="alert" aria-live="polite" style="margin-left: 10px"></span>
+  </p>
+</div>
+
 <script>
 const PROJECT_ID = {{ project_id | tojson }};
 
@@ -321,5 +375,124 @@ document.getElementById("psPrefsForm").addEventListener("submit", async (e) => {
 });
 
 load();
+
+// ----------------------------------------------------------------------
+// F6.7 — anonymised QDPX export.
+//
+// The endpoint is POST (not GET like F6.4) because the body carries
+// the optional redaction rules + note. We can't use ``<a download>``;
+// instead we POST JSON, read the response as a Blob, and trigger a
+// download via a synthetic ``<a>`` click on a created object URL.
+// Errors (400 invalid regex / 404 missing project) surface inline next
+// to the button so the user doesn't have to dig through devtools.
+// ----------------------------------------------------------------------
+
+// Parse the rules textarea into the JSON shape the endpoint accepts.
+//
+//   pattern => replacement        →  literal substring rule
+//   re:pattern => replacement     →  regex rule (anchored where it would be)
+//
+// Empty lines are skipped. Lines without `=>` are reported as a parse
+// error (returned in the second tuple slot) so the JS handler can show
+// the user a readable error instead of a 400 from the server.
+function parseAnonymisedRulesText(raw) {
+  const out = [];
+  if (!raw || typeof raw !== "string") return { rules: out, error: null };
+  const lines = raw.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const idx = line.indexOf("=>");
+    if (idx < 0) {
+      return { rules: [], error: `line ${i + 1}: expected "pattern => replacement"` };
+    }
+    let pattern = line.slice(0, idx).trim();
+    const replacement = line.slice(idx + 2).trim();
+    if (!pattern) {
+      return { rules: [], error: `line ${i + 1}: empty pattern` };
+    }
+    let regex = false;
+    if (pattern.startsWith("re:")) {
+      regex = true;
+      pattern = pattern.slice(3).trim();
+      if (!pattern) {
+        return { rules: [], error: `line ${i + 1}: empty regex pattern after "re:"` };
+      }
+    }
+    const rule = { pattern, replacement };
+    if (regex) rule.regex = true;
+    out.push(rule);
+  }
+  return { rules: out, error: null };
+}
+
+// Hang the helper off `window` so the test harness (and devtools) can
+// poke at it without re-importing. Templates can't use ES module
+// imports because the script tag isn't ``type="module"`` here.
+if (typeof window !== "undefined") {
+  window.parseAnonymisedRulesText = parseAnonymisedRulesText;
+}
+
+const anonBtn = document.getElementById("exportAnonymisedQdpxBtn");
+const anonMsg = document.getElementById("anonymisedMsg");
+if (anonBtn) {
+  anonBtn.addEventListener("click", async (e) => {
+    e.preventDefault();
+    const rulesText = document.getElementById("anon-rules").value || "";
+    const note = (document.getElementById("anon-note").value || "").trim();
+    const parsed = parseAnonymisedRulesText(rulesText);
+    if (parsed.error) {
+      anonMsg.textContent = `Couldn't parse rules: ${parsed.error}`;
+      anonMsg.style.color = "var(--err)";
+      return;
+    }
+    const body = {};
+    if (parsed.rules.length) body.rules = parsed.rules;
+    if (note) body.note = note;
+    const endpoint = anonBtn.getAttribute("data-endpoint");
+    anonBtn.classList.add("disabled");
+    anonBtn.style.pointerEvents = "none";
+    anonMsg.textContent = "Building redacted archive…";
+    anonMsg.style.color = "var(--muted)";
+    try {
+      const r = await fetch(endpoint, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        let detail = `HTTP ${r.status}`;
+        try {
+          const j = await r.json();
+          if (j && j.detail) detail = j.detail;
+        } catch (_) { /* fall through */ }
+        throw new Error(detail);
+      }
+      // Pull the slugified filename from Content-Disposition.
+      let filename = "project-anon.qdpx";
+      const cd = r.headers.get("content-disposition") || "";
+      const m = cd.match(/filename="([^"]+)"/);
+      if (m) filename = m[1];
+      const subs = r.headers.get("x-scribe-anon-substitutions") || "0";
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      anonMsg.textContent = `Downloaded — ${subs} substitution${subs === "1" ? "" : "s"} applied`;
+      anonMsg.style.color = "var(--ok)";
+    } catch (err) {
+      anonMsg.textContent = `Couldn't build archive: ${err.message}`;
+      anonMsg.style.color = "var(--err)";
+    } finally {
+      anonBtn.classList.remove("disabled");
+      anonBtn.style.pointerEvents = "";
+    }
+  });
+}
 </script>
 {% endblock %}
