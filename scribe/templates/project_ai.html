@@ -252,9 +252,15 @@
       proposals are kept as audit rows under
       <code>/ai/new-code-suggestions</code> per F9.6.
     </li>
-    <li>
+    <li data-test-feature="F8.5" data-test-id="ai-surface-f8-5">
       <strong>Find similar quotes</strong> (<code>F8.5</code>) — per-application
-      action on the source-coding view.
+      action on the source-coding view: open a transcript with at least one
+      coded segment and click the
+      "🔎 Find similar quotes" button on any <code>.app-row</code>. The
+      ranked list comes back from <code>POST /ai/quote-searches</code>
+      and is logged for the F9.6 audit trail. No LLM call — pure
+      embedding-space nearest-neighbour search over the F8.2 index, so
+      this is the safest of the AI features.
     </li>
     <li>
       <strong>Whole-transcript review pass</strong> (<code>F8.6</code>) —

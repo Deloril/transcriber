@@ -7464,6 +7464,237 @@ async def delete_project_embedding_index_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Find similar quotes (F8.5)
+#
+# F8.5 is the safest AI affordance per PLANNING.md: pure embedding-space
+# nearest-neighbour search over the F8.2 index. No LLM call, no category
+# judgement, no decision lifecycle — just "show me other quotes that
+# look like this one". The user starts a search either:
+#
+#   * from a coded segment (.app-row "🔎 Find similar quotes" button) —
+#     the seed is the application_id; the engine reuses its index entry
+#     so we don't burn an embed call on a vector we already have, OR
+#   * from free-form text (future: a panel input). Today the surface is
+#     application-only because that's the high-traffic case.
+#
+# The route is gated by F8.10 like the suggestion routes (412 if the
+# project hasn't met the hand-coded threshold). The persisted
+# QuoteSearch row is the audit record (F9.6) — even null-result
+# searches stay on disk so "I asked the model X at time T" stays in
+# the history.
+# --------------------------------------------------------------------------- #
+
+from . import quote_similarity as _quote_similarity  # noqa: E402
+from . import ai_invocation_log as _ai_invocation_log  # noqa: E402
+
+
+@app.post("/api/projects/{project_id}/ai/quote-searches")
+async def post_quote_search_endpoint(
+    project_id: str, request: Request,
+) -> JSONResponse:
+    """F8.5 — find quotes semantically similar to a span or text.
+
+    Body shape (one of two modes):
+
+        # application-mode: seed from an existing coded segment
+        {
+          "source_id": "<sid>",
+          "application_id": "<aid>",   # 12-char hex
+          "top_k": 10,                  # optional, 1..50
+          "min_score": 0.0,             # optional, in [-1, 1]
+          "kind_filter": "coded_segment" | "uncoded_paragraph" | null,
+          "code_id_filter": "<cid>" | null,
+          "exclude_source_ids": ["<sid>", ...],
+          "exclude_code_ids": ["<cid>", ...],
+          "exclude_seed": true,         # default true; drops the seed
+        }
+
+        # text-mode: free-form query
+        {
+          "query_text": "the participant describes coping",
+          ...same filter knobs as above
+        }
+
+    Returns the persisted QuoteSearch dict (matches list included).
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    # Decide mode: application_id present → application; else text.
+    application_id = (body.get("application_id") or "").strip() or None
+    source_id = (body.get("source_id") or "").strip() or None
+    query_text = body.get("query_text") or ""
+    if not application_id and not str(query_text).strip():
+        raise HTTPException(
+            400,
+            "Provide either application_id (+ source_id) or query_text",
+        )
+
+    # Optional filters / knobs.
+    top_k = body.get("top_k", _quote_similarity.DEFAULT_TOP_K)
+    min_score = body.get("min_score", _quote_similarity.DEFAULT_MIN_SCORE)
+    kind_filter = body.get("kind_filter") or None
+    source_id_filter = body.get("source_id_filter") or None
+    code_id_filter = body.get("code_id_filter") or None
+    exclude_source_ids = body.get("exclude_source_ids") or ()
+    exclude_code_ids = body.get("exclude_code_ids") or ()
+    # exclude_seed defaults True for application mode (the natural ask),
+    # False otherwise — matches the engine default.
+    exclude_seed = bool(body.get("exclude_seed", True))
+    notes = body.get("notes") or ""
+
+    try:
+        top_k_i = int(top_k)
+        min_score_f = float(min_score)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "top_k must be an int and min_score must be a float")
+    if top_k_i < 1 or top_k_i > 100:
+        raise HTTPException(400, "top_k must be in [1, 100]")
+    if min_score_f < -1.0 or min_score_f > 1.0:
+        raise HTTPException(400, "min_score must be in [-1, 1]")
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+
+        # AI gate (F8.10). F8.5 is gateable like the other AI features.
+        # Per PLANNING.md F8.10 a project can choose to exempt
+        # quote_similarity (it's the safest feature) by listing it in
+        # ai_gate.exempt_features; the gate evaluator already honours
+        # that.
+        try:
+            gate = _ai_gate.evaluate_project_ai_gate(
+                _projects_root(), project_id,
+                feature=_ai_provenance.AI_FEATURE_QUOTE_SIMILARITY,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        if not gate.allowed:
+            raise HTTPException(412, {
+                "detail": "AI gate not satisfied",
+                "gate": gate.to_dict(),
+            })
+
+        # Backend.
+        try:
+            cfg, backend = _resolve_suggestion_backend(project)
+            embed_fn, _gen_fn, emb_model, _gen_model = (
+                _make_embed_and_generate_fns(cfg, backend)
+            )
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+
+        # Project state needed for code-id resolution on coded matches.
+        applications = _applications.list_applications(
+            _projects_root(), project_id,
+        )
+
+        try:
+            search = _quote_similarity.find_similar_quotes(
+                projects_root=_projects_root(),
+                project_id=project_id,
+                embed_fn=embed_fn,
+                applications=applications,
+                query_text=str(query_text or ""),
+                query_application_id=application_id,
+                query_source_id=source_id,
+                embedding_model=emb_model,
+                top_k=top_k_i,
+                min_score=min_score_f,
+                kind_filter=kind_filter,
+                source_id_filter=source_id_filter,
+                exclude_source_ids=tuple(
+                    str(x) for x in (exclude_source_ids or ())
+                ),
+                code_id_filter=code_id_filter,
+                exclude_code_ids=tuple(
+                    str(x) for x in (exclude_code_ids or ())
+                ),
+                exclude_seed=exclude_seed,
+                notes=str(notes or ""),
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except _ai_backend.BackendUnavailable as e:
+            raise HTTPException(502, f"Backend unavailable: {e}")
+        except _ai_backend.BackendError as e:
+            raise HTTPException(500, str(e))
+
+        _quote_similarity.save_quote_search(_projects_root(), search)
+
+        # F9.6 audit — record the search invocation as an AIEvent
+        # request. Quote searches have no decision lifecycle so we only
+        # log the request side; the persisted QuoteSearch is the
+        # canonical record of the matches.
+        try:
+            _ai_invocation_log.record_request_event_for_quote_search(
+                _projects_root(),
+                search,
+                backend=getattr(backend, "name", "") or "",
+            )
+        except Exception:  # nosec - audit logging is best-effort
+            pass
+
+    return JSONResponse({"search": search.to_dict()})
+
+
+@app.get("/api/projects/{project_id}/ai/quote-searches")
+async def list_quote_searches_endpoint(
+    project_id: str,
+    query_kind: str | None = None,
+    query_source_id: str | None = None,
+) -> JSONResponse:
+    """F8.5 — list past quote searches for a project.
+
+    Optional filters:
+      query_kind       — "text" | "application"
+      query_source_id  — restrict to searches seeded from a given source
+
+    Returns ``{"searches": [<dict>, ...]}`` sorted by created_at asc.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            searches = _quote_similarity.list_quote_searches(
+                _projects_root(), project_id,
+                query_kind=query_kind,
+                query_source_id=query_source_id,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({
+        "searches": [s.to_dict() for s in searches],
+    })
+
+
+@app.get("/api/projects/{project_id}/ai/quote-searches/{search_id}")
+async def get_quote_search_endpoint(
+    project_id: str, search_id: str,
+) -> JSONResponse:
+    """F8.5 — fetch a single persisted quote search by id."""
+    _check_project_id(project_id)
+    if not _quote_similarity.QUOTE_SEARCH_ID_RE.match(search_id):
+        raise HTTPException(400, "Invalid quote-search id")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            search = _quote_similarity.load_quote_search(
+                _projects_root(), project_id, search_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Quote search not found")
+    return JSONResponse({"search": search.to_dict()})
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 

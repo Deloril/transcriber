@@ -374,6 +374,115 @@
     color: var(--muted);
   }
 
+  /* F8.5 — per-row "Find similar quotes" button. Visually paired with
+     Play (it's a discovery action, not a mutation), but uses the AI-2
+     accent so the user can tell at a glance that this one talks to the
+     model. Disabled while a search is in flight. */
+  .app-row .actions button[data-act="similar"] {
+    color: var(--accent-2);
+    font-size: 12px;
+  }
+  .app-row .actions button[data-act="similar"]:hover { color: var(--text); }
+  .app-row .actions button[data-act="similar"][disabled] {
+    opacity: .45;
+    cursor: progress;
+    color: var(--muted);
+  }
+
+  /* F8.5 — modal panel that shows ranked similar quotes after the
+     button is clicked. Reuses the look of the apply-popover so the
+     coding-view feels consistent. */
+  .similar-modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, .45);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 60;
+  }
+  .similar-modal-overlay.open { display: flex; }
+  .similar-modal {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.4);
+    width: min(640px, 92vw);
+    max-height: 80vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .similar-modal header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .similar-modal header h3 {
+    margin: 0;
+    font-size: 14px;
+    flex: 1;
+  }
+  .similar-modal header .close-btn {
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 18px;
+    padding: 4px 8px;
+  }
+  .similar-modal header .close-btn:hover { color: var(--text); }
+  .similar-modal .body {
+    padding: 12px 16px;
+    overflow-y: auto;
+    font-size: 12px;
+  }
+  .similar-modal .seed {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent-2);
+    border-radius: 4px;
+    padding: 8px 10px;
+    margin-bottom: 12px;
+    color: var(--muted);
+    font-style: italic;
+  }
+  .similar-modal .seed-code { font-style: normal; color: var(--text); font-weight: 600; }
+  .similar-modal .status { color: var(--muted); padding: 6px 0; }
+  .similar-modal .err { color: var(--err); }
+  .similar-modal .match-list { display: flex; flex-direction: column; gap: 6px; }
+  .similar-modal .match {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--panel-2);
+    cursor: pointer;
+  }
+  .similar-modal .match:hover { border-color: var(--accent); }
+  .similar-modal .match-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .similar-modal .match-meta .score {
+    color: var(--muted);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .similar-modal .match-meta .kind-pill {
+    color: var(--muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .similar-modal .match-text {
+    color: var(--text);
+    font-style: italic;
+  }
+
   /* F4.6 — inline media player. Hidden until the user clicks Play on
      any application. Sticks to the bottom of the side panel so the
      transcript text never reflows when the player appears. The dock
@@ -831,6 +940,38 @@
               type="button"
               class="btn"
               data-test-id="src-memo-save">Save memo</button>
+    </div>
+  </div>
+</div>
+
+<!-- F8.5 — Find similar quotes modal. Opens when the user clicks
+     "🔎 Find similar quotes" on any .app-row. Shows a "seed" pane
+     (which application we're looking for matches to) and the ranked
+     match list returned by POST /api/projects/<pid>/ai/quote-searches.
+     Clicking a match scrolls to the source-internal match in the same
+     transcript or — for cross-source hits — opens the other source's
+     coding view at the matching word. The data-test-feature=F8.5
+     marker anchors the reachability test. -->
+<div id="similarModal"
+     class="similar-modal-overlay"
+     role="dialog"
+     aria-modal="true"
+     aria-label="Find similar quotes"
+     data-test-feature="F8.5"
+     data-test-id="src-similar-modal">
+  <div class="similar-modal">
+    <header>
+      <h3>🔎 Find similar quotes</h3>
+      <button type="button"
+              id="similarCloseBtn"
+              class="close-btn"
+              data-test-id="src-similar-close"
+              aria-label="Close">×</button>
+    </header>
+    <div class="body">
+      <div id="similarSeed" class="seed" data-test-id="src-similar-seed"></div>
+      <div id="similarStatus" class="status" data-test-id="src-similar-status"></div>
+      <div id="similarMatches" class="match-list" data-test-id="src-similar-matches"></div>
     </div>
   </div>
 </div>
@@ -2480,6 +2621,11 @@ function renderApps() {
                 data-test-feature="F4.6"
                 data-test-id="app-row-play"
                 title="Play this coded segment">▶ Play</button>
+        <button type="button"
+                data-act="similar"
+                data-test-feature="F8.5"
+                data-test-id="app-row-similar"
+                title="Find quotes semantically similar to this one (F8.5)">🔎 Find similar quotes</button>
         <button type="button" data-act="delete">Remove</button>
       </div>
     </div>`;
@@ -2503,11 +2649,18 @@ function quoteSnippet(startId, endId) {
 document.getElementById("appList").addEventListener("click", async (e) => {
   const delBtn = e.target.closest("button[data-act='delete']");
   const playBtn = e.target.closest("button[data-act='play']");
+  const similarBtn = e.target.closest("button[data-act='similar']");
   const row = e.target.closest(".app-row");
   if (playBtn && row) {
     // F4.6 — one-click playback of the coded segment.
     e.stopPropagation();
     await playApplication(row.dataset.appId);
+    return;
+  }
+  if (similarBtn && row) {
+    // F8.5 — find quotes semantically similar to this coded segment.
+    e.stopPropagation();
+    await findSimilarQuotesForApp(row.dataset.appId, similarBtn);
     return;
   }
   if (delBtn && row) {
@@ -2652,6 +2805,138 @@ async function playApplication(appId) {
   }
   try { await audio.play(); } catch (_) {}
 }
+
+// ---------- F8.5 Find similar quotes ----------
+//
+// findSimilarQuotesForApp(appId) calls
+// POST /api/projects/<pid>/ai/quote-searches with {application_id,
+// source_id} and renders the ranked match list inside #similarModal.
+// Application-mode is the high-traffic case: the engine reuses the
+// embedding-index entry for that application instead of burning a
+// fresh embed call.
+function similarModalEl() { return document.getElementById("similarModal"); }
+function showSimilarModal() { similarModalEl().classList.add("open"); }
+function hideSimilarModal() {
+  similarModalEl().classList.remove("open");
+  document.getElementById("similarStatus").innerHTML = "";
+  document.getElementById("similarMatches").innerHTML = "";
+  document.getElementById("similarSeed").innerHTML = "";
+}
+
+async function findSimilarQuotesForApp(appId, btn) {
+  const app = APPS.find(a => a.id === appId);
+  if (!app) return;
+  const code = CODES.find(c => c.id === app.code_id);
+  const codeName = code ? code.name : `(deleted code ${(app.code_id || "").slice(0,8)})`;
+  const snippet = quoteSnippet(app.anchor_start_word_id, app.anchor_end_word_id);
+
+  // Render the seed pane immediately so the user sees what they're
+  // searching from while the request is in flight.
+  document.getElementById("similarSeed").innerHTML =
+    `Searching for quotes similar to <span class="seed-code">${escapeHtml(codeName)}</span>:` +
+    `<div class="match-text" style="margin-top:6px">"${escapeHtml(snippet)}"</div>`;
+  document.getElementById("similarStatus").innerHTML = "Searching the embedding index…";
+  document.getElementById("similarMatches").innerHTML = "";
+  showSimilarModal();
+  if (btn) btn.disabled = true;
+
+  try {
+    const r = await fetch(
+      `/api/projects/${encodeURIComponent(PROJECT_ID)}/ai/quote-searches`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          application_id: appId,
+          source_id: SOURCE_ID,
+          top_k: 10,
+          // exclude_seed defaults true server-side; we don't want the
+          // seed itself to come back as the top hit.
+        }),
+      },
+    );
+    if (!r.ok) {
+      // 412 means the AI gate is closed (F8.10). Surface the gate
+      // message directly so the user can act on it (the project AI
+      // page has the override toggle).
+      let detail = {};
+      try { detail = await r.json(); } catch (_) {}
+      const inner = (detail && detail.detail) || detail;
+      const msg = (typeof inner === "object" && inner)
+        ? (inner.gate && inner.gate.message) || inner.detail || JSON.stringify(inner)
+        : (inner || `HTTP ${r.status}`);
+      document.getElementById("similarStatus").innerHTML =
+        `<span class="err">${escapeHtml(msg)}</span>`;
+      return;
+    }
+    const body = await r.json();
+    renderSimilarQuoteMatches(body.search);
+  } catch (e) {
+    document.getElementById("similarStatus").innerHTML =
+      `<span class="err">${escapeHtml(e.message || String(e))}</span>`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function renderSimilarQuoteMatches(search) {
+  const matches = (search && search.matches) || [];
+  const status = document.getElementById("similarStatus");
+  const list = document.getElementById("similarMatches");
+  if (!matches.length) {
+    status.textContent =
+      "No matches above the similarity threshold. Try coding more quotes " +
+      "or expanding the codebook so the embedding index has more anchors.";
+    list.innerHTML = "";
+    return;
+  }
+  status.textContent = `Found ${matches.length} similar quote${matches.length === 1 ? "" : "s"}.`;
+  list.innerHTML = matches.map(m => {
+    const score = (Number(m.score) * 100).toFixed(0);
+    const kind = m.kind === "coded_segment" ? "coded" : "uncoded";
+    const sourceLabel = m.source_id === SOURCE_ID ? "this source" : `source ${m.source_id.slice(0, 8)}`;
+    // For same-source matches we anchor a click to scroll to the word;
+    // cross-source matches link out to that source's coding view at
+    // the matching anchor.
+    const sameSource = m.source_id === SOURCE_ID;
+    return `<a class="match"
+              href="${sameSource ? "#" : `/projects/${encodeURIComponent(PROJECT_ID)}/sources/${encodeURIComponent(m.source_id)}`}"
+              data-test-id="src-similar-match"
+              data-source-id="${escapeHtml(m.source_id)}"
+              data-start="${escapeHtml(m.anchor_start_word_id)}"
+              data-end="${escapeHtml(m.anchor_end_word_id)}">
+      <div class="match-meta">
+        <span class="kind-pill">${escapeHtml(kind)}</span>
+        <span class="row-label">${escapeHtml(sourceLabel)}</span>
+        <span class="score">${score}%</span>
+      </div>
+      <div class="match-text">"${escapeHtml(m.text_preview || "")}"</div>
+    </a>`;
+  }).join("");
+}
+
+// Same-source clicks scroll to the matching word in this transcript;
+// cross-source clicks fall through to the <a href> handled by the
+// browser. (Listener attached once at script bottom.)
+document.getElementById("similarMatches").addEventListener("click", (e) => {
+  const m = e.target.closest(".match[data-source-id]");
+  if (!m) return;
+  if (m.dataset.sourceId !== SOURCE_ID) return;  // let <a href> navigate
+  e.preventDefault();
+  const startId = m.dataset.start;
+  const wordEl = document.querySelector(`.word[data-word-id="${CSS.escape(startId)}"]`);
+  if (wordEl) {
+    hideSimilarModal();
+    wordEl.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+});
+
+document.getElementById("similarCloseBtn").addEventListener("click", hideSimilarModal);
+similarModalEl().addEventListener("click", (e) => {
+  // Click outside the inner panel closes the modal — mirrors the memo
+  // modal's overlay-click behaviour.
+  if (e.target === similarModalEl()) hideSimilarModal();
+});
 
 // F4.6 — Click delegation on the transcript root: lane-bar clicks
 // trigger playback of the application that bar represents. Hooked up
