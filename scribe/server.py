@@ -296,18 +296,18 @@ async def project_home_page(request: Request, project_id: str) -> HTMLResponse:
     pid = _project_id_or_404(project_id)
     # Best-effort lookup so we can show real metadata in the heading. If the
     # project doesn't exist yet we still render the wireframe — the page is
-    # also useful as a "create one" landing.
+    # also useful as a "create one" landing. (F1.1)
     project = None
     try:
-        from .projects import load_project  # type: ignore
-        project = load_project(pid)
+        with PROJECTS_LOCK:
+            project = _projects.load_project(_projects_root(), pid)
     except Exception:
         project = None
     return templates.TemplateResponse(request, "project_home.html", {
         "project_id": pid,
-        "project_name": (project or {}).get("name") if isinstance(project, dict) else getattr(project, "name", None),
-        "project_methodology": (project or {}).get("methodology") if isinstance(project, dict) else getattr(project, "methodology", None),
-        "project_stage": (project or {}).get("codebook_stage") if isinstance(project, dict) else getattr(project, "codebook_stage", None),
+        "project_name": getattr(project, "name", None),
+        "project_methodology": getattr(project, "methodology", None),
+        "project_stage": getattr(project, "codebook_stage", None),
     })
 
 
