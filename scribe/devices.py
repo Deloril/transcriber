@@ -110,8 +110,18 @@ def main() -> int:
             arch = gpu_arch_name()
             if arch:
                 print(f"  GFX target:       {arch}")
+        # G4.1: surface the cub_caching workaround state for RDNA 2 owners
+        # so support tickets show whether the env var was auto-applied,
+        # user-overridden, or still unset (worker race condition).
         if backend == "rocm" and _is_rdna2():
-            print("  Note: RDNA 2 detected — auto-applying CT2_CUDA_ALLOCATOR=cub_caching")
+            import os as _os
+            allocator = _os.environ.get("CT2_CUDA_ALLOCATOR")
+            if allocator == "cub_caching":
+                print("  Allocator:        CT2_CUDA_ALLOCATOR=cub_caching (auto, RDNA 2 workaround)")
+            elif allocator:
+                print(f"  Allocator:        CT2_CUDA_ALLOCATOR={allocator} (user-overridden)")
+            else:
+                print("  Allocator:        CT2_CUDA_ALLOCATOR unset — call apply_rocm_runtime_workarounds() before CT2 import")
         # G2.3: classify the Linux distro against AMD's official matrix.
         # Only meaningful on ROCm — on CUDA / MPS / CPU the user doesn't
         # care which Radeon-supporting distro they're on.

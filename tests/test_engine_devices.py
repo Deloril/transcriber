@@ -308,6 +308,11 @@ class TestIsRdna2:
         "AMD gfx1031 device",
     ])
     def test_detects(self, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+        # Disable the gfx-target signal so the test isolates the device-name
+        # path. The detector ORs the two signals; on a CPU-only / CUDA test
+        # box ``gpu_arch_name()`` already returns None or a non-gfx string,
+        # so behaviourally the name-only path is what fires for these inputs.
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: None)
         monkeypatch.setattr(engine, "_gpu_device_name", lambda: name)
         assert engine._is_rdna2() is True
 
@@ -318,8 +323,96 @@ class TestIsRdna2:
         "",
     ])
     def test_not_detected(self, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: None)
         monkeypatch.setattr(engine, "_gpu_device_name", lambda: name)
         assert engine._is_rdna2() is False
+
+
+class TestIsRdna2Public:
+    """G4.1: public ``is_rdna2`` API + gfx-target-primary detection.
+
+    The detection ORs two signals (gfx target + device name); these tests
+    cover each path independently and verify that an authoritative gfx
+    target short-circuits before the name string is consulted.
+    """
+
+    @pytest.mark.parametrize("gfx", [
+        "gfx1030",  # Navi 21 — RX 6800/6900 XT, W6800
+        "gfx1031",  # Navi 22 — RX 6700/6750 XT
+        "gfx1032",  # Navi 23 — RX 6600/6650 XT
+        "gfx1033",  # Van Gogh APU (Steam Deck)
+        "gfx1034",  # Navi 24 — RX 6400/6500 XT
+        "gfx1035",  # Rembrandt APU (Ryzen 6000-series mobile)
+        "gfx1036",  # Rembrandt-R APU (Ryzen 7035-series mobile)
+    ])
+    def test_detects_via_gfx_target(
+        self, monkeypatch: pytest.MonkeyPatch, gfx: str
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: gfx)
+        # Force a name that would otherwise be a False — proves the gfx
+        # target alone is enough to flip the detector to True.
+        monkeypatch.setattr(engine, "_gpu_device_name", lambda: "")
+        assert engine.is_rdna2() is True
+
+    @pytest.mark.parametrize("gfx", [
+        "gfx1100",   # RDNA 3 — Navi 31 (RX 7900 XTX/XT)
+        "gfx1101",   # RDNA 3 — Navi 32 (RX 7700/7800 XT)
+        "gfx1102",   # RDNA 3 — Navi 33 (RX 7600)
+        "gfx1200",   # RDNA 4 — Navi 44
+        "gfx1201",   # RDNA 4 — Navi 48 (RX 9070 XT)
+        "gfx1010",   # RDNA 1 — Navi 10 (Tier 3, not RDNA 2)
+        "gfx900",    # Vega — not RDNA at all
+        "gfx940",    # CDNA 3 — datacentre
+    ])
+    def test_does_not_detect_other_gfx(
+        self, monkeypatch: pytest.MonkeyPatch, gfx: str
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: gfx)
+        monkeypatch.setattr(engine, "_gpu_device_name", lambda: "")
+        assert engine.is_rdna2() is False
+
+    def test_authoritative_gfx_overrides_misleading_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # If the gfx target is unambiguously RDNA 3 (gfx1100), an OEM-
+        # rebranded marketing name that *looks* like RDNA 2 must not flip
+        # the detector. The gfx-target signal short-circuits.
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1100")
+        monkeypatch.setattr(engine, "_gpu_device_name", lambda: "AMD Radeon RX 6900 OEM")
+        assert engine.is_rdna2() is False
+
+    def test_falls_back_to_name_when_gcnarchname_is_marketing_string(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # NVIDIA's PyTorch build populates gcnArchName with the device's
+        # marketing name, not a gfx target. We must not trust it; the name
+        # path takes over.
+        monkeypatch.setattr(
+            engine, "gpu_arch_name", lambda: "NVIDIA RTX 1000 Ada Generation Laptop GPU"
+        )
+        monkeypatch.setattr(engine, "_gpu_device_name", lambda: "AMD Radeon RX 6800")
+        # Detector should pick up "rx 6" via the name path.
+        assert engine.is_rdna2() is True
+
+    def test_returns_false_when_both_signals_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: None)
+        monkeypatch.setattr(engine, "_gpu_device_name", lambda: "")
+        assert engine.is_rdna2() is False
+
+    def test_private_alias_delegates_to_public(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Backwards-compat: ``_is_rdna2`` must return the same value as
+        # ``is_rdna2`` for the same inputs. Existing call sites + tests
+        # rely on the underscore alias; new code prefers the public name.
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1031")
+        monkeypatch.setattr(engine, "_gpu_device_name", lambda: "")
+        assert engine._is_rdna2() == engine.is_rdna2() is True
+
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1100")
+        assert engine._is_rdna2() == engine.is_rdna2() is False
 
 
 class TestGpuArchName:
@@ -416,6 +509,81 @@ class TestApplyRocmRuntimeWorkarounds:
         engine._apply_rocm_runtime_workarounds()
         import os as _os
         assert "CT2_CUDA_ALLOCATOR" not in _os.environ
+
+
+class TestApplyRocmRuntimeWorkaroundsPublic:
+    """G4.1: public ``apply_rocm_runtime_workarounds`` API.
+
+    Mirrors the private-alias suite but exercises the documented entry
+    point a worker process / subprocess would call before its CT2 import.
+    """
+
+    def test_public_function_exists(self) -> None:
+        assert callable(engine.apply_rocm_runtime_workarounds)
+
+    def test_public_function_sets_allocator_on_rdna2(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.delenv("CT2_CUDA_ALLOCATOR", raising=False)
+        engine.apply_rocm_runtime_workarounds()
+        import os as _os
+        assert _os.environ["CT2_CUDA_ALLOCATOR"] == "cub_caching"
+
+    def test_public_function_is_idempotent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Calling twice on a fresh env should still leave the allocator at
+        # "cub_caching"; calling once when the env is already set must not
+        # clobber the user's choice on the second invocation either.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: True)
+        monkeypatch.delenv("CT2_CUDA_ALLOCATOR", raising=False)
+        engine.apply_rocm_runtime_workarounds()
+        engine.apply_rocm_runtime_workarounds()
+        import os as _os
+        assert _os.environ["CT2_CUDA_ALLOCATOR"] == "cub_caching"
+
+    def test_public_function_safe_on_cpu(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
+        monkeypatch.delenv("CT2_CUDA_ALLOCATOR", raising=False)
+        engine.apply_rocm_runtime_workarounds()
+        import os as _os
+        assert "CT2_CUDA_ALLOCATOR" not in _os.environ
+
+    def test_public_function_skips_rdna3(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # RX 7000-series doesn't need the cub_caching allocator workaround,
+        # so on a clean ROCm-RDNA-3 machine the env var must stay unset.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "_is_rdna2", lambda: False)
+        monkeypatch.delenv("CT2_CUDA_ALLOCATOR", raising=False)
+        engine.apply_rocm_runtime_workarounds()
+        import os as _os
+        assert "CT2_CUDA_ALLOCATOR" not in _os.environ
+
+
+class TestPackageExports:
+    """G4.1: ROCm helpers reachable from the top-level ``scribe`` namespace.
+
+    Lets a worker-process boot script call ``from scribe import
+    apply_rocm_runtime_workarounds`` *before* importing CT2, without having
+    to know the engine module path.
+    """
+
+    def test_apply_rocm_runtime_workarounds_reexported(self) -> None:
+        import scribe
+        assert scribe.apply_rocm_runtime_workarounds is engine.apply_rocm_runtime_workarounds
+        assert "apply_rocm_runtime_workarounds" in scribe.__all__
+
+    def test_is_rdna2_reexported(self) -> None:
+        import scribe
+        assert scribe.is_rdna2 is engine.is_rdna2
+        assert "is_rdna2" in scribe.__all__
 
 
 class TestPatchPyannoteLstmDropout:

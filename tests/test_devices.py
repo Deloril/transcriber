@@ -91,9 +91,12 @@ class TestDevicesMain:
         assert "Alignment (torch):      device=rocm" in out
         assert "Diarization (pyannote): device=rocm" in out
 
-    def test_rdna2_workaround_note(
+    def test_rdna2_workaround_auto_applied(
         self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # G4.1: when the env var is set to cub_caching (the auto-applied
+        # state), the report calls out *why* it's set so an operator
+        # reading a support bundle knows it wasn't a manual override.
         monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
         monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
@@ -101,9 +104,47 @@ class TestDevicesMain:
         monkeypatch.setattr(devices, "_cuda_vram_gb", lambda: 16.0)
         monkeypatch.setattr(devices, "_is_rdna2", lambda: True)
         monkeypatch.setattr(devices.torch.version, "hip", "6.3", raising=False)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "cub_caching")
         out = _run(capsys)
-        assert "RDNA 2 detected" in out
         assert "CT2_CUDA_ALLOCATOR=cub_caching" in out
+        assert "RDNA 2 workaround" in out
+
+    def test_rdna2_workaround_user_override(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # G4.1: when the user has chosen a different allocator, the report
+        # surfaces *their* value and labels it as user-overridden so the
+        # next maintainer doesn't blame the auto-apply path for the choice.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.cuda, "get_device_name", lambda i: "AMD Radeon RX 6800")
+        monkeypatch.setattr(devices, "_cuda_vram_gb", lambda: 16.0)
+        monkeypatch.setattr(devices, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(devices.torch.version, "hip", "6.3", raising=False)
+        monkeypatch.setenv("CT2_CUDA_ALLOCATOR", "MallocAsync")
+        out = _run(capsys)
+        assert "CT2_CUDA_ALLOCATOR=MallocAsync" in out
+        assert "user-overridden" in out
+
+    def test_rdna2_workaround_unset_warns(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # G4.1: if the env var is unset on an RDNA 2 / ROCm machine, the
+        # report nudges the user toward
+        # ``apply_rocm_runtime_workarounds()`` — covers the worker-process
+        # race where CT2 was imported before scribe.engine.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(devices.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(devices.torch.backends.mps, "is_available", lambda: False)
+        monkeypatch.setattr(devices.torch.cuda, "get_device_name", lambda i: "AMD Radeon RX 6800")
+        monkeypatch.setattr(devices, "_cuda_vram_gb", lambda: 16.0)
+        monkeypatch.setattr(devices, "_is_rdna2", lambda: True)
+        monkeypatch.setattr(devices.torch.version, "hip", "6.3", raising=False)
+        monkeypatch.delenv("CT2_CUDA_ALLOCATOR", raising=False)
+        out = _run(capsys)
+        assert "CT2_CUDA_ALLOCATOR unset" in out
+        assert "apply_rocm_runtime_workarounds" in out
 
     def test_handles_torch_get_device_name_failure(
         self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch

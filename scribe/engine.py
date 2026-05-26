@@ -440,14 +440,92 @@ def gpu_arch_name() -> str | None:
     return str(arch).split(":", 1)[0] or None
 
 
-def _is_rdna2() -> bool:
-    """Detect AMD RDNA 2 (RX 6000-series) via device name. Used to apply the
-    CT2_CUDA_ALLOCATOR=cub_caching workaround (CT2 issue #2012)."""
+# G4.1: every gfx target in the RDNA 2 family that the cub_caching workaround
+# is known to apply to. Listed explicitly (rather than as a regex) so adding
+# a new APU later is a one-line review.
+#
+#   gfx1030 — Navi 21 (RX 6800 / 6800 XT / 6900 XT, W6800, V620)
+#   gfx1031 — Navi 22 (RX 6700 / 6750 XT, W6700)
+#   gfx1032 — Navi 23 (RX 6600 / 6650 XT, RX 6600M)
+#   gfx1033 — Van Gogh APU (Steam Deck)
+#   gfx1034 — Navi 24 (RX 6400 / 6500 XT)
+#   gfx1035 — Rembrandt APU (Ryzen 6000-series mobile)
+#   gfx1036 — Rembrandt-R APU (Ryzen 7035-series mobile)
+_RDNA2_GFX_TARGETS: frozenset[str] = frozenset({
+    "gfx1030", "gfx1031", "gfx1032", "gfx1033",
+    "gfx1034", "gfx1035", "gfx1036",
+})
+
+# Anything that looks like a gfx target — used to decide whether the
+# ``gcnArchName`` we got back is actually a ROCm machine identifier or a
+# repurposed marketing string (NVIDIA's PyTorch build, for instance,
+# populates ``gcnArchName`` with the device's marketing name). Matches
+# ``gfx900`` (Vega) through ``gfx1201`` (RDNA 4 / Navi 48) — i.e. anything
+# that looks like a real AMD GCN/RDNA/CDNA architecture identifier. When
+# the field matches we treat it as authoritative: if it isn't in the
+# RDNA 2 set we return False *without* falling through to the device-name
+# signal, so an unambiguous RDNA 3 / RDNA 4 / CDNA card can't be
+# misclassified by an OEM-rebranded marketing name.
+_GFX_TARGET_PATTERN = re.compile(r"^gfx\d{3,4}$")
+
+# Marketing-name fragments that imply an RDNA 2 part. Kept in lower-case so
+# callers can match against ``device_name.lower()``. Mirrors the gfx target
+# list above (so an APU's gcnArchName-less driver still gets picked up via
+# its name string).
+_RDNA2_NAME_TAGS: tuple[str, ...] = (
+    "rx 6", "radeon rx 6",
+    "navi 21", "navi 22", "navi 23", "navi 24",
+    "gfx1030", "gfx1031", "gfx1032", "gfx1033",
+    "gfx1034", "gfx1035", "gfx1036",
+)
+
+
+def is_rdna2() -> bool:
+    """Detect AMD RDNA 2 hardware (gfx103x family).
+
+    Used to apply the ``CT2_CUDA_ALLOCATOR=cub_caching`` workaround
+    documented in CT2 issue #2012: CTranslate2's default ``MallocAsync``
+    allocator crashes on RX 6000-series cards with "illegal memory access"
+    until the cub_caching allocator is selected. The same allocator quirk
+    affects RDNA 2 APUs (Steam Deck, Ryzen 6000-/7000-series mobile).
+
+    G4.1: detection combines two complementary signals so we don't miss a
+    card that only one path can identify —
+
+    1. **gfx target** from ``torch.cuda.get_device_properties().gcnArchName``
+       (the canonical machine identifier on ROCm; immune to OEM rebranding).
+       Only consulted when it actually looks like a gfx target string —
+       NVIDIA's PyTorch build re-uses the same field for the marketing
+       device name, so we guard with a ``^gfx\\d{3,4}$`` regex before
+       trusting it. When the regex matches we treat the gfx target as
+       authoritative and *don't* fall through to the device-name path —
+       this prevents an OEM-rebranded RDNA 3 / RDNA 4 marketing name
+       (e.g. ``"Radeon RX 6900 OEM"`` on a gfx1100 die) from flipping the
+       detector into a False True.
+    2. **device name** from ``torch.cuda.get_device_name()`` (the spec's
+       literal recommendation; the only signal available on drivers that
+       don't expose ``gcnArchName``, and the easier-to-mock signal under
+       test).
+
+    Returns False on CPU / MPS / CUDA / RDNA 1 / RDNA 3+ / CDNA, including
+    when no GPU is available. Cheap to call repeatedly (no torch state
+    mutation, just two property reads) so callers don't have to cache.
+    """
+    arch = gpu_arch_name()
+    if arch and _GFX_TARGET_PATTERN.match(arch):
+        # The driver gave us a real gfx target — it's authoritative.
+        return arch in _RDNA2_GFX_TARGETS
+
     name = _gpu_device_name().lower()
-    return any(tag in name for tag in (
-        "rx 6", "radeon rx 6", "navi 21", "navi 22", "navi 23", "navi 24",
-        "gfx1030", "gfx1031", "gfx1032", "gfx1034",
-    ))
+    if not name:
+        return False
+    return any(tag in name for tag in _RDNA2_NAME_TAGS)
+
+
+# Private alias kept for backwards compatibility with call sites and tests
+# that monkeypatch ``engine._is_rdna2``. New code should call ``is_rdna2``.
+def _is_rdna2() -> bool:
+    return is_rdna2()
 
 
 def _torch_device() -> str:
@@ -546,22 +624,51 @@ def _to_torch_device_arg(label: str) -> str:
     return "cuda" if label == "rocm" else label
 
 
-def _apply_rocm_runtime_workarounds() -> None:
-    """
-    AMD-specific environment fixes that have to be set before CT2 / pyannote
-    load any models. Idempotent and safe to call on non-AMD machines.
+def apply_rocm_runtime_workarounds() -> None:
+    """Set AMD-specific environment fixes that have to be in place before
+    CTranslate2 / pyannote load any models.
 
-    - RDNA 2 (gfx103x): CT2's default MallocAsync allocator crashes on these
-      cards with "illegal memory access." Switch to cub_caching as documented
-      in CT2 issue #2012.
+    G4.1: idempotent and safe to call on non-AMD machines. Designed so a
+    worker process / subprocess that imports CT2 directly (without going
+    through ``scribe.engine`` first) can still opt in to the workaround
+    by calling this function before the CT2 import.
+
+    Currently applies one fix:
+
+    * **RDNA 2 (gfx103x)** — CTranslate2's default ``MallocAsync`` allocator
+      crashes on RX 6000-series cards (and RDNA 2 APUs like the Steam Deck)
+      with ``Hipblaslt error: illegal memory access`` shortly after a model
+      load. Switching to ``cub_caching`` is the documented fix (CT2 issue
+      #2012). We only set the variable when it is unset — a user-supplied
+      value is treated as authoritative and never clobbered.
+
+    Calling this on a CUDA / MPS / CPU machine is a no-op; calling it on
+    an RDNA 3 / RDNA 4 ROCm machine is also a no-op (those cards don't need
+    the workaround).
     """
     if not is_rocm():
         return
+    # Call ``_is_rdna2`` (not ``is_rdna2``) so that legacy callers and tests
+    # which monkeypatch the private alias on the module still steer the
+    # workaround. The aliased function delegates to the public path.
     if _is_rdna2() and not os.environ.get("CT2_CUDA_ALLOCATOR"):
         os.environ["CT2_CUDA_ALLOCATOR"] = "cub_caching"
 
 
-_apply_rocm_runtime_workarounds()
+# Private alias kept for backwards compatibility with call sites and tests
+# that reference ``engine._apply_rocm_runtime_workarounds``. New code should
+# call ``apply_rocm_runtime_workarounds``.
+def _apply_rocm_runtime_workarounds() -> None:
+    apply_rocm_runtime_workarounds()
+
+
+# Run the workarounds at module import time so that any subsequent CT2 /
+# pyannote load (whether from this process or a thread that inherits the
+# same env block) picks up the right allocator. ``scribe.engine`` is
+# imported by ``scribe/__init__.py`` so just touching the package is enough
+# to install the fix; subprocess workers that bypass that path can call
+# :func:`apply_rocm_runtime_workarounds` explicitly.
+apply_rocm_runtime_workarounds()
 
 
 def _iter_lstm_modules(obj: Any, _visited: set[int] | None = None) -> Any:
