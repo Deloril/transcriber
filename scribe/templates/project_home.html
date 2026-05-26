@@ -12,6 +12,14 @@
 
 {% block actions %}
   <a class="btn secondary" href="/projects">All projects</a>
+  {# F3.1: project-level settings (metadata + the F3.1 ``settings`` dict).
+     Without this link the F3.1 settings page is only reachable by
+     typing the URL by hand. #}
+  <a class="btn secondary" id="projectSettingsBtn"
+     href="/projects/{{ project_id }}/settings"
+     title="Edit project metadata, default coder, AI preferences, and download the project archive.">
+    ⚙ Settings
+  </a>
   {# F1.5: download the whole project as a .scribe.zip archive. The
      server endpoint streams a zip with the same internal layout as
      the on-disk projects/<id>/ tree; the link triggers a browser

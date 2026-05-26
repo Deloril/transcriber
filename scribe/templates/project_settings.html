@@ -1,0 +1,298 @@
+{#
+  Project settings page (F3.1).
+
+  F3.1 added two pieces to the project shell:
+
+    1. ``Project.settings`` — a bounded, free-form key/value store on
+       the project entity for project-level preferences (default coder
+       name, AI on/off, default code colour, UI prefs). The data layer
+       in ``scribe/projects.py`` validates shape + size; the PATCH
+       endpoint at ``/api/projects/<pid>`` already accepts a
+       ``settings`` field but no UI exposed it before this template.
+
+    2. ``ProjectBundle.codes`` — the codebook is now part of the
+       project's archive bundle. F1.5 already wired the archive
+       export/import HTTP surface; this page nods at that link so a
+       researcher can find the archive download from settings.
+
+  This page replaces the wireframe stub previously rendered by
+  ``project_subpage.html`` for ``/projects/<pid>/settings``.
+#}
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Project settings{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+{% endblock %}
+
+{% block extra_styles %}
+  .field-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .field-input, select.field-input, textarea.field-input {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+    font: inherit; font-size: 14px;
+  }
+  .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 600px) { .field-row { grid-template-columns: 1fr; } }
+  .ps-help {
+    color: var(--muted);
+    font-size: 12px;
+    margin: 4px 0 0;
+    line-height: 1.5;
+  }
+  .ps-section + .ps-section { margin-top: 16px; }
+  .checkbox-row {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--text); font-size: 14px;
+    cursor: pointer;
+  }
+  .checkbox-row input[type=checkbox] { width: 16px; height: 16px; }
+  .ps-bundle-link {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--text); text-decoration: none;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    padding: 7px 12px; border-radius: 8px; font-size: 13px;
+  }
+  .ps-bundle-link:hover { border-color: var(--accent); color: var(--accent); }
+{% endblock %}
+
+{% block body %}
+<div id="loading" class="card hint">Loading project…</div>
+<div id="errorState" class="card" style="display:none;color:var(--err)"></div>
+
+<div id="psCard" class="card ps-section" style="display:none" data-test-feature="F3.1">
+  <h2>Project metadata</h2>
+  <p class="ps-help">Edit the fields you set when you created this project. Saved values are picked up by exports and the audit trail.</p>
+  <form id="psMetaForm" style="margin-top:14px">
+    <div style="margin-bottom:12px">
+      <label for="ps-name" class="field-label">Name <span style="color:var(--err)">*</span></label>
+      <input id="ps-name" type="text" required maxlength="200" class="field-input">
+    </div>
+
+    <div class="field-row" style="margin-bottom:12px">
+      <div>
+        <label for="ps-meth" class="field-label">Methodology</label>
+        <select id="ps-meth" class="field-input">
+          <option value="">— pick later —</option>
+          <option value="charmaz">Constructivist grounded theory (Charmaz)</option>
+          <option value="strauss-corbin">Strauss / Corbin grounded theory</option>
+          <option value="glaser">Classical grounded theory (Glaser)</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <div>
+        <label for="ps-stage" class="field-label">Codebook stage</label>
+        <select id="ps-stage" class="field-input">
+          <option value="initial">initial</option>
+          <option value="focused">focused</option>
+          <option value="axial">axial</option>
+          <option value="theoretical">theoretical</option>
+          <option value="locked">locked</option>
+        </select>
+      </div>
+    </div>
+
+    <div style="margin-bottom:12px">
+      <label for="ps-rq" class="field-label">Research question</label>
+      <textarea id="ps-rq" rows="2" maxlength="4000" class="field-input"
+                placeholder="What you're trying to understand."></textarea>
+    </div>
+
+    <div style="margin-bottom:12px">
+      <label for="ps-desc" class="field-label">Description</label>
+      <textarea id="ps-desc" rows="2" maxlength="4000" class="field-input"
+                placeholder="Sensitising concepts, scope, anything else worth recording."></textarea>
+    </div>
+
+    <div style="margin-bottom:14px">
+      <label for="ps-sc" class="field-label">Sensitising concepts <span class="hint">— comma-separated</span></label>
+      <input id="ps-sc" type="text" maxlength="4000" class="field-input"
+             placeholder="e.g. embodiment, identity work, professional invisibility">
+      <p class="ps-help">Charmaz-style: keep these as orienting questions, not boxes to fit data into.</p>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px">
+      <button id="ps-meta-submit" class="btn" type="submit">Save metadata</button>
+      <span id="ps-meta-msg" class="hint" role="alert" aria-live="polite"></span>
+    </div>
+  </form>
+</div>
+
+<div id="psSettingsCard" class="card ps-section" style="display:none" data-test-feature="F3.1">
+  <h2>Project preferences</h2>
+  <p class="ps-help">Saved to <code>project.settings</code>. F3.1 added this bounded key/value store so per-project preferences (default coder, AI defaults, code colour) ride along with the bundle.</p>
+
+  <form id="psPrefsForm" style="margin-top:14px">
+    <div class="field-row" style="margin-bottom:12px">
+      <div>
+        <label for="ps-default-coder" class="field-label">Default coder name</label>
+        <input id="ps-default-coder" type="text" maxlength="200" class="field-input"
+               placeholder="e.g. Luke">
+        <p class="ps-help">Used to seed the coder picker on the source-coding view (F2.5).</p>
+      </div>
+      <div>
+        <label for="ps-default-colour" class="field-label">Default new-code colour</label>
+        <input id="ps-default-colour" type="color" class="field-input" value="#9c8ad6">
+        <p class="ps-help">Newly-created codes start with this colour; per-code overrides win.</p>
+      </div>
+    </div>
+
+    <div style="margin-bottom:14px">
+      <label class="checkbox-row">
+        <input id="ps-ai-enabled" type="checkbox">
+        <span>AI suggestions enabled (overrides the F8.10 first-N-transcripts gate)</span>
+      </label>
+      <p class="ps-help">Off by default. Grounded theory expects you to do the inductive opening yourself; flip this on once the codebook has shape.</p>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px">
+      <button id="ps-prefs-submit" class="btn" type="submit">Save preferences</button>
+      <span id="ps-prefs-msg" class="hint" role="alert" aria-live="polite"></span>
+    </div>
+  </form>
+</div>
+
+<div class="card ps-section" data-test-feature="F3.1">
+  <h2>Project bundle</h2>
+  <p class="ps-help">F3.1 wired the codebook (every code with its full revision history) into the project bundle. The archive download bundles project metadata, sources, participants, sampling log, codebook, and saved queries into a single <code>.scribe.zip</code>.</p>
+  <p>
+    <a class="ps-bundle-link"
+       href="/api/projects/{{ project_id }}/archive?include_outputs=1"
+       download
+       data-test-id="ps-archive-link">
+      ⬇ Download project archive
+    </a>
+  </p>
+</div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+
+function setMsg(el, text, isError) {
+  el.textContent = text;
+  el.style.color = isError ? "var(--err)" : "var(--ok)";
+}
+
+function joinList(arr) {
+  return Array.isArray(arr) ? arr.join(", ") : "";
+}
+function splitList(s) {
+  return String(s || "")
+    .split(",")
+    .map(x => x.trim())
+    .filter(Boolean);
+}
+
+async function load() {
+  const loading = document.getElementById("loading");
+  const meta = document.getElementById("psCard");
+  const prefs = document.getElementById("psSettingsCard");
+  const error = document.getElementById("errorState");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}`);
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const p = await r.json();
+    loading.style.display = "none";
+
+    document.getElementById("ps-name").value = p.name || "";
+    document.getElementById("ps-meth").value = p.methodology || "";
+    document.getElementById("ps-stage").value = p.codebook_stage || "initial";
+    document.getElementById("ps-rq").value = p.research_question || "";
+    document.getElementById("ps-desc").value = p.description || "";
+    document.getElementById("ps-sc").value = joinList(p.sensitising_concepts);
+
+    const s = (p && typeof p.settings === "object" && p.settings) ? p.settings : {};
+    document.getElementById("ps-default-coder").value =
+      typeof s.default_coder === "string" ? s.default_coder : "";
+    if (typeof s.default_code_colour === "string" && /^#[0-9a-fA-F]{6}$/.test(s.default_code_colour)) {
+      document.getElementById("ps-default-colour").value = s.default_code_colour;
+    }
+    document.getElementById("ps-ai-enabled").checked = !!s.ai_enabled;
+
+    meta.style.display = "";
+    prefs.style.display = "";
+  } catch (e) {
+    loading.style.display = "none";
+    error.textContent = `Couldn't load project: ${e.message}`;
+    error.style.display = "";
+  }
+}
+
+async function patchProject(payload) {
+  const r = await fetch(`/api/projects/${PROJECT_ID}`, {
+    method: "PATCH",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) {
+    const detail = await r.json().catch(() => ({}));
+    throw new Error(detail.detail || `HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
+document.getElementById("psMetaForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById("ps-meta-msg");
+  const submit = document.getElementById("ps-meta-submit");
+  const payload = {
+    name: document.getElementById("ps-name").value.trim(),
+    methodology: document.getElementById("ps-meth").value,
+    codebook_stage: document.getElementById("ps-stage").value,
+    research_question: document.getElementById("ps-rq").value.trim(),
+    description: document.getElementById("ps-desc").value.trim(),
+    sensitising_concepts: splitList(document.getElementById("ps-sc").value),
+  };
+  submit.disabled = true;
+  setMsg(msg, "Saving…", false);
+  try {
+    await patchProject(payload);
+    setMsg(msg, "Saved", false);
+  } catch (err) {
+    setMsg(msg, `Couldn't save: ${err.message}`, true);
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+document.getElementById("psPrefsForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById("ps-prefs-msg");
+  const submit = document.getElementById("ps-prefs-submit");
+  // Read existing settings first so we don't blow away keys we don't render.
+  let existing = {};
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}`);
+    if (r.ok) {
+      const p = await r.json();
+      if (p && typeof p.settings === "object" && p.settings) existing = p.settings;
+    }
+  } catch (_) { /* fall through with empty existing */ }
+
+  const settings = Object.assign({}, existing);
+  const coder = document.getElementById("ps-default-coder").value.trim();
+  if (coder) settings.default_coder = coder; else delete settings.default_coder;
+  const colour = document.getElementById("ps-default-colour").value.trim();
+  if (colour) settings.default_code_colour = colour;
+  settings.ai_enabled = !!document.getElementById("ps-ai-enabled").checked;
+
+  submit.disabled = true;
+  setMsg(msg, "Saving…", false);
+  try {
+    await patchProject({ settings });
+    setMsg(msg, "Saved", false);
+  } catch (err) {
+    setMsg(msg, `Couldn't save: ${err.message}`, true);
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+load();
+</script>
+{% endblock %}

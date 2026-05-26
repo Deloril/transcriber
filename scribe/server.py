@@ -608,30 +608,29 @@ async def project_audit_page(request: Request, project_id: str) -> HTMLResponse:
 
 @app.get("/projects/{project_id}/settings", response_class=HTMLResponse)
 async def project_settings_page(request: Request, project_id: str) -> HTMLResponse:
-    return _render_subpage(
-        request, project_id,
-        page_kind="settings",
-        page_title="Project settings",
-        description="Methodology, attribute schema, codebook stage, AI gating, danger zone.",
-        feature_refs=["F1.1", "F2.4", "F3.2", "F8.10"],
-        wireframe_blocks=[
-            {"heading": "Methodology & sensitising concepts", "lines": [
-                "Editable. Methodology choice drives gerund-encouragement and other UI nudges.",
-            ]},
-            {"heading": "Source attribute schema", "lines": [
-                "User-defined columns on sources / participants (F3.2). Add / remove / reorder.",
-            ]},
-            {"heading": "Codebook stage", "lines": [
-                "Stage selector. Lock toggle (F2.4) — unlocking requires a methodological memo with reason.",
-            ]},
-            {"heading": "AI gating", "lines": [
-                "Override the F8.10 default (AI off until codebook has shape). Researcher discretion.",
-            ]},
-            {"heading": "Danger zone", "lines": [
-                "Delete project. Export REFI-QDA / QDPX (F6.4). Anonymised export (F6.7).",
-            ]},
-        ],
-    )
+    """Project settings page (F3.1).
+
+    F3.1 added project-level ``settings`` (a bounded key/value store on
+    the Project entity) and pulled the codebook into the bundle.
+    Without this UI the settings field is unreachable: only the JSON
+    PATCH endpoint accepted it. This route renders the form that reads
+    + writes those values via ``GET/PATCH /api/projects/<pid>``.
+    """
+    pid = _project_id_or_404(project_id)
+    # Best-effort lookup so the heading shows the real project name even
+    # if rendering happens before the JS load() resolves.
+    project = None
+    try:
+        with PROJECTS_LOCK:
+            project = _projects.load_project(_projects_root(), pid)
+    except Exception:
+        project = None
+    return templates.TemplateResponse(request, "project_settings.html", {
+        "project_id": pid,
+        "page_title": "Project settings",
+        "subtitle": "Metadata, preferences, and the project bundle download.",
+        "project_name": getattr(project, "name", None),
+    })
 
 
 @app.get("/settings", response_class=HTMLResponse)
