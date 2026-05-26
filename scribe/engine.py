@@ -1100,6 +1100,7 @@ def _transcribe_with_alignment(
     progress_span: float,
     hf_token: str | None = None,
     whisper_backend: str | None = None,
+    whisper_cpp_quant: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """
     Run transcription (Whisper or Parakeet) + word-level alignment on a single
@@ -1110,6 +1111,11 @@ def _transcribe_with_alignment(
     behaviour. Other registered backend ids dispatch through
     :mod:`scribe.whisper_backend`. Parakeet models always use the NeMo
     path regardless of ``whisper_backend`` — the field is Whisper-only.
+
+    ``whisper_cpp_quant`` (G7.2) is the GGUF quantisation when
+    ``whisper_backend == "whisper.cpp"`` (one of ``"q5_0"`` / ``"q8_0"``
+    / ``"f16"`` — see :data:`scribe.whisper_cpp.SUPPORTED_QUANTS`).
+    Ignored for the faster-whisper / Parakeet paths.
     """
     whisperx = _load_whisperx()
 
@@ -1149,6 +1155,12 @@ def _transcribe_with_alignment(
         asr_opts = dict(options.asr_options())
         asr_opts["batch_size"] = int(batch_size)
         asr_opts["chunk_size"] = int(options.chunk_size)
+        # G7.2 — surface whisper.cpp's quant choice through the same
+        # asr_options dict every backend reads from. Faster-whisper
+        # ignores it; the WhisperCppBackend pulls it out before
+        # dispatch.
+        if whisper_cpp_quant:
+            asr_opts["whisper_cpp_quant"] = str(whisper_cpp_quant)
         backend = get_backend(backend_id)
         backend_result = backend.transcribe(
             audio_path,
@@ -1224,6 +1236,7 @@ def transcribe_multi_track(
     options: AdvancedOptions | None = None,
     progress: ProgressFn = _noop_progress,
     whisper_backend: str | None = None,
+    whisper_cpp_quant: str | None = None,
 ) -> TranscriptionResult:
     """
     Transcribe a recording where each audio stream is one speaker.
@@ -1271,6 +1284,7 @@ def transcribe_multi_track(
             progress_span=1.0 / n,
             hf_token=os.environ.get("HF_TOKEN"),
             whisper_backend=whisper_backend,
+            whisper_cpp_quant=whisper_cpp_quant,
         )
         used_language = detected
 
@@ -1330,6 +1344,7 @@ def transcribe_diarize(
     options: AdvancedOptions | None = None,
     progress: ProgressFn = _noop_progress,
     whisper_backend: str | None = None,
+    whisper_cpp_quant: str | None = None,
 ) -> TranscriptionResult:
     """Single-track transcription with pyannote AI diarization."""
     if not hf_token:
@@ -1356,6 +1371,7 @@ def transcribe_diarize(
         progress_span=0.7,
         hf_token=hf_token,
         whisper_backend=whisper_backend,
+        whisper_cpp_quant=whisper_cpp_quant,
     )
 
     whisperx = _load_whisperx()
@@ -1468,6 +1484,7 @@ def transcribe(
     options: AdvancedOptions | None = None,
     progress: ProgressFn = _noop_progress,
     whisper_backend: str | None = None,
+    whisper_cpp_quant: str | None = None,
 ) -> TranscriptionResult:
     """
     Entry point.
@@ -1479,6 +1496,9 @@ def transcribe(
     non-Parakeet models. ``None`` / ``"faster-whisper"`` keeps the
     historical CTranslate2 path. Other registered backend ids dispatch
     through :mod:`scribe.whisper_backend`.
+
+    ``whisper_cpp_quant`` (G7.2) selects the GGUF quantisation when
+    ``whisper_backend == "whisper.cpp"``. Ignored otherwise.
     """
     opts = options or AdvancedOptions()
     if mode == "auto":
@@ -1496,6 +1516,7 @@ def transcribe(
             options=opts,
             progress=progress,
             whisper_backend=whisper_backend,
+            whisper_cpp_quant=whisper_cpp_quant,
         )
     return transcribe_diarize(
         input_path,
@@ -1510,4 +1531,5 @@ def transcribe(
         options=opts,
         progress=progress,
         whisper_backend=whisper_backend,
+        whisper_cpp_quant=whisper_cpp_quant,
     )

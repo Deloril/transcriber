@@ -222,43 +222,37 @@ class FasterWhisperBackend(WhisperBackend):
 
 
 class WhisperCppBackend(WhisperBackend):
-    """Placeholder for the GGUF / whisper.cpp adapter (G7.2).
+    """GGUF / whisper.cpp inference backend (G7.2).
 
-    Registered now so the UI can surface the option (greyed out with a
-    hint until the adapter lands), and so the ``backend`` form-field
-    on the upload page has a stable id to round-trip. The actual
-    inference call — pywhispercpp + GGUF models in
-    ``~/.scribe/models/whisper.cpp/`` + word-timestamp emission via
-    ``--max-len 1`` — is implemented in the G7.2 commit. Until then
-    :meth:`is_available` reports ``False`` and :meth:`transcribe`
-    raises a clear NotImplementedError.
+    Wraps :mod:`scribe.whisper_cpp` (which in turn wraps
+    ``pywhispercpp``) so Apple Silicon and Vulkan-capable boxes get
+    GPU-accelerated Whisper. Routes ``model_name`` straight through to
+    the GGUF catalogue; the quant comes off ``asr_options`` (the engine
+    bakes ``whisper_cpp_quant`` in before dispatch). Word timestamps are
+    emitted natively via pywhispercpp's ``token_timestamps=True``, so
+    the engine can skip the whisperx alignment pass for whisper.cpp
+    transcripts (the converter populates ``segments[i]["words"]`` with
+    per-word start/end seconds).
+
+    :meth:`is_available` reports True iff ``pywhispercpp`` is
+    importable. The runtime catalogue (which GGUFs the user has on
+    disk) is *not* part of availability — a missing GGUF is a clear
+    runtime ``FileNotFoundError`` with a download URL, not a silent
+    "backend disabled" surprise.
     """
 
     id = BACKEND_WHISPER_CPP
     display_name = "whisper.cpp"
     description = (
         "GGUF weights with CPU + Metal + Vulkan acceleration. "
-        "Recommended on Apple Silicon (G7.2 — adapter coming)."
+        "Recommended on Apple Silicon (G7.2)."
     )
     supported_devices = ("cpu", "mps", "cuda", "vulkan")
     model_format = "gguf"
 
     def is_available(self) -> tuple[bool, str]:
-        try:
-            import pywhispercpp  # noqa: F401
-        except Exception:
-            return (
-                False,
-                "pywhispercpp not installed — adapter ships in G7.2",
-            )
-        # The pywhispercpp install is a necessary but not sufficient
-        # condition for the adapter to work; until G7.2 lands the
-        # adapter wiring itself, advertise "not available" so users
-        # don't accidentally pick a backend that will raise.
-        return (
-            False,
-            "whisper.cpp adapter is registered but not yet wired (G7.2)",
-        )
+        from . import whisper_cpp
+        return whisper_cpp.is_pywhispercpp_available()
 
     def transcribe(
         self,
@@ -272,9 +266,28 @@ class WhisperCppBackend(WhisperBackend):
         progress_base: float = 0.0,
         progress_span: float = 1.0,
     ) -> dict[str, Any]:
-        raise NotImplementedError(
-            "whisper.cpp backend is registered but the inference "
-            "adapter lands in G7.2. Pick faster-whisper for now."
+        from . import whisper_cpp
+
+        quant = str(
+            asr_options.get("whisper_cpp_quant")
+            or whisper_cpp.DEFAULT_QUANT
+        )
+        # vad_options is unused by whisper.cpp (the GGUF model has its
+        # own VAD); accept and ignore so the backend signature stays
+        # uniform across implementations.
+        _ = vad_options
+        inference_options: dict[str, Any] = {}
+        if "n_threads" in asr_options:
+            inference_options["n_threads"] = asr_options["n_threads"]
+        return whisper_cpp.transcribe(
+            audio_path,
+            model=model_name,
+            quant=quant,
+            language=language,
+            progress=progress,
+            progress_base=progress_base,
+            progress_span=progress_span,
+            inference_options=inference_options,
         )
 
 

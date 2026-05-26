@@ -204,15 +204,24 @@ class TestDescribeBackends:
         ids = [b["id"] for b in wb.describe_backends()]
         assert "faster-whisper" in ids
 
-    def test_whisper_cpp_advertised_but_unavailable(self) -> None:
-        # The placeholder reports unavailable until G7.2; the UI
-        # greys out the option but still lists it so the user
-        # knows what's coming.
+    def test_whisper_cpp_advertised(self) -> None:
+        # Post-G7.2, whisper.cpp's availability tracks ``pywhispercpp``
+        # being importable. The UI greys out the option when the
+        # dependency isn't installed; the registry always lists it so
+        # the user can see it's there. We don't assert availability
+        # here because the test environment may or may not have
+        # pywhispercpp installed — what we *can* assert is that
+        # describe_backends() returns the row at all.
         cpp = next(
             b for b in wb.describe_backends() if b["id"] == "whisper.cpp"
         )
-        assert cpp["available"] is False
-        assert "G7.2" in cpp["unavailable_reason"] or cpp["unavailable_reason"]
+        assert "available" in cpp
+        assert isinstance(cpp["available"], bool)
+        # When unavailable, the reason must be non-empty so the UI
+        # can render it; when available, the reason can be the empty
+        # string (the BackendInfo default).
+        if not cpp["available"]:
+            assert cpp["unavailable_reason"]
 
 
 # --------------------------------------------------------------------------- #
@@ -259,24 +268,95 @@ class TestWhisperCppBackend:
         # backend.
         assert "mps" in be.supported_devices
 
-    def test_is_unavailable_until_adapter_ships(self) -> None:
-        # G7.1 ships the registration; G7.2 ships the inference
-        # path. Until then the placeholder reports unavailable.
+    def test_availability_tracks_pywhispercpp_import(self) -> None:
+        # G7.2 — the placeholder is gone; availability now reflects
+        # whether ``pywhispercpp`` is installed. We can't assume
+        # either way in CI, but we can assert that the unavailable
+        # branch carries a non-empty reason (so the UI renders
+        # something useful).
         avail, reason = wb.WhisperCppBackend().is_available()
-        assert avail is False
-        assert reason  # non-empty — UI renders this
+        assert isinstance(avail, bool)
+        if not avail:
+            assert reason
+            # A user-actionable hint: mention pywhispercpp so the
+            # reader knows what to install.
+            assert "pywhispercpp" in reason.lower()
 
-    def test_transcribe_raises_not_implemented(self) -> None:
+    def test_transcribe_routes_through_whisper_cpp_module(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # G7.2 — backend.transcribe() delegates to
+        # scribe.whisper_cpp.transcribe(), reading the GGUF quant
+        # from asr_options and forwarding model_name as the model.
+        from scribe import whisper_cpp
+
+        called: dict[str, Any] = {}
+
+        def _fake_transcribe(
+            audio_path: Path,
+            *,
+            model: str,
+            quant: str,
+            language: str,
+            progress: Any,
+            progress_base: float,
+            progress_span: float,
+            inference_options: dict[str, Any],
+        ) -> dict[str, Any]:
+            called["audio_path"] = audio_path
+            called["model"] = model
+            called["quant"] = quant
+            called["language"] = language
+            called["progress_base"] = progress_base
+            called["progress_span"] = progress_span
+            called["inference_options"] = inference_options
+            return {"segments": [], "language": language}
+
+        monkeypatch.setattr(whisper_cpp, "transcribe", _fake_transcribe)
+
         be = wb.WhisperCppBackend()
-        with pytest.raises(NotImplementedError):
-            be.transcribe(
-                Path("/tmp/x.wav"),
-                model_name="large-v3",
-                language="en",
-                asr_options={},
-                vad_options={},
-                progress=lambda m, f: None,
-            )
+        out = be.transcribe(
+            tmp_path / "in.wav",
+            model_name="large-v3-turbo",
+            language="en",
+            asr_options={"whisper_cpp_quant": "q8_0", "n_threads": 4},
+            vad_options={"vad_onset": 0.5},
+            progress=lambda m, f: None,
+            progress_base=0.1,
+            progress_span=0.5,
+        )
+        assert out == {"segments": [], "language": "en"}
+        assert called["model"] == "large-v3-turbo"
+        assert called["quant"] == "q8_0"
+        assert called["language"] == "en"
+        assert called["progress_base"] == 0.1
+        assert called["progress_span"] == 0.5
+        assert called["inference_options"] == {"n_threads": 4}
+
+    def test_transcribe_defaults_quant_when_omitted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from scribe import whisper_cpp
+
+        captured: dict[str, Any] = {}
+
+        def _fake(audio_path: Path, **kw: Any) -> dict[str, Any]:
+            captured.update(kw)
+            return {"segments": [], "language": "en"}
+
+        monkeypatch.setattr(whisper_cpp, "transcribe", _fake)
+
+        be = wb.WhisperCppBackend()
+        be.transcribe(
+            tmp_path / "x.wav",
+            model_name="large-v3",
+            language="en",
+            asr_options={},  # no whisper_cpp_quant
+            vad_options={},
+            progress=lambda m, f: None,
+        )
+        # Falls through to the module-level default.
+        assert captured["quant"] == whisper_cpp.DEFAULT_QUANT
 
 
 # --------------------------------------------------------------------------- #

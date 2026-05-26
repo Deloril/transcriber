@@ -94,9 +94,14 @@ class Job:
     # picker); the engine routes the inference call through
     # :mod:`scribe.whisper_backend`. Default is ``faster-whisper``,
     # the historical (and still recommended) backend on CUDA / ROCm /
-    # CPU. Apple Silicon users will switch to ``whisper.cpp`` once
-    # the G7.2 adapter lands.
+    # CPU. Apple Silicon users switch to ``whisper.cpp`` (G7.2).
     whisper_backend: str = "faster-whisper"
+    # G7.2 — GGUF quantisation when ``whisper_backend == "whisper.cpp"``.
+    # One of "q5_0" (default; smallest, fastest), "q8_0" (higher
+    # accuracy, larger file), "f16" (closest to faster-whisper's FP16,
+    # 2× the disk). Ignored for the faster-whisper / Parakeet paths.
+    # See :data:`scribe.whisper_cpp.SUPPORTED_QUANTS`.
+    whisper_cpp_quant: str = "q5_0"
 
     def to_state(self) -> dict[str, Any]:
         d = asdict(self)
@@ -131,6 +136,9 @@ class Job:
             media_discarded=_to_bool_persisted(d.get("media_discarded", False)),
             whisper_backend=str(
                 d.get("whisper_backend") or "faster-whisper"
+            ),
+            whisper_cpp_quant=str(
+                d.get("whisper_cpp_quant") or "q5_0"
             ),
         )
 
@@ -231,19 +239,25 @@ async def _startup() -> None:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
     # G7.1 — surface the registered Whisper backends so the upload
-    # page can render an Engine selector. The default id is what the
-    # form pre-selects; available_id is the same today but G7.3 will
-    # flip it for Apple Silicon once the whisper.cpp adapter ships.
+    # page can render an Engine selector. G7.2 also surfaces the
+    # whisper.cpp quant catalogue inline so the user can pick GGUF
+    # quantisation without a round-trip to /api/whisper-cpp/models.
     from .whisper_backend import (
         default_backend_id,
         describe_backends,
     )
+    from . import whisper_cpp
     return templates.TemplateResponse(
         request,
         "index.html",
         {
             "whisper_backends": describe_backends(),
             "default_whisper_backend": default_backend_id(),
+            # G7.2 — quant selector + supported model list for the
+            # whisper.cpp panel.
+            "whisper_cpp_supported_models": list(whisper_cpp.SUPPORTED_MODELS),
+            "whisper_cpp_supported_quants": list(whisper_cpp.SUPPORTED_QUANTS),
+            "whisper_cpp_default_quant": whisper_cpp.DEFAULT_QUANT,
         },
     )
 
@@ -267,6 +281,45 @@ async def whisper_backends_endpoint() -> JSONResponse:
     return JSONResponse({
         "default": default_backend_id(),
         "backends": describe_backends(),
+    })
+
+
+@app.get("/api/whisper-cpp/models")
+async def whisper_cpp_models_endpoint() -> JSONResponse:
+    """List the GGUF model + quant catalogue for whisper.cpp (G7.2).
+
+    The Settings strip on the upload page populates a quant ``<select>``
+    from this; the table also exposes which combinations are already
+    cached on disk vs need a download. Returns:
+
+    .. code-block:: json
+
+        {
+          "supported_models": ["large-v3", ...],
+          "supported_quants": ["q5_0", "q8_0", "f16"],
+          "default_model": "large-v3",
+          "default_quant": "q5_0",
+          "cache_dir": "/home/.../whisper.cpp",
+          "pywhispercpp_available": false,
+          "pywhispercpp_unavailable_reason": "...",
+          "models": [{"model": "large-v3", "quant": "q5_0",
+                      "filename": "ggml-large-v3-q5_0.bin",
+                      "path": "/...", "cached": false,
+                      "size_bytes": null,
+                      "download_url": "https://..."}, ...]
+        }
+    """
+    from . import whisper_cpp
+    avail, reason = whisper_cpp.is_pywhispercpp_available()
+    return JSONResponse({
+        "supported_models": list(whisper_cpp.SUPPORTED_MODELS),
+        "supported_quants": list(whisper_cpp.SUPPORTED_QUANTS),
+        "default_model": whisper_cpp.DEFAULT_MODEL,
+        "default_quant": whisper_cpp.DEFAULT_QUANT,
+        "cache_dir": str(whisper_cpp.default_cache_dir()),
+        "pywhispercpp_available": avail,
+        "pywhispercpp_unavailable_reason": reason,
+        "models": [m.to_dict() for m in whisper_cpp.list_catalogue()],
     })
 
 
@@ -10616,6 +10669,7 @@ async def upload(
     batch_size: str = Form("8"),
     options: str = Form("{}"),
     backend: str = Form("faster-whisper"),
+    whisper_cpp_quant: str = Form("q5_0"),
 ) -> JSONResponse:
     job_id = uuid.uuid4().hex[:12]
     safe_name = Path(file.filename or "upload.bin").name
@@ -10657,6 +10711,23 @@ async def upload(
             "See GET /api/whisper-backends for the registered list.",
         )
 
+    # G7.2 — validate whisper.cpp quant when relevant. The form field
+    # is always submitted (the upload page renders the select for
+    # every backend so JS doesn't have to mutate the form per-toggle),
+    # so blank falls through to the default. The validation is
+    # backend-aware: we only enforce the supported set when the user
+    # actually picked whisper.cpp, so an inert q5_0 sitting on a
+    # faster-whisper job persists as the default but never reaches
+    # the inference path.
+    from . import whisper_cpp as _wcpp
+    quant_id = (whisper_cpp_quant or "").strip() or _wcpp.DEFAULT_QUANT
+    if backend_id == "whisper.cpp" and not _wcpp.is_supported_quant(quant_id):
+        raise HTTPException(
+            400,
+            f"Unsupported whisper.cpp quant {quant_id!r}. "
+            f"Supported: {list(_wcpp.SUPPORTED_QUANTS)}.",
+        )
+
     try:
         streams = probe_audio_streams(input_path)
     except Exception as e:
@@ -10685,6 +10756,7 @@ async def upload(
         options=opts_dict,
         batch_size=bs,
         whisper_backend=backend_id,
+        whisper_cpp_quant=quant_id,
     )
     with JOBS_LOCK:
         JOBS[job_id] = job
@@ -10736,6 +10808,7 @@ def _run_job(job_id: str) -> None:
             options=AdvancedOptions.from_dict(job.options),
             progress=lambda m, f: _set_progress(job_id, m, f),
             whisper_backend=job.whisper_backend,
+            whisper_cpp_quant=job.whisper_cpp_quant,
         )
         base = job.output_dir / job.input_path.stem
         paths = write_all(result, base)

@@ -543,14 +543,20 @@
       {# G7.1 — Whisper inference engine selector. Sits next to the
          model picker so it's discoverable. ``whisper_backends`` is
          the registry snapshot from scribe.whisper_backend; the JS
-         submits the chosen id alongside the upload payload. #}
+         submits the chosen id alongside the upload payload.
+
+         G7.2 — when whisper.cpp is selected, the second column shows
+         the GGUF quant selector (q5_0 / q8_0 / f16) and a hint that
+         lists which whisper.cpp models are supported. The whole
+         block is rendered always; JS toggles `.hidden` on the quant
+         column based on the engine selection. #}
       {% if whisper_backends %}
       <div style="height: 14px;"></div>
       <div class="row">
         <div>
           <label>Engine
             <span class="help"
-              title="Which inference engine handles the Whisper pass. faster-whisper is the default on CUDA / ROCm / CPU. whisper.cpp ships in G7.2 for Apple Silicon Metal acceleration.">?</span>
+              title="Which inference engine handles the Whisper pass. faster-whisper is the default on CUDA / ROCm / CPU. whisper.cpp uses GGUF weights with Metal / Vulkan acceleration — recommended on Apple Silicon (G7.2).">?</span>
           </label>
           <select id="whisperBackend" data-test-id="whisper-backend-select">
             {% for be in whisper_backends %}
@@ -564,6 +570,24 @@
             {% endfor %}
           </select>
           <p id="whisperBackendHint" class="hint" style="margin-top:6px;"></p>
+        </div>
+        <div id="whisperCppPanel" class="hidden" data-test-id="whisper-cpp-panel">
+          <label>GGUF quant
+            <span class="help"
+              title="GGUF quantisation for whisper.cpp. q5_0 is the smallest+fastest, q8_0 trades disk for accuracy, f16 matches faster-whisper's FP16 (largest). Models cache under ~/.scribe/models/whisper.cpp/.">?</span>
+          </label>
+          <select id="whisperCppQuant" data-test-id="whisper-cpp-quant-select">
+            {% for q in whisper_cpp_supported_quants %}
+              <option value="{{ q }}"{% if q == whisper_cpp_default_quant %} selected{% endif %}>{{ q }}</option>
+            {% endfor %}
+          </select>
+          <p id="whisperCppHint" class="hint" style="margin-top:6px;"
+             data-supported-models="{{ whisper_cpp_supported_models|join(',') }}">
+            whisper.cpp supports:
+            {% for m in whisper_cpp_supported_models %}<code>{{ m }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.
+            Models cache under <code>~/.scribe/models/whisper.cpp/</code>; the
+            <a href="/api/whisper-cpp/models">model catalogue</a> lists which GGUFs are present.
+          </p>
         </div>
       </div>
       {% endif %}
@@ -1102,6 +1126,10 @@
     // backend's description; if the option is disabled (the
     // ``available`` flag was false at server-render time) we surface
     // the unavailable_reason inline so the user understands why.
+    //
+    // G7.2 — the same handler toggles the visibility of the
+    // whisper.cpp quant column. Showing it for any other engine
+    // would be misleading (faster-whisper has no GGUF quant knob).
     function updateWhisperBackendHint() {
       const sel = $("whisperBackend");
       const hint = $("whisperBackendHint");
@@ -1115,6 +1143,18 @@
       const available = opt.getAttribute("data-available") !== "false";
       hint.style.color = available ? "var(--muted)" : "var(--warn)";
       hint.textContent = desc;
+      // G7.2 — show the quant panel iff whisper.cpp is the active
+      // engine. Anything else hides it; the form field still
+      // submits its default (q5_0) but the server only enforces the
+      // supported set when backend == whisper.cpp.
+      const cppPanel = $("whisperCppPanel");
+      if (cppPanel) {
+        if (sel.value === "whisper.cpp") {
+          cppPanel.classList.remove("hidden");
+        } else {
+          cppPanel.classList.add("hidden");
+        }
+      }
     }
     if ($("whisperBackend")) {
       $("whisperBackend").addEventListener("change", updateWhisperBackendHint);
@@ -1244,6 +1284,12 @@
       // through to the server-side default (``faster-whisper``).
       const wbEl = $("whisperBackend");
       if (wbEl) fd.append("backend", wbEl.value || "faster-whisper");
+      // G7.2 — whisper.cpp GGUF quant. Submitted regardless of the
+      // active backend (the server validates it only when the
+      // backend is whisper.cpp); blank falls through to the
+      // server-side default (``q5_0``).
+      const wcQuantEl = $("whisperCppQuant");
+      if (wcQuantEl) fd.append("whisper_cpp_quant", wcQuantEl.value || "q5_0");
 
       let resp;
       try {
