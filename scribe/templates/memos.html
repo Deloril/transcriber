@@ -359,6 +359,24 @@
                   data-test-id="memos-delete">Delete</button>
         </div>
         <div class="right">
+          {#
+            F5.5 — promote a matured memo into a real Code in one click.
+            Only visible while editing an existing memo (the Save / Edit
+            cycle of a fresh draft hasn't produced a memo id yet, and
+            the endpoint requires one). Posts to
+            ``/api/projects/<pid>/memos/<mid>/promote-to-code`` with the
+            shape produced by ``buildPromoteMemoPayload``; on success the
+            page redirects to the codebook editor where the new code is
+            visible. Lock-aware: a 409 surfaces the "codebook is locked"
+            message the F2.4 module returns.
+          #}
+          <button type="button" id="mmPromote" class="btn secondary"
+                  style="display:none"
+                  data-test-feature="F5.5"
+                  data-test-id="memos-promote-to-code"
+                  title="Promote this memo into a Code in the codebook (F5.5)">
+            ↗ Promote to code
+          </button>
           <button type="button" id="mmCancel" class="btn secondary"
                   style="display:none">Cancel edit</button>
           <button type="submit" id="mmSubmit" class="btn"
@@ -370,7 +388,10 @@
 </div>
 
 <script type="module">
-import { escapeHtml } from "/static/js/helpers.mjs";
+import {
+  escapeHtml,
+  buildPromoteMemoPayload,
+} from "/static/js/helpers.mjs";
 
 const PROJECT_ID = {{ project_id | tojson }};
 
@@ -391,6 +412,7 @@ const els = {
   submit: document.getElementById("mmSubmit"),
   cancel: document.getElementById("mmCancel"),
   del: document.getElementById("mmDelete"),
+  promote: document.getElementById("mmPromote"),
 };
 
 let memos = [];
@@ -483,6 +505,7 @@ function clearForm() {
   els.formTitle.textContent = "New memo";
   els.cancel.style.display = "none";
   els.del.style.display = "none";
+  if (els.promote) els.promote.style.display = "none";
   els.submit.textContent = "Save memo";
   setStatus("");
   renderList();
@@ -502,6 +525,7 @@ async function loadForEdit(memoId) {
     els.formTitle.textContent = "Edit memo";
     els.cancel.style.display = "";
     els.del.style.display = "";
+    if (els.promote) els.promote.style.display = "";
     els.submit.textContent = "Save changes";
     setStatus("");
     renderList();
@@ -588,6 +612,71 @@ els.newBtn.addEventListener("click", () => {
   clearForm();
   els.title.focus();
 });
+
+// --------------------------------------------------------------------- //
+// F5.5 — promote a matured memo into a real Code in one click.
+//
+// The endpoint accepts an empty body and fills every field from
+// scribe.memo_promote.py defaults: name from the memo title (or the
+// first body line), definition from memo.body, stage='initial',
+// status='active', and a back-link with role 'promoted_to' so the
+// audit lineage stays intact in both directions. We forward the
+// current title as an explicit override only if the user has typed
+// something into the title field — otherwise the server's derive
+// step runs.
+//
+// On success the page navigates to the codebook editor so the user
+// can immediately keep refining the new code (definition, exemplars,
+// stage). On 409 (codebook locked, F2.4) the server's message is
+// surfaced inline so the user understands why the action was blocked.
+// --------------------------------------------------------------------- //
+
+async function promoteCurrentMemo() {
+  if (!editingId) return;
+  if (
+    !confirm(
+      "Promote this memo into a Code in the codebook?\n\n" +
+        "A new code will be created from the memo's title and body, " +
+        "and the memo will keep a 'promoted_to' link to it. The " +
+        "codebook editor will open so you can refine the definition.",
+    )
+  ) {
+    return;
+  }
+  let payload;
+  try {
+    // Pass the live title only if the user has typed something —
+    // otherwise let the server derive the name from the memo body.
+    const title = els.title.value.trim();
+    payload = buildPromoteMemoPayload(title ? { name: title } : {});
+  } catch (e) {
+    setStatus(`Couldn't build payload: ${e.message}`, "err");
+    return;
+  }
+  setStatus("Promoting…", "");
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/memos/${editingId}/promote-to-code`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    setStatus("Promoted. Opening codebook…", "ok");
+    window.location.href = `/projects/${PROJECT_ID}/codebook`;
+  } catch (e) {
+    setStatus(`Promote failed: ${e.message}`, "err");
+  }
+}
+
+if (els.promote) {
+  els.promote.addEventListener("click", promoteCurrentMemo);
+}
 
 // --------------------------------------------------------------------- //
 // F5.4 — memo export dropdown
