@@ -30,14 +30,24 @@ import pytest
 from scribe.memo_export import (
     CSV_COLUMNS,
     CSV_LIST_SEP,
+    EXPORT_FORMAT_CSV,
+    EXPORT_FORMAT_JSONL,
+    EXPORT_FORMAT_MARKDOWN,
+    EXPORT_FORMAT_RTF,
+    EXPORT_FORMATS,
+    FormatSpec,
     _format_link_for_csv,
     _heading_for,
     _link_label,
     _markdown_memo_block,
     _provenance_source,
     _rtf_escape,
+    build_filter_summary,
     build_target_names,
     filter_memos,
+    normalise_format,
+    render_memos,
+    slugify_memos_filename,
     to_csv,
     to_jsonl,
     to_markdown,
@@ -805,3 +815,235 @@ class TestBuildTargetNames:
         assert ("application", _HEX_APPLICATION) in out
         assert any(k[0] == "memo" for k in out.keys())
         assert any(k[0] == "project" for k in out.keys())
+
+
+# --------------------------------------------------------------------------- #
+# F5.4 user-facing surface — format registry
+# --------------------------------------------------------------------------- #
+
+
+class TestExportFormatsRegistry:
+    """The format registry is the public contract for the F5.4
+    download endpoint. Adding new formats is fine; renaming or
+    removing keys is a breaking change."""
+
+    def test_four_canonical_formats(self) -> None:
+        assert set(EXPORT_FORMATS.keys()) == {
+            EXPORT_FORMAT_CSV,
+            EXPORT_FORMAT_MARKDOWN,
+            EXPORT_FORMAT_RTF,
+            EXPORT_FORMAT_JSONL,
+        }
+
+    def test_format_specs_are_complete(self) -> None:
+        for spec in EXPORT_FORMATS.values():
+            assert isinstance(spec, FormatSpec)
+            assert spec.key
+            assert spec.extension.startswith(".")
+            assert spec.media_type
+            assert spec.label
+
+    def test_csv_extension_and_media_type(self) -> None:
+        spec = EXPORT_FORMATS[EXPORT_FORMAT_CSV]
+        assert spec.extension == ".csv"
+        assert spec.media_type.startswith("text/csv")
+
+    def test_markdown_extension_and_media_type(self) -> None:
+        spec = EXPORT_FORMATS[EXPORT_FORMAT_MARKDOWN]
+        assert spec.extension == ".md"
+        assert spec.media_type.startswith("text/markdown")
+
+    def test_rtf_extension_and_media_type(self) -> None:
+        spec = EXPORT_FORMATS[EXPORT_FORMAT_RTF]
+        assert spec.extension == ".rtf"
+        assert spec.media_type == "application/rtf"
+
+    def test_jsonl_extension_and_media_type(self) -> None:
+        spec = EXPORT_FORMATS[EXPORT_FORMAT_JSONL]
+        assert spec.extension == ".jsonl"
+        assert "ndjson" in spec.media_type
+
+
+class TestNormaliseFormat:
+    """``normalise_format`` is the alias-resolver every URL hits."""
+
+    def test_canonical_keys_pass_through(self) -> None:
+        for key in EXPORT_FORMATS.keys():
+            assert normalise_format(key) == key
+
+    def test_md_alias_routes_to_markdown(self) -> None:
+        assert normalise_format("md") == EXPORT_FORMAT_MARKDOWN
+
+    def test_word_alias_routes_to_rtf(self) -> None:
+        assert normalise_format("word") == EXPORT_FORMAT_RTF
+        assert normalise_format("doc") == EXPORT_FORMAT_RTF
+        assert normalise_format("docx") == EXPORT_FORMAT_RTF
+
+    def test_ndjson_alias_routes_to_jsonl(self) -> None:
+        assert normalise_format("ndjson") == EXPORT_FORMAT_JSONL
+        assert normalise_format("json") == EXPORT_FORMAT_JSONL
+
+    def test_case_insensitive(self) -> None:
+        assert normalise_format("CSV") == EXPORT_FORMAT_CSV
+        assert normalise_format("Markdown") == EXPORT_FORMAT_MARKDOWN
+
+    def test_strips_whitespace(self) -> None:
+        assert normalise_format("  rtf  ") == EXPORT_FORMAT_RTF
+
+    def test_none_raises_with_actionable_message(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            normalise_format(None)
+        assert "required" in str(exc.value).lower()
+
+    def test_unknown_raises_with_format_list(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            normalise_format("xlsx")
+        msg = str(exc.value)
+        assert "xlsx" in msg
+        assert "csv" in msg
+        assert "markdown" in msg
+
+
+class TestRenderMemos:
+    """``render_memos`` dispatches the four pure exporters by format."""
+
+    def test_csv_dispatch_matches_to_csv(self) -> None:
+        memos = [_memo()]
+        assert render_memos("csv", memos) == to_csv(memos)
+
+    def test_markdown_dispatch_matches_to_markdown(self) -> None:
+        memos = [_memo()]
+        proj = _project()
+        assert render_memos(
+            "markdown", memos, project=proj
+        ) == to_markdown(memos, project=proj)
+
+    def test_rtf_dispatch_matches_to_rtf(self) -> None:
+        memos = [_memo()]
+        proj = _project()
+        assert render_memos(
+            "rtf", memos, project=proj
+        ) == to_rtf(memos, project=proj)
+
+    def test_jsonl_dispatch_matches_to_jsonl(self) -> None:
+        memos = [_memo()]
+        # JSONL ignores project / target_names / filter_summary.
+        out = render_memos(
+            "jsonl",
+            memos,
+            project=_project(name="Should not leak"),
+            target_names={("code", _HEX_CODE): "Pacing"},
+            filter_summary="type=theoretical",
+        )
+        assert out == to_jsonl(memos)
+        # The project name and filter summary do NOT appear in JSONL.
+        assert "Should not leak" not in out
+        assert "type=theoretical" not in out
+
+    def test_aliases_resolve_through_render(self) -> None:
+        memos = [_memo()]
+        # ``md`` resolves to markdown.
+        assert render_memos("md", memos) == to_markdown(memos)
+        # ``word`` resolves to RTF.
+        assert render_memos("word", memos) == to_rtf(memos)
+
+    def test_filter_summary_lands_in_markdown(self) -> None:
+        memos = [_memo()]
+        out = render_memos(
+            "markdown",
+            memos,
+            filter_summary="type=theoretical",
+        )
+        assert "Filter: type=theoretical" in out
+
+    def test_filter_summary_skipped_for_csv(self) -> None:
+        # CSV column-shape is the public contract — no header row.
+        memos = [_memo()]
+        out = render_memos(
+            "csv",
+            memos,
+            filter_summary="type=theoretical",
+        )
+        assert "type=theoretical" not in out
+
+    def test_empty_inputs_dont_crash(self) -> None:
+        # All four formats accept zero memos.
+        assert render_memos("csv", []).startswith("id,")
+        assert render_memos("markdown", []) != ""
+        assert render_memos("rtf", []).startswith(r"{\rtf")
+        assert render_memos("jsonl", []) == ""
+
+    def test_unknown_format_raises(self) -> None:
+        with pytest.raises(ValueError):
+            render_memos("xlsx", [_memo()])
+
+
+class TestSlugifyMemosFilename:
+    """Filename slugs follow the same NFKD-+-ASCII rule as
+    ``slugify_codebook_filename``. The ``-memos`` infix distinguishes
+    a memos export from a codebook export when both land in the same
+    Downloads folder."""
+
+    def test_with_project_name(self) -> None:
+        proj = _project(name="Pilot study")
+        assert slugify_memos_filename(proj, "csv") == "pilot-study-memos.csv"
+
+    def test_with_unicode_project_name(self) -> None:
+        proj = _project(name="Café société")
+        # NFKD downgrade strips combining marks.
+        assert slugify_memos_filename(proj, "markdown") == "cafe-societe-memos.md"
+
+    def test_no_project_falls_back_to_memos(self) -> None:
+        assert slugify_memos_filename(None, "rtf") == "memos.rtf"
+
+    def test_blank_project_name_falls_back(self) -> None:
+        # Project.new validates a non-empty name, so to exercise the
+        # blank-slug fallback we stub a duck-typed object whose ``name``
+        # is whitespace-only.
+        class _Stub:
+            name = "   "
+
+        assert slugify_memos_filename(_Stub(), "jsonl") == "memos.jsonl"
+
+    def test_jsonl_extension(self) -> None:
+        proj = _project(name="X")
+        assert slugify_memos_filename(proj, "jsonl") == "x-memos.jsonl"
+
+    def test_resolves_aliases(self) -> None:
+        proj = _project(name="X")
+        # ``word`` → RTF
+        assert slugify_memos_filename(proj, "word") == "x-memos.rtf"
+        # ``md`` → Markdown
+        assert slugify_memos_filename(proj, "md") == "x-memos.md"
+
+    def test_unknown_format_raises(self) -> None:
+        with pytest.raises(ValueError):
+            slugify_memos_filename(_project(), "xlsx")
+
+
+class TestBuildFilterSummary:
+    """The summary line lands in the Markdown / RTF export header so
+    the file explains which filters were applied."""
+
+    def test_no_filters_returns_empty(self) -> None:
+        assert build_filter_summary() == ""
+
+    def test_single_filter(self) -> None:
+        assert build_filter_summary(type="theoretical") == "type=theoretical"
+
+    def test_multiple_filters_join_with_comma(self) -> None:
+        out = build_filter_summary(
+            type="theoretical",
+            target_type="code",
+            tag="early",
+        )
+        assert out == "type=theoretical, target_type=code, tag=early"
+
+    def test_argument_order_is_stable(self) -> None:
+        # Stable across calls so snapshot tests stay reliable.
+        first = build_filter_summary(type="t", target_type="code")
+        second = build_filter_summary(type="t", target_type="code")
+        assert first == second
+
+    def test_blanks_treated_as_absent(self) -> None:
+        assert build_filter_summary(type="", target_type=None) == ""

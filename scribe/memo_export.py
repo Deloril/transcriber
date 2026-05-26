@@ -74,7 +74,9 @@ import csv
 import io
 import json
 import re
-from typing import Iterable, Mapping, Sequence
+import unicodedata
+from dataclasses import dataclass
+from typing import Callable, Iterable, Mapping, Sequence
 
 from .memos import (
     MEMO_LINK_TARGET_TYPES,
@@ -699,3 +701,307 @@ def to_jsonl(memos: Sequence[Memo]) -> str:
         )
         + "\n"
     )
+
+
+# --------------------------------------------------------------------------- #
+# F5.4 user-facing surface — format registry + filename slug
+#
+# The four pure exporters above each take ``Sequence[Memo]`` and return
+# a string. F5.4 closes the loop by giving the HTTP endpoint, the CLI,
+# and any future button in the UI a single common entry point — same
+# pattern :mod:`scribe.codebook_export` uses for F6.1.
+#
+# What gets added here:
+#
+#  * :data:`EXPORT_FORMATS` — registry of {key -> FormatSpec(extension,
+#    media_type, label)} for the user-facing formats. F5.4 covers all
+#    four: CSV, Markdown, RTF (= "Word"), and JSONL (the format we
+#    keep for round-trip / scripting use cases).
+#
+#  * :func:`normalise_format` — accepts the canonical keys plus
+#    ergonomic aliases (``md`` for Markdown; ``word`` / ``doc`` /
+#    ``docx`` for RTF; ``ndjson`` for JSONL). Raises :class:`ValueError`
+#    on anything else, with the list of accepted keys, so the message
+#    is actionable.
+#
+#  * :func:`render_memos` — single-dispatch helper that picks the
+#    right exporter for ``format`` and returns the rendered string.
+#    Forwards ``project`` / ``target_names`` / ``filter_summary`` only
+#    to renderers that consume them (CSV ignores ``filter_summary``;
+#    JSONL ignores everything except the memos themselves so the
+#    line-shape stays the public contract).
+#
+#  * :func:`slugify_memos_filename` — derives an attachment filename
+#    like ``my-project-memos.csv`` from a project. Same NFKD-normalise
+#    + ASCII-downgrade rule as ``slugify_codebook_filename``.
+#
+#  * :func:`build_filter_summary` — compose the human description of
+#    which filters were applied so the Markdown / RTF exporter header
+#    can explain itself ("Filter: type=theoretical, target_type=code").
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class FormatSpec:
+    """Static description of a user-facing memo export format.
+
+    * ``key`` — canonical lookup key (``csv`` / ``markdown`` / ``rtf``
+      / ``jsonl``).
+    * ``extension`` — file extension *with* leading dot (``.csv``).
+    * ``media_type`` — IANA media type for HTTP ``Content-Type``;
+      includes ``charset=utf-8`` for the text formats so browsers
+      don't guess Latin-1.
+    * ``label`` — human-readable name for UI buttons / log lines.
+    """
+
+    key: str
+    extension: str
+    media_type: str
+    label: str
+
+
+EXPORT_FORMAT_CSV = "csv"
+EXPORT_FORMAT_MARKDOWN = "markdown"
+EXPORT_FORMAT_RTF = "rtf"
+EXPORT_FORMAT_JSONL = "jsonl"
+
+
+# Registry of formats F5.4 surfaces. All four pure exporters above are
+# represented; the dropdown in the memos page renders a row per entry.
+EXPORT_FORMATS: dict[str, FormatSpec] = {
+    EXPORT_FORMAT_CSV: FormatSpec(
+        key=EXPORT_FORMAT_CSV,
+        extension=".csv",
+        media_type="text/csv; charset=utf-8",
+        label="CSV",
+    ),
+    EXPORT_FORMAT_MARKDOWN: FormatSpec(
+        key=EXPORT_FORMAT_MARKDOWN,
+        extension=".md",
+        media_type="text/markdown; charset=utf-8",
+        label="Markdown",
+    ),
+    EXPORT_FORMAT_RTF: FormatSpec(
+        key=EXPORT_FORMAT_RTF,
+        # Word and LibreOffice both open ``.rtf`` natively. We deliver
+        # an ``application/rtf`` body — the historical ``text/rtf`` is
+        # accepted but ``application/rtf`` is what Microsoft + the IETF
+        # converged on (RFC 1521 plus subsequent practice).
+        extension=".rtf",
+        media_type="application/rtf",
+        label="RTF (Word)",
+    ),
+    EXPORT_FORMAT_JSONL: FormatSpec(
+        key=EXPORT_FORMAT_JSONL,
+        extension=".jsonl",
+        # ``application/x-ndjson`` is the de-facto type for newline-
+        # delimited JSON. ``charset=utf-8`` because to_jsonl emits
+        # ``ensure_ascii=False`` so the bytes can be non-ASCII.
+        media_type="application/x-ndjson; charset=utf-8",
+        label="JSONL",
+    ),
+}
+
+
+# Aliases the user might type. Resolved before lookup in EXPORT_FORMATS.
+_FORMAT_ALIASES: dict[str, str] = {
+    "md": EXPORT_FORMAT_MARKDOWN,
+    "markdown": EXPORT_FORMAT_MARKDOWN,
+    "csv": EXPORT_FORMAT_CSV,
+    "rtf": EXPORT_FORMAT_RTF,
+    # "Word" routes to RTF — RTF is the format Word opens natively
+    # without a ``.docx`` ZIP ceremony, and F5.4 ships an RTF exporter.
+    "word": EXPORT_FORMAT_RTF,
+    "doc": EXPORT_FORMAT_RTF,
+    "docx": EXPORT_FORMAT_RTF,
+    "jsonl": EXPORT_FORMAT_JSONL,
+    "ndjson": EXPORT_FORMAT_JSONL,
+    "json": EXPORT_FORMAT_JSONL,
+}
+
+
+def normalise_format(format: str | None) -> str:
+    """Resolve a caller-supplied format string to a canonical key.
+
+    Case-insensitive; trims whitespace; recognises a small handful of
+    aliases (``md`` → ``markdown``; ``word`` / ``doc`` / ``docx`` →
+    ``rtf``; ``ndjson`` / ``json`` → ``jsonl``). Raises :class:`ValueError`
+    for unknown formats with the list of accepted keys, so the message
+    is actionable.
+    """
+    if format is None:
+        raise ValueError(
+            "Memo export format is required; expected one of: "
+            f"{sorted(EXPORT_FORMATS.keys())}"
+        )
+    key = str(format).strip().lower()
+    if key in _FORMAT_ALIASES:
+        return _FORMAT_ALIASES[key]
+    raise ValueError(
+        f"Unsupported memo export format: {format!r}. "
+        f"Expected one of: {sorted(EXPORT_FORMATS.keys())}"
+    )
+
+
+# Map normalised format key → renderer. Populated below to avoid
+# forward references.
+_RENDERERS: dict[str, Callable[..., str]] = {}
+
+
+def render_memos(
+    format: str,
+    memos: Sequence[Memo],
+    *,
+    project: Project | None = None,
+    target_names: TargetNameMap | None = None,
+    filter_summary: str = "",
+) -> str:
+    """Render a memo list in ``format`` and return the string body.
+
+    Dispatches via :func:`normalise_format` so callers can pass the
+    same alias set the HTTP query string accepts. ``project`` /
+    ``target_names`` / ``filter_summary`` are forwarded only to the
+    renderers that consume them; the JSONL renderer ignores everything
+    except the memo list so the line-shape stays the public contract.
+
+    Empty inputs are valid and produce a header-only CSV / a placeholder
+    Markdown / a minimal RTF / an empty JSONL string. Never raises on
+    empty input.
+    """
+    fmt = normalise_format(format)
+    return _RENDERERS[fmt](
+        memos,
+        project=project,
+        target_names=target_names,
+        filter_summary=filter_summary,
+    )
+
+
+def _render_csv(
+    memos: Sequence[Memo],
+    *,
+    project: Project | None,
+    target_names: TargetNameMap | None,
+    filter_summary: str,
+) -> str:
+    # CSV ignores project + filter_summary — column shape is the public
+    # contract and a row-1 header would break downstream importers.
+    del project, filter_summary
+    return to_csv(memos, target_names=target_names)
+
+
+def _render_markdown(
+    memos: Sequence[Memo],
+    *,
+    project: Project | None,
+    target_names: TargetNameMap | None,
+    filter_summary: str,
+) -> str:
+    return to_markdown(
+        memos,
+        project=project,
+        target_names=target_names,
+        filter_summary=filter_summary,
+    )
+
+
+def _render_rtf(
+    memos: Sequence[Memo],
+    *,
+    project: Project | None,
+    target_names: TargetNameMap | None,
+    filter_summary: str,
+) -> str:
+    return to_rtf(
+        memos,
+        project=project,
+        target_names=target_names,
+        filter_summary=filter_summary,
+    )
+
+
+def _render_jsonl(
+    memos: Sequence[Memo],
+    *,
+    project: Project | None,
+    target_names: TargetNameMap | None,
+    filter_summary: str,
+) -> str:
+    # JSONL is loss-less round-trip of Memo.to_dict; project header /
+    # filter summary / target_names would all break the line shape.
+    del project, target_names, filter_summary
+    return to_jsonl(memos)
+
+
+_RENDERERS[EXPORT_FORMAT_CSV] = _render_csv
+_RENDERERS[EXPORT_FORMAT_MARKDOWN] = _render_markdown
+_RENDERERS[EXPORT_FORMAT_RTF] = _render_rtf
+_RENDERERS[EXPORT_FORMAT_JSONL] = _render_jsonl
+
+
+# Slug regex: collapse runs of non-alphanumeric ASCII into a single
+# dash. We NFKD-normalise + strip combining marks first so "Élise"
+# becomes "elise", not the empty string. Same approach as
+# :func:`scribe.codebook_export.slugify_codebook_filename`.
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+_FILENAME_SLUG_MAX = 80
+
+
+def slugify_memos_filename(
+    project: Project | None, format: str
+) -> str:
+    """Build a download-friendly filename for a memos export.
+
+    Pattern: ``<project-slug>-memos<ext>`` if a project name is
+    available; ``memos<ext>`` otherwise. The slug is ASCII-only,
+    lowercased, dash-separated, and capped at
+    :data:`_FILENAME_SLUG_MAX` characters before the suffix.
+
+    Raises :class:`ValueError` for unknown formats (delegates to
+    :func:`normalise_format`).
+    """
+    fmt = normalise_format(format)
+    spec = EXPORT_FORMATS[fmt]
+    slug = ""
+    if project is not None and project.name and project.name.strip():
+        ascii_name = (
+            unicodedata.normalize("NFKD", project.name)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
+        slug = _SLUG_RE.sub("-", ascii_name.lower()).strip("-")
+        if len(slug) > _FILENAME_SLUG_MAX:
+            slug = slug[:_FILENAME_SLUG_MAX].rstrip("-")
+    if slug:
+        return f"{slug}-memos{spec.extension}"
+    return f"memos{spec.extension}"
+
+
+def build_filter_summary(
+    *,
+    type: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    author_coder_id: str | None = None,
+    tag: str | None = None,
+) -> str:
+    """Build a human-readable description of the active filter.
+
+    Returns the empty string when no filter is active, so the Markdown
+    / RTF exporters can omit the filter line entirely. The format is
+    ``key=value`` pairs joined by ``", "``, in the same order the
+    function arguments are declared; this makes the summary stable for
+    snapshot tests and the export header self-documenting.
+    """
+    parts: list[str] = []
+    if type:
+        parts.append(f"type={type}")
+    if target_type:
+        parts.append(f"target_type={target_type}")
+    if target_id:
+        parts.append(f"target_id={target_id}")
+    if author_coder_id:
+        parts.append(f"author_coder_id={author_coder_id}")
+    if tag:
+        parts.append(f"tag={tag}")
+    return ", ".join(parts)

@@ -4654,6 +4654,155 @@ async def list_memos_endpoint(
     return JSONResponse({"memos": [m.to_dict() for m in memos]})
 
 
+# --------------------------------------------------------------------------- #
+# Memo export (F5.4)
+#
+# Per PLANNING.md F5.4:
+#
+#   > "Export all memos" filtered by type / linked-to.
+#
+# The pure exporters (CSV / Markdown / RTF / JSONL) shipped in
+# 3148000 inside :mod:`scribe.memo_export`; until this surface
+# landed, those four formats could only be reached from a Python
+# REPL. This endpoint surfaces all four behind one URL so the
+# memos page (and any future CLI / button) dispatches through one
+# code path — same shape as F6.1's codebook export endpoint.
+#
+# **Route ordering matters.** ``/memos/export`` must be registered
+# *before* ``/memos/{memo_id}`` so FastAPI matches the literal
+# ``export`` segment first; otherwise the GET would treat ``export``
+# as a memo id and 400 with "Invalid memo id".
+#
+# Filter query parameters mirror :func:`scribe.memos.list_memos`
+# *and* :func:`scribe.memo_export.filter_memos`. The summary line
+# embedded in the Markdown / RTF header is built via
+# :func:`scribe.memo_export.build_filter_summary` so the export file
+# explains which filters produced it.
+#
+# Errors:
+#   * 400 — malformed project id, unknown format, invalid filter
+#     value (delegates to ``filter_memos`` validation).
+#   * 404 — project id not found.
+#   * 200 — file body (including the empty-memos case; CSV emits a
+#     header-only file, Markdown a placeholder, RTF a minimal
+#     document, JSONL the empty string).
+# --------------------------------------------------------------------------- #
+
+from . import memo_export as _memo_export  # noqa: E402
+
+
+@app.get("/api/projects/{project_id}/memos/export")
+async def export_memos_endpoint(
+    project_id: str,
+    format: str = "csv",
+    type: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    author_coder_id: str | None = None,
+    tag: str | None = None,
+) -> Response:
+    """Download the project's memos in CSV / Markdown / RTF / JSONL (F5.4).
+
+    Query string ``format``:
+
+    * ``csv`` — RFC-4180 CSV (default).
+    * ``markdown`` — structured CommonMark; alias ``md``.
+    * ``rtf`` — minimal RTF 1.x; aliases ``word`` / ``doc`` / ``docx``.
+    * ``jsonl`` — newline-delimited JSON; aliases ``ndjson`` / ``json``.
+
+    Filter query string (any subset, AND-combined; ``target_type`` and
+    ``target_id`` together require both to match on the same link):
+
+    * ``type`` — restrict to one :data:`scribe.memos.MEMO_TYPES` value.
+    * ``target_type`` — restrict to memos linking to this entity type.
+    * ``target_id`` — restrict to memos linking to this entity id.
+    * ``author_coder_id`` — restrict to memos by one author.
+    * ``tag`` — restrict to memos carrying a tag (exact match).
+
+    Headers:
+
+    * ``Content-Type`` matches the format (with ``charset=utf-8`` for
+      the text formats).
+    * ``Content-Disposition: attachment; filename="<slug>-memos.<ext>"``
+      so browsers prompt a save rather than rendering inline.
+
+    Status codes: ``404`` if the project is missing; ``400`` for an
+    unrecognised format or filter; ``200`` otherwise.
+    """
+    _check_project_id(project_id)
+    try:
+        fmt = _memo_export.normalise_format(format)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            memos = _memos.list_memos(
+                _projects_root(),
+                project_id,
+                type=type,
+                target_type=target_type,
+                target_id=target_id,
+                author_coder_id=author_coder_id,
+                tag=tag,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        # Build target_names off whatever sibling lists we have
+        # hydrated. Keeps the Markdown / RTF link bullets readable as
+        # "Pacing (code:abcd…)" rather than the bare id pair.
+        codes = _codes.list_codes(_projects_root(), project_id)
+        sources = _sources.list_sources(_projects_root(), project_id)
+        try:
+            participants = _participants.list_participants(
+                _projects_root(), project_id
+            )
+        except Exception:  # pragma: no cover — defensive on partial projects
+            participants = []
+        try:
+            coders = _coders.list_coders(_projects_root(), project_id)
+        except Exception:  # pragma: no cover
+            coders = []
+    target_names = _memo_export.build_target_names(
+        codes=codes,
+        sources=sources,
+        participants=participants,
+        coders=coders,
+        memos=memos,
+        project=project,
+    )
+    filter_summary = _memo_export.build_filter_summary(
+        type=type,
+        target_type=target_type,
+        target_id=target_id,
+        author_coder_id=author_coder_id,
+        tag=tag,
+    )
+    text = _memo_export.render_memos(
+        fmt,
+        memos,
+        project=project,
+        target_names=target_names,
+        filter_summary=filter_summary,
+    )
+    spec = _memo_export.EXPORT_FORMATS[fmt]
+    filename = _memo_export.slugify_memos_filename(project, fmt)
+    headers = {
+        # Quote the filename so spaces / non-ASCII never break the
+        # header. We slugify to ASCII upstream, so the simple quoted
+        # form is sufficient — no need for RFC 5987 ``filename*=``.
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(
+        content=text,
+        media_type=spec.media_type,
+        headers=headers,
+    )
+
+
 @app.get("/api/projects/{project_id}/memos/{memo_id}")
 async def get_memo_endpoint(
     project_id: str, memo_id: str

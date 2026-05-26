@@ -41,6 +41,60 @@
      title="Drag memos around, group them into categories, let clusters emerge.">
     🗺 Sorting canvas
   </a>
+  {#
+    F5.4 — memo export menu. The four download targets share one
+    endpoint (/api/projects/<pid>/memos/export?format=...) — same shape
+    as F2.6's codebook export. The dropdown forwards the live type
+    filter so "Export filtered" is one click. The dropdown is keyboard-
+    accessible and closes on outside click — same pattern as the
+    codebook editor's export menu.
+  #}
+  <span class="mm-export-wrap" data-test-feature="F5.4">
+    <button
+      type="button"
+      class="btn secondary"
+      id="mm-export-btn"
+      title="Download all memos in CSV / Markdown / Word / JSONL"
+      aria-haspopup="menu"
+      aria-expanded="false"
+    >📥 Export ▾</button>
+    <div
+      class="mm-export-menu"
+      id="mm-export-menu"
+      role="menu"
+      aria-label="Export memos"
+    >
+      <a
+        role="menuitem"
+        class="mm-export-item"
+        href="/api/projects/{{ project_id }}/memos/export?format=csv"
+        data-fmt="csv"
+        download
+      >CSV <span class="mm-export-hint">spreadsheet — RFC 4180</span></a>
+      <a
+        role="menuitem"
+        class="mm-export-item"
+        href="/api/projects/{{ project_id }}/memos/export?format=markdown"
+        data-fmt="markdown"
+        download
+      >Markdown <span class="mm-export-hint">paste into thesis appendix</span></a>
+      <a
+        role="menuitem"
+        class="mm-export-item"
+        href="/api/projects/{{ project_id }}/memos/export?format=rtf"
+        data-fmt="rtf"
+        download
+      >Word (RTF) <span class="mm-export-hint">opens in Word / LibreOffice</span></a>
+      <div class="mm-export-sep" role="separator"></div>
+      <a
+        role="menuitem"
+        class="mm-export-item"
+        href="/api/projects/{{ project_id }}/memos/export?format=jsonl"
+        data-fmt="jsonl"
+        download
+      >JSONL <span class="mm-export-hint">round-trip / scripting</span></a>
+    </div>
+  </span>
   <button id="newMemoBtn" type="button" class="btn" data-test-id="memos-new">+ New memo</button>
 {% endblock %}
 
@@ -183,6 +237,42 @@
     color: var(--muted);
     font-style: italic;
     padding: 14px 0;
+  }
+
+  /* F5.4: memo export dropdown (header-actions area). Same pattern
+     as the codebook editor's .cb-export-* classes — distinct prefix
+     so the two menus' open/close handlers don't collide if they ever
+     end up on the same page. */
+  .mm-export-wrap { position: relative; display: inline-block; }
+  .mm-export-menu {
+    position: absolute; right: 0; top: calc(100% + 4px);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; min-width: 280px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.25);
+    z-index: 30;
+    display: none;
+    padding: 6px 0;
+  }
+  .mm-export-menu.open { display: block; }
+  .mm-export-item {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 14px;
+    padding: 8px 14px;
+    color: var(--text); text-decoration: none;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .mm-export-item:hover, .mm-export-item:focus {
+    background: var(--panel-2); outline: none;
+  }
+  .mm-export-item .mm-export-hint {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .mm-export-sep {
+    height: 1px; background: var(--border); margin: 4px 0;
   }
 {% endblock %}
 
@@ -499,7 +589,71 @@ els.newBtn.addEventListener("click", () => {
   els.title.focus();
 });
 
-els.typeFilter.addEventListener("change", renderList);
+// --------------------------------------------------------------------- //
+// F5.4 — memo export dropdown
+//
+// The dropdown lives in the header actions; this JS only handles open/
+// close + outside-click + Escape. The actual download is the browser
+// following the menu items' ``href``s. The hrefs are kept in sync with
+// the active type filter so "Export filtered" requires zero extra
+// state — same pattern as the codebook editor's export menu.
+// --------------------------------------------------------------------- //
+
+const mmExportBtn = document.getElementById("mm-export-btn");
+const mmExportMenu = document.getElementById("mm-export-menu");
+
+function closeMmExportMenu() {
+  if (!mmExportMenu) return;
+  mmExportMenu.classList.remove("open");
+  if (mmExportBtn) mmExportBtn.setAttribute("aria-expanded", "false");
+}
+
+function refreshMmExportHrefs() {
+  // Forward the live type filter into every export item so the
+  // download URL exactly matches what the list above is showing.
+  if (!mmExportMenu) return;
+  const wantedType = els.typeFilter ? els.typeFilter.value : "";
+  const items = mmExportMenu.querySelectorAll(".mm-export-item");
+  items.forEach((a) => {
+    const fmt = a.dataset.fmt || "csv";
+    const params = new URLSearchParams({ format: fmt });
+    if (wantedType) params.set("type", wantedType);
+    a.href = `/api/projects/${PROJECT_ID}/memos/export?${params.toString()}`;
+  });
+}
+
+if (mmExportBtn && mmExportMenu) {
+  mmExportBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const wasOpen = mmExportMenu.classList.contains("open");
+    closeMmExportMenu();
+    if (!wasOpen) {
+      refreshMmExportHrefs();
+      mmExportMenu.classList.add("open");
+      mmExportBtn.setAttribute("aria-expanded", "true");
+    }
+  });
+  mmExportMenu.addEventListener("click", (e) => {
+    if (e.target.closest(".mm-export-item")) {
+      closeMmExportMenu();
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if (!mmExportMenu.contains(e.target) && e.target !== mmExportBtn) {
+      closeMmExportMenu();
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeMmExportMenu();
+  });
+}
+
+els.typeFilter.addEventListener("change", () => {
+  renderList();
+  // Keep the export hrefs synchronised with the current filter so the
+  // dropdown's targets always reflect what's on screen.
+  refreshMmExportHrefs();
+});
 
 fetchList();
 </script>
