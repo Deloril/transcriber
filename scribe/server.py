@@ -6994,6 +6994,236 @@ async def export_definition_at_apply_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# F9.3 — named codebook snapshots
+#
+# F9.3 ships ``scribe.codebook_snapshots``: a named, dated, immutable
+# bookmark of the codebook (every code + each code's pinned version
+# id) at a moment in time. Researchers take one when a methodological
+# phase ends ("initial coding done", "before unlocking", "submission
+# draft") so a report can later be regenerated *as the codebook stood
+# at that moment*. The pure module shipped in 33d3981 with full
+# validation, atomic save, and an F9.1 audit-event emission, but no
+# HTTP / FastAPI surface and no UI; this block closes that loop.
+#
+# Endpoints:
+#
+#   GET  /api/projects/{pid}/snapshots
+#       List all snapshots (cheap summary form), oldest-first by
+#       ``created_at`` per the module's natural reading order. Order
+#       is reversed for the audit-page UI so newest snapshots sit at
+#       the top of the panel — same direction as the F9.1 events feed.
+#
+#   POST /api/projects/{pid}/snapshots
+#       Create one. Body: {"name": str, "description"?: str,
+#       "actor_coder_id"?: 12-char-hex}. Returns the created snapshot
+#       summary + the embedded codes/code_versions counts the
+#       :func:`scribe.codebook_snapshots.create_codebook_snapshot`
+#       helper assembles. Emits an F9.1 event with action='snapshot' /
+#       entity_type='snapshot' so the new bookmark shows up on the
+#       audit timeline immediately.
+#
+#   GET  /api/projects/{pid}/snapshots/{sid}
+#       Fetch one snapshot in full (incl. embedded codes + version
+#       pinning). Useful for the UI's "show what was in this
+#       snapshot" disclosure.
+#
+#   GET  /api/projects/{pid}/snapshots/{sid}/codebook?format=csv|markdown|rtf
+#       Download the codebook *as it stood at that snapshot* in one
+#       of the F6.1 export formats. The body is rendered from the
+#       snapshot's embedded codes, not the live codebook, so the
+#       export reflects the historical state — that's the whole point
+#       of taking a snapshot.
+#
+# Snapshots are append-only by convention. Mirrors F9.1 / F9.2: there
+# is no DELETE / PUT surface, only create + read.
+# --------------------------------------------------------------------------- #
+
+
+from . import codebook_snapshots as _codebook_snapshots  # noqa: E402
+from . import codebook_export as _codebook_export_for_snapshot  # noqa: E402
+
+
+@app.get("/api/projects/{project_id}/snapshots")
+async def list_project_snapshots_endpoint(project_id: str) -> JSONResponse:
+    """List F9.3 codebook snapshots for a project (read surface).
+
+    Returns the cheap summary form (``snapshot_summary``) so callers
+    can render a long history without paying the cost of embedding
+    every code dict. UI orders newest-first; the wire payload keeps
+    the module's natural ascending order so a numeric-index reader
+    can re-derive insertion order.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            summaries = _codebook_snapshots.list_snapshot_summaries(
+                _projects_root(), project_id
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({
+        "snapshots": summaries,
+        "total": len(summaries),
+    })
+
+
+@app.post("/api/projects/{project_id}/snapshots")
+async def create_project_snapshot_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    """Create a named F9.3 codebook snapshot.
+
+    Body schema (JSON):
+
+    * ``name`` (required, ≤ 200 chars after trim) — bookmark label.
+    * ``description`` (optional, ≤ 4000 chars) — the *why*.
+    * ``actor_coder_id`` (optional, 12-char hex) — coder taking the
+      snapshot. Empty string for system-issued snapshots.
+
+    Persists via :func:`create_codebook_snapshot`, which also writes
+    the F9.1 audit event and back-fills the snapshot's ``event_id``.
+    Returns ``201`` with the snapshot summary on success; ``400`` for
+    validation errors (e.g. blank name, malformed actor id).
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Body must be JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Body must be a JSON object")
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(400, "name is required (non-empty string)")
+    description = body.get("description", "") or ""
+    if not isinstance(description, str):
+        raise HTTPException(400, "description must be a string")
+    actor = body.get("actor_coder_id", "") or ""
+    if not isinstance(actor, str):
+        raise HTTPException(400, "actor_coder_id must be a string")
+
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            snap = _codebook_snapshots.create_codebook_snapshot(
+                _projects_root(),
+                project_id,
+                name=name,
+                description=description,
+                actor_coder_id=actor,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+    return JSONResponse(
+        {
+            "snapshot": _codebook_snapshots.snapshot_summary(snap),
+        },
+        status_code=201,
+    )
+
+
+@app.get("/api/projects/{project_id}/snapshots/{snapshot_id}")
+async def get_project_snapshot_endpoint(
+    project_id: str, snapshot_id: str
+) -> JSONResponse:
+    """Fetch one F9.3 codebook snapshot in full.
+
+    Returns the embedded codes + version pinning so a UI can render
+    the historical codebook without an extra round-trip.
+    """
+    _check_project_id(project_id)
+    if not _codebook_snapshots.SNAPSHOT_ID_RE.match(snapshot_id):
+        raise HTTPException(400, "Invalid snapshot id")
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            snap = _codebook_snapshots.load_snapshot(
+                _projects_root(), project_id, snapshot_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Snapshot not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({"snapshot": snap.to_dict()})
+
+
+@app.get("/api/projects/{project_id}/snapshots/{snapshot_id}/codebook")
+async def export_project_snapshot_codebook_endpoint(
+    project_id: str, snapshot_id: str, format: str = "csv"
+) -> Response:
+    """Download the codebook *as it stood at* a given F9.3 snapshot.
+
+    Body is one of CSV / Markdown / RTF, rendered by
+    :func:`scribe.codebook_snapshots.render_codebook_at_snapshot`
+    from the snapshot's embedded codes — *not* the live codebook —
+    so the report reflects the historical state at snapshot time.
+
+    Filename pattern: ``<project-slug>-codebook<ext>`` is reused from
+    F6.1 / F2.6; the snapshot id is folded in via a ``-snapshot-
+    <short-id>`` infix so a researcher who downloads several keeps
+    them straight.
+    """
+    _check_project_id(project_id)
+    if not _codebook_snapshots.SNAPSHOT_ID_RE.match(snapshot_id):
+        raise HTTPException(400, "Invalid snapshot id")
+    try:
+        fmt = _codebook_export_for_snapshot.normalise_format(format)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(
+                _projects_root(), project_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            snap = _codebook_snapshots.load_snapshot(
+                _projects_root(), project_id, snapshot_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Snapshot not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+    text = _codebook_snapshots.render_codebook_at_snapshot(
+        snap, format=fmt, project=project
+    )
+    spec = _codebook_export_for_snapshot.EXPORT_FORMATS[fmt]
+    base = _codebook_export_for_snapshot.slugify_codebook_filename(
+        project, fmt
+    )
+    # Splice ``-snapshot-<short>`` between the slug and the extension
+    # so a user downloading several snapshots can tell them apart.
+    short = snapshot_id[:8]
+    if base.endswith(spec.extension):
+        stem = base[: -len(spec.extension)]
+        filename = f"{stem}-snapshot-{short}{spec.extension}"
+    else:  # defensive — shouldn't happen but keeps the header valid
+        filename = f"{base}-snapshot-{short}"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(
+        content=text,
+        media_type=spec.media_type,
+        headers=headers,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # AI code suggestions (F8.3 / F8.4)
 #
 # Two related endpoints expose the existing scribe.code_suggestions and

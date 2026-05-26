@@ -232,6 +232,75 @@
     font-size: 11.5px;
     margin-top: 2px;
   }
+
+  /* F9.3: Named codebook snapshots panel.
+     Sits above the events feed on the same audit page so the
+     "snapshot" event row in the timeline links to a real, named,
+     human-readable bookmark above. */
+  .snap-panel {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .snap-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr 220px;
+    gap: 8px;
+    align-items: start;
+  }
+  @media (max-width: 800px) {
+    .snap-form { grid-template-columns: 1fr; }
+  }
+  .snap-form input,
+  .snap-form textarea {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 11px; font: inherit; font-size: 13px;
+    box-sizing: border-box;
+  }
+  .snap-form textarea { min-height: 38px; max-height: 160px; resize: vertical; }
+  .snap-form .snap-actions {
+    display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap;
+  }
+  .snap-list {
+    list-style: none; padding: 0; margin: 0;
+    display: flex; flex-direction: column;
+  }
+  .snap-row {
+    border-top: 1px solid var(--border);
+    padding: 10px 4px;
+    display: grid;
+    grid-template-columns: 150px 1fr auto;
+    gap: 12px;
+    align-items: center;
+  }
+  .snap-row:first-child { border-top: 0; }
+  .snap-row .when {
+    color: var(--muted); font-size: 12px; font-family: var(--mono);
+  }
+  .snap-row .name {
+    color: var(--text); font-weight: 600;
+  }
+  .snap-row .meta {
+    display: block; color: var(--muted); font-size: 11.5px;
+    font-family: var(--mono); margin-top: 4px;
+  }
+  .snap-row .desc {
+    display: block; color: var(--text); font-style: italic;
+    font-family: var(--serif); margin-top: 4px;
+    line-height: 1.45; max-width: 60ch;
+  }
+  .snap-row .snap-dl {
+    display: inline-flex; gap: 6px; flex-wrap: wrap;
+  }
+  .snap-row .snap-dl a {
+    font-size: 12px; padding: 4px 8px; border-radius: 6px;
+    border: 1px solid var(--border); color: var(--text);
+    text-decoration: none; background: var(--panel-2);
+  }
+  .snap-row .snap-dl a:hover { background: var(--panel); }
+  .snap-empty { color: var(--muted); font-style: italic; padding: 8px 4px; }
+  .snap-error { color: var(--err); margin-top: 6px; }
 {% endblock %}
 
 {% block body %}
@@ -268,6 +337,73 @@
     <button id="reload" class="btn secondary" data-test-id="audit-reload">↻ Reload</button>
     <span id="count" class="count" aria-live="polite"></span>
   </div>
+</div>
+
+{#
+  F9.3 — Named codebook snapshots panel.
+
+  A snapshot is a named, dated, immutable bookmark of the entire
+  codebook ("Initial coding done 2026-04-12") so any future report
+  can be regenerated against it. The pure module
+  ``scribe.codebook_snapshots`` shipped in 33d3981 with full
+  validation, atomic save, and an F9.1 audit-event emission. Until
+  this panel + the four ``/api/projects/<pid>/snapshots`` routes
+  landed, the only way to take or list a snapshot was via Python.
+
+  Reads:
+    GET  /api/projects/<pid>/snapshots                 — list
+    POST /api/projects/<pid>/snapshots                 — create
+    GET  /api/projects/<pid>/snapshots/<sid>           — single
+    GET  /api/projects/<pid>/snapshots/<sid>/codebook?format=...
+        — render the codebook *as it stood at* this snapshot
+          (CSV / Markdown / RTF). Used by the per-row download links.
+#}
+<div class="card" data-test-feature="F9.3" data-test-id="snapshots-panel"
+     style="margin-top:16px">
+  <h2 style="margin-top:0">Codebook snapshots</h2>
+  <p class="hint" style="margin-top:0">
+    A snapshot freezes the entire codebook (every code + each code's
+    pinned definition version) under a chosen name. Use it to mark
+    methodological milestones — "Initial coding done", "Before
+    unlocking", "Submission draft" — so any later report can be
+    regenerated against that bookmark. Snapshots are immutable; once
+    taken they can never be edited or deleted.
+  </p>
+  <form id="snap-form" class="snap-form" data-test-id="snap-form"
+        autocomplete="off"
+        onsubmit="return false;">
+    <input
+      id="snap-name"
+      type="text"
+      maxlength="200"
+      placeholder="Snapshot name (e.g. ‘Initial coding done’)"
+      data-test-id="snap-name-input"
+      required>
+    <textarea
+      id="snap-desc"
+      maxlength="4000"
+      placeholder="Optional description — the why"
+      data-test-id="snap-desc-input"
+      rows="1"></textarea>
+    <div class="snap-actions">
+      <button type="submit"
+              id="snap-save"
+              class="btn"
+              data-test-id="snap-save-btn">📌 Save snapshot</button>
+    </div>
+  </form>
+  <div id="snap-error" class="snap-error" style="display:none"
+       data-test-id="snap-error" role="alert"></div>
+
+  <h3 style="margin:18px 0 6px 0; font-size: 14px;">
+    History <span id="snap-count" class="hint" style="font-weight:400"></span>
+  </h3>
+  <div id="snap-empty" class="snap-empty"
+       data-test-id="snap-empty" style="display:none">
+    No snapshots taken yet. Take one to mark a methodological milestone.
+  </div>
+  <ul id="snap-list" class="snap-list"
+      data-test-id="snap-list"></ul>
 </div>
 
 <div id="loadingCard" class="card hint" style="margin-top:16px">Loading audit timeline…</div>
@@ -441,6 +577,139 @@ for (const id of ["f-action", "f-entity", "f-order"]) {
 document.getElementById("f-actor").addEventListener("change", load);
 
 load();
+
+// ---------------------------------------------------------------- //
+// F9.3 — Codebook snapshots panel                                  //
+// ---------------------------------------------------------------- //
+// Lists existing snapshots newest-first; creates a new snapshot on
+// form submit; renders per-row download links (CSV / Markdown / RTF)
+// that hit /api/projects/<pid>/snapshots/<sid>/codebook?format=...
+// to render the codebook *as it stood at* the snapshot (not the live
+// codebook).
+const snapForm = document.getElementById("snap-form");
+const snapNameInput = document.getElementById("snap-name");
+const snapDescInput = document.getElementById("snap-desc");
+const snapSaveBtn = document.getElementById("snap-save");
+const snapErrorEl = document.getElementById("snap-error");
+const snapList = document.getElementById("snap-list");
+const snapEmpty = document.getElementById("snap-empty");
+const snapCount = document.getElementById("snap-count");
+
+function setSnapError(msg) {
+  if (!snapErrorEl) return;
+  if (!msg) {
+    snapErrorEl.style.display = "none";
+    snapErrorEl.textContent = "";
+    return;
+  }
+  snapErrorEl.style.display = "block";
+  snapErrorEl.textContent = msg;
+}
+
+function renderSnapRow(s) {
+  const dlBase = `/api/projects/${PROJECT_ID}/snapshots/${encodeURIComponent(s.id)}/codebook`;
+  const codeCount = Number.isFinite(s.code_count) ? s.code_count : 0;
+  const stage = s.codebook_stage || "initial";
+  const actorTxt = s.actor_coder_id
+    ? `actor ${escapeHtml(shortId(s.actor_coder_id))}`
+    : "system";
+  const desc = s.description
+    ? `<span class="desc">${escapeHtml(s.description)}</span>`
+    : "";
+  return `<li class="snap-row" data-snapshot-id="${escapeHtml(s.id)}">
+    <span class="when">${escapeHtml(fmtDate(s.created_at))}</span>
+    <div>
+      <span class="name">${escapeHtml(s.name)}</span>
+      ${desc}
+      <span class="meta">
+        ${codeCount} code${codeCount === 1 ? "" : "s"}
+        · stage ${escapeHtml(stage)}
+        · ${actorTxt}
+        · id ${escapeHtml(shortId(s.id))}
+      </span>
+    </div>
+    <span class="snap-dl" data-test-id="snap-dl-${escapeHtml(s.id)}">
+      <a href="${dlBase}?format=csv"
+         data-fmt="csv"
+         download
+         title="Download codebook (as of this snapshot) as CSV">CSV</a>
+      <a href="${dlBase}?format=markdown"
+         data-fmt="markdown"
+         download
+         title="Download codebook (as of this snapshot) as Markdown">MD</a>
+      <a href="${dlBase}?format=rtf"
+         data-fmt="rtf"
+         download
+         title="Download codebook (as of this snapshot) as RTF (Word)">RTF</a>
+    </span>
+  </li>`;
+}
+
+async function loadSnapshots() {
+  setSnapError("");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/snapshots`);
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try { const b = await r.json(); if (b.detail) msg = b.detail; } catch (_) {}
+      throw new Error(msg);
+    }
+    const body = await r.json();
+    const snaps = Array.isArray(body.snapshots) ? body.snapshots : [];
+    // Newest-first for display; the wire payload is asc.
+    const newestFirst = snaps.slice().reverse();
+    snapCount.textContent = `· ${snaps.length}`;
+    if (!snaps.length) {
+      snapEmpty.style.display = "block";
+      snapList.innerHTML = "";
+      return;
+    }
+    snapEmpty.style.display = "none";
+    snapList.innerHTML = newestFirst.map(renderSnapRow).join("");
+  } catch (e) {
+    setSnapError(`Failed to load snapshots: ${e.message || e}`);
+  }
+}
+
+if (snapForm) {
+  snapForm.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    setSnapError("");
+    const name = (snapNameInput.value || "").trim();
+    if (!name) {
+      setSnapError("Snapshot name is required.");
+      snapNameInput.focus();
+      return;
+    }
+    const description = (snapDescInput.value || "").trim();
+    snapSaveBtn.disabled = true;
+    try {
+      const r = await fetch(`/api/projects/${PROJECT_ID}/snapshots`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({name, description}),
+      });
+      if (!r.ok) {
+        let msg = `HTTP ${r.status}`;
+        try { const b = await r.json(); if (b.detail) msg = b.detail; } catch (_) {}
+        throw new Error(msg);
+      }
+      // Reset form, refresh list, and refresh the events feed
+      // (the snapshot creation emits an F9.1 event the timeline
+      // should pick up).
+      snapNameInput.value = "";
+      snapDescInput.value = "";
+      await loadSnapshots();
+      load();
+    } catch (e) {
+      setSnapError(`Could not save snapshot: ${e.message || e}`);
+    } finally {
+      snapSaveBtn.disabled = false;
+    }
+  });
+}
+
+loadSnapshots();
 
 // ---------------------------------------------------------------- //
 // F9.2 — Definition-at-apply download dropdown                     //
