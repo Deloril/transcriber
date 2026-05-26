@@ -9,7 +9,7 @@
 {% block extra_styles %}
   .cb-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1.2fr;
     gap: 16px;
   }
   @media (max-width: 900px) { .cb-grid { grid-template-columns: 1fr; } }
@@ -25,8 +25,15 @@
   }
   .cb-row:hover { border-color: var(--accent); }
   .cb-row.selected { border-color: var(--accent); background: rgba(122,167,255,.05); }
+  .cb-row .swatch {
+    width: 12px; height: 12px; border-radius: 3px;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
   .cb-row .name { flex: 1; font-weight: 600; color: var(--text); }
   .cb-row .stage { font-size: 11px; color: var(--muted); }
+  .cb-row .stage.draft { color: var(--accent-2); }
+  .cb-row .stage.retired { color: var(--err); opacity: .85; }
   .cb-row .count {
     font-size: 11px; color: var(--muted);
     background: var(--panel); border: 1px solid var(--border);
@@ -38,18 +45,58 @@
     border-radius: 4px; font-size: 14px;
   }
   .cb-row .del:hover { background: var(--err); color: white; }
-  .cb-form input, .cb-form textarea {
+  .cb-form input, .cb-form textarea, .cb-form select {
     width: 100%;
     background: var(--panel-2); color: var(--text);
     border: 1px solid var(--border);
     border-radius: 6px; padding: 7px 10px;
     font: inherit; font-size: 13px;
   }
+  .cb-form input[type="color"] {
+    width: 48px; height: 32px; padding: 2px;
+    cursor: pointer;
+  }
   .cb-form label {
     display: block; font-size: 11px; color: var(--muted);
     margin: 10px 0 4px;
     text-transform: uppercase; letter-spacing: .04em;
   }
+  .cb-form .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .cb-form .row-3 { display: grid; grid-template-columns: 1fr 1fr auto; gap: 10px; align-items: end; }
+  .cb-exemplar-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-bottom: 4px; }
+  .cb-exemplar-row .rm-btn {
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 2px 8px; cursor: pointer; font-size: 12px;
+  }
+  .cb-exemplar-row .rm-btn:hover { color: var(--err); border-color: var(--err); }
+  .cb-related-row {
+    display: grid; grid-template-columns: 1.2fr 1fr auto;
+    gap: 6px; margin-bottom: 4px;
+  }
+  .cb-related-row .rm-btn {
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 2px 8px; cursor: pointer; font-size: 12px;
+  }
+  .cb-related-row .rm-btn:hover { color: var(--err); border-color: var(--err); }
+  .cb-mode-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; margin-bottom: 4px;
+  }
+  .cb-mode-bar h2 { margin: 0; }
+  .cb-mode-bar .cancel {
+    background: transparent; color: var(--muted);
+    border: 0; cursor: pointer; padding: 4px 10px;
+    font-size: 12px; border-radius: 4px;
+  }
+  .cb-mode-bar .cancel:hover { color: var(--text); background: var(--panel-2); }
+  details.cb-advanced { margin-top: 14px; }
+  details.cb-advanced > summary {
+    cursor: pointer; color: var(--muted); font-size: 12px;
+    padding: 4px 0; user-select: none;
+  }
+  details.cb-advanced > summary:hover { color: var(--text); }
 {% endblock %}
 
 {% block body %}
@@ -61,7 +108,11 @@
   </div>
 
   <div class="card">
-    <h2 style="margin-top:0">New code</h2>
+    <div class="cb-mode-bar">
+      <h2 id="cb-mode-title">New code</h2>
+      <button id="cb-cancel" type="button" class="cancel" style="display:none">Cancel edit</button>
+    </div>
+    <p id="cb-edit-hint" class="hint" style="margin-top:0;display:none"></p>
     <form id="newCodeForm" class="cb-form">
       <label for="cb-name">Name <span style="color:var(--err)">*</span></label>
       <input id="cb-name" type="text" required maxlength="120" placeholder="e.g. managing pain (gerund-form encouraged)">
@@ -74,6 +125,68 @@
 
       <label for="cb-excl">Exclusion criteria</label>
       <textarea id="cb-excl" rows="2" maxlength="1000" placeholder="Don't apply when… (use code Y instead)"></textarea>
+
+      <div class="row-2">
+        <div>
+          <label for="cb-stage">Stage</label>
+          <select id="cb-stage">
+            <option value="initial">initial</option>
+            <option value="focused">focused</option>
+            <option value="axial">axial</option>
+            <option value="theoretical">theoretical</option>
+          </select>
+        </div>
+        <div>
+          <label for="cb-status">Status</label>
+          <select id="cb-status">
+            <option value="active">active</option>
+            <option value="draft">draft</option>
+            <option value="retired">retired</option>
+          </select>
+        </div>
+      </div>
+
+      <details class="cb-advanced">
+        <summary>Advanced — exemplars, hierarchy, relations, theoretical memo, colour</summary>
+
+        <label>Exemplars
+          <span class="hint" style="text-transform:none;letter-spacing:0;font-size:11px">
+            quoted instances that anchor this code's meaning
+          </span>
+        </label>
+        <div id="cb-exemplars"></div>
+        <button id="cb-add-exemplar" type="button" class="btn secondary" style="margin-top:6px;font-size:12px;padding:6px 12px">+ Add exemplar</button>
+
+        <label for="cb-parent">Parent code (hierarchy)</label>
+        <select id="cb-parent">
+          <option value="">(none — top-level)</option>
+        </select>
+
+        <label>Related codes
+          <span class="hint" style="text-transform:none;letter-spacing:0;font-size:11px">
+            typed links: broader / narrower / associated / contrasts_with / causes / follows
+          </span>
+        </label>
+        <div id="cb-related"></div>
+        <button id="cb-add-related" type="button" class="btn secondary" style="margin-top:6px;font-size:12px;padding:6px 12px">+ Link to another code</button>
+
+        <label for="cb-theo">Theoretical memo</label>
+        <textarea id="cb-theo" rows="3" maxlength="8000" placeholder="Why this code matters analytically; how it relates to your sensitising concepts."></textarea>
+
+        <div class="row-2" style="margin-top:10px">
+          <div>
+            <label for="cb-colour">Colour</label>
+            <div style="display:flex;align-items:center;gap:8px">
+              <input id="cb-colour" type="color" value="#a78bfa">
+              <button id="cb-colour-clear" type="button" class="btn secondary" style="font-size:11px;padding:4px 8px">Auto</button>
+            </div>
+          </div>
+          <div>
+            <label for="cb-change-note">Change note (for revision history)</label>
+            <input id="cb-change-note" type="text" maxlength="500" placeholder="e.g. broadened scope after focused pass">
+          </div>
+        </div>
+      </details>
 
       <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
         <button class="btn" type="submit" id="cb-submit">Add code</button>
@@ -88,14 +201,105 @@
 <script>
 const PROJECT_ID = {{ project_id | tojson }};
 
+const RELATION_TYPES = ["broader", "narrower", "associated", "contrasts_with", "causes", "follows"];
+
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({
     "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
   }[c]));
 }
+function setMsg(el, text, kind) {
+  el.textContent = text;
+  el.style.color = kind === "err" ? "var(--err)"
+    : kind === "ok" ? "var(--ok)"
+    : "var(--muted)";
+}
 
 let allCodes = [];
 let appCounts = {};
+// editingCodeId === null → "create new code" mode; otherwise we're
+// editing the code with that id.
+let editingCodeId = null;
+
+const exemplarsBox = document.getElementById("cb-exemplars");
+const relatedBox = document.getElementById("cb-related");
+
+function addExemplarRow(value) {
+  const row = document.createElement("div");
+  row.className = "cb-exemplar-row";
+  row.innerHTML = `
+    <input class="cb-exemplar-input" type="text" maxlength="2000" placeholder="A short quoted exemplar from a transcript">
+    <button type="button" class="rm-btn" aria-label="Remove">×</button>
+  `;
+  if (value !== undefined) row.querySelector("input").value = value;
+  row.querySelector(".rm-btn").addEventListener("click", () => row.remove());
+  exemplarsBox.appendChild(row);
+}
+function collectExemplars() {
+  const out = [];
+  exemplarsBox.querySelectorAll("input.cb-exemplar-input").forEach(i => {
+    const v = (i.value || "").trim();
+    if (v) out.push(v);
+  });
+  return out;
+}
+function clearExemplars() { exemplarsBox.innerHTML = ""; }
+
+function addRelatedRow(codeId, relationType) {
+  const row = document.createElement("div");
+  row.className = "cb-related-row";
+  const codeOpts = ['<option value="">(pick a code)</option>']
+    .concat(allCodes
+      .filter(c => c.id !== editingCodeId)
+      .map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`)
+    ).join("");
+  const relOpts = RELATION_TYPES.map(r =>
+    `<option value="${r}">${r}</option>`
+  ).join("");
+  row.innerHTML = `
+    <select class="cb-related-code">${codeOpts}</select>
+    <select class="cb-related-type">${relOpts}</select>
+    <button type="button" class="rm-btn" aria-label="Remove">×</button>
+  `;
+  if (codeId) row.querySelector(".cb-related-code").value = codeId;
+  if (relationType) row.querySelector(".cb-related-type").value = relationType;
+  row.querySelector(".rm-btn").addEventListener("click", () => row.remove());
+  relatedBox.appendChild(row);
+}
+function collectRelated() {
+  const out = [];
+  relatedBox.querySelectorAll(".cb-related-row").forEach(row => {
+    const codeId = row.querySelector(".cb-related-code").value;
+    const relationType = row.querySelector(".cb-related-type").value;
+    if (codeId && relationType) out.push({ code_id: codeId, relation_type: relationType });
+  });
+  return out;
+}
+function clearRelated() { relatedBox.innerHTML = ""; }
+
+function refreshParentDropdown(currentParentId) {
+  const sel = document.getElementById("cb-parent");
+  const others = allCodes.filter(c => c.id !== editingCodeId);
+  const opts = ['<option value="">(none — top-level)</option>']
+    .concat(others.map(c =>
+      `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`
+    )).join("");
+  sel.innerHTML = opts;
+  if (currentParentId) sel.value = currentParentId;
+}
+
+document.getElementById("cb-add-exemplar").addEventListener("click", () => addExemplarRow());
+document.getElementById("cb-add-related").addEventListener("click", () => addRelatedRow());
+document.getElementById("cb-colour-clear").addEventListener("click", () => {
+  // Setting to empty isn't valid for input[type=color]; we keep the
+  // input visible but mark a "use auto colour" intent via dataset.
+  document.getElementById("cb-colour").dataset.cleared = "1";
+  document.getElementById("cb-colour").value = "#a78bfa";
+  setMsg(document.getElementById("cb-msg"), "Colour will reset to the auto hash on save.", "muted");
+});
+document.getElementById("cb-colour").addEventListener("input", () => {
+  document.getElementById("cb-colour").dataset.cleared = "";
+});
 
 async function refreshCodes() {
   // Pull codes + applications in parallel; the application list lets
@@ -112,6 +316,25 @@ async function refreshCodes() {
     apps.forEach(a => { appCounts[a.code_id] = (appCounts[a.code_id] || 0) + 1; });
   }
   renderList();
+  // Keep the parent dropdown in sync with the latest list of codes.
+  const current = editingCodeId
+    ? (allCodes.find(c => c.id === editingCodeId)?.parent_code_id || "")
+    : "";
+  refreshParentDropdown(current);
+}
+
+function autoSwatch(codeId) {
+  // Mirrors source_coding.html's FNV-1a → hsl helper just for the
+  // small swatch chip on each row. Keeps row colours stable across
+  // reloads even when colour isn't user-set.
+  const key = String(codeId || "");
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  const hue = (h % 335 + 25) % 360;
+  return `hsl(${hue}, 65%, 60%)`;
 }
 
 function renderList() {
@@ -128,17 +351,81 @@ function renderList() {
   allCodes.forEach(c => {
     const div = document.createElement("div");
     div.className = "cb-row";
+    if (c.id === editingCodeId) div.classList.add("selected");
     div.dataset.id = c.id;
     const count = appCounts[c.id] || 0;
+    const colour = (c.colour && c.colour.trim()) || autoSwatch(c.id);
+    const stageLabel = escapeHtml(c.stage || "initial");
+    const statusLabel = (c.status && c.status !== "active")
+      ? ` <span class="stage ${escapeHtml(c.status)}">· ${escapeHtml(c.status)}</span>`
+      : "";
     div.innerHTML = `
+      <span class="swatch" style="background:${escapeHtml(colour)}"></span>
       <span class="name">${escapeHtml(c.name)}</span>
-      <span class="stage">${escapeHtml(c.stage || "initial")}</span>
+      <span class="stage">${stageLabel}</span>${statusLabel}
       <span class="count" title="${count} application${count === 1 ? "" : "s"}">${count}</span>
       <button class="del" data-act="delete" title="Delete this code">✕</button>
     `;
     list.appendChild(div);
   });
 }
+
+function setMode(code) {
+  // code === null → create-new mode. Otherwise edit-mode for that code.
+  const title = document.getElementById("cb-mode-title");
+  const submit = document.getElementById("cb-submit");
+  const cancel = document.getElementById("cb-cancel");
+  const hint = document.getElementById("cb-edit-hint");
+  const colourInput = document.getElementById("cb-colour");
+  const changeNote = document.getElementById("cb-change-note");
+  if (code) {
+    editingCodeId = code.id;
+    title.textContent = `Edit "${code.name}"`;
+    submit.textContent = "Save changes";
+    cancel.style.display = "";
+    hint.style.display = "";
+    hint.textContent = `Editing code ${code.id}. Definition changes record a new revision; cosmetic edits don't.`;
+    document.getElementById("cb-name").value = code.name || "";
+    document.getElementById("cb-def").value = code.definition || "";
+    document.getElementById("cb-incl").value = code.inclusion_criteria || "";
+    document.getElementById("cb-excl").value = code.exclusion_criteria || "";
+    document.getElementById("cb-stage").value = code.stage || "initial";
+    document.getElementById("cb-status").value = code.status || "active";
+    document.getElementById("cb-theo").value = code.theoretical_memo || "";
+    if (code.colour) {
+      colourInput.value = code.colour;
+      colourInput.dataset.cleared = "";
+    } else {
+      colourInput.value = "#a78bfa";
+      colourInput.dataset.cleared = "1";
+    }
+    changeNote.value = "";
+    clearExemplars();
+    (code.exemplars || []).forEach(e => addExemplarRow(e));
+    refreshParentDropdown(code.parent_code_id || "");
+    clearRelated();
+    (code.related_codes || []).forEach(r =>
+      addRelatedRow(r.code_id, r.relation_type)
+    );
+  } else {
+    editingCodeId = null;
+    title.textContent = "New code";
+    submit.textContent = "Add code";
+    cancel.style.display = "none";
+    hint.style.display = "none";
+    document.getElementById("newCodeForm").reset();
+    colourInput.value = "#a78bfa";
+    colourInput.dataset.cleared = "1";
+    document.getElementById("cb-stage").value = "initial";
+    document.getElementById("cb-status").value = "active";
+    clearExemplars();
+    refreshParentDropdown("");
+    clearRelated();
+  }
+  renderList();
+}
+
+document.getElementById("cb-cancel").addEventListener("click", () => setMode(null));
 
 document.getElementById("codesList").addEventListener("click", async (e) => {
   const delBtn = e.target.closest("[data-act='delete']");
@@ -156,42 +443,83 @@ document.getElementById("codesList").addEventListener("click", async (e) => {
     try {
       const r = await fetch(`/api/projects/${PROJECT_ID}/codes/${id}`, { method: "DELETE" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      // If we were editing the deleted code, snap back to create mode.
+      if (editingCodeId === id) setMode(null);
       await refreshCodes();
     } catch (err) {
       alert(`Couldn't delete: ${err.message}`);
     }
+    return;
   }
+  // Row click → load that code into the edit form.
+  const row = e.target.closest(".cb-row");
+  if (!row) return;
+  const id = row.dataset.id;
+  const code = allCodes.find(c => c.id === id);
+  if (code) setMode(code);
 });
+
+function buildPayload() {
+  const colourInput = document.getElementById("cb-colour");
+  const colour = colourInput.dataset.cleared === "1"
+    ? ""
+    : (colourInput.value || "");
+  return {
+    name: document.getElementById("cb-name").value.trim(),
+    definition: document.getElementById("cb-def").value,
+    inclusion_criteria: document.getElementById("cb-incl").value,
+    exclusion_criteria: document.getElementById("cb-excl").value,
+    exemplars: collectExemplars(),
+    parent_code_id: document.getElementById("cb-parent").value || null,
+    related_codes: collectRelated(),
+    theoretical_memo: document.getElementById("cb-theo").value,
+    stage: document.getElementById("cb-stage").value,
+    colour,
+    status: document.getElementById("cb-status").value,
+  };
+}
 
 document.getElementById("newCodeForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const submit = document.getElementById("cb-submit");
   const msg = document.getElementById("cb-msg");
-  const name = document.getElementById("cb-name").value.trim();
-  if (!name) { msg.textContent = "Name is required"; msg.style.color = "var(--err)"; return; }
+  const payload = buildPayload();
+  if (!payload.name) {
+    setMsg(msg, "Name is required", "err");
+    return;
+  }
   submit.disabled = true;
-  msg.textContent = "Saving…"; msg.style.color = "var(--muted)";
+  setMsg(msg, "Saving…", "muted");
   try {
-    const r = await fetch(`/api/projects/${PROJECT_ID}/codes`, {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        name,
-        definition: document.getElementById("cb-def").value,
-        inclusion_criteria: document.getElementById("cb-incl").value,
-        exclusion_criteria: document.getElementById("cb-excl").value,
-      }),
-    });
+    let r;
+    if (editingCodeId) {
+      const changeNote = document.getElementById("cb-change-note").value.trim();
+      r = await fetch(`/api/projects/${PROJECT_ID}/codes/${editingCodeId}`, {
+        method: "PATCH",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ ...payload, change_note: changeNote }),
+      });
+    } else {
+      r = await fetch(`/api/projects/${PROJECT_ID}/codes`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload),
+      });
+    }
     if (!r.ok) {
       const detail = await r.json().catch(() => ({}));
       throw new Error(detail.detail || `HTTP ${r.status}`);
     }
-    document.getElementById("newCodeForm").reset();
-    msg.textContent = "Added"; msg.style.color = "var(--ok)";
-    await refreshCodes();
+    if (editingCodeId) {
+      setMsg(msg, "Saved.", "ok");
+      await refreshCodes();
+    } else {
+      setMsg(msg, "Added", "ok");
+      setMode(null);
+      await refreshCodes();
+    }
   } catch (err) {
-    msg.textContent = `Couldn't save: ${err.message}`;
-    msg.style.color = "var(--err)";
+    setMsg(msg, `Couldn't save: ${err.message}`, "err");
   } finally {
     submit.disabled = false;
   }

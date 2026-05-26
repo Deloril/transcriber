@@ -1385,6 +1385,7 @@ from . import codes as _codes  # noqa: E402
 from . import applications as _applications  # noqa: E402
 from . import code_versions as _code_versions  # noqa: E402
 from . import coders as _coders  # noqa: E402
+from . import codebook_lock as _codebook_lock  # noqa: E402
 
 
 def _check_code_id(code_id: str) -> None:
@@ -1469,6 +1470,67 @@ async def get_code_endpoint(project_id: str, code_id: str) -> JSONResponse:
             code = _codes.load_code(_projects_root(), project_id, code_id)
         except FileNotFoundError:
             raise HTTPException(404, "Code not found")
+    return JSONResponse(code.to_dict())
+
+
+@app.patch("/api/projects/{project_id}/codes/{code_id}")
+async def patch_code_endpoint(
+    project_id: str, code_id: str, request: Request
+) -> JSONResponse:
+    """Edit an existing code (F2.1's full field set + F2.2 versioning).
+
+    Accepts any subset of the Code entity's writable fields:
+    ``name``, ``definition``, ``inclusion_criteria``, ``exclusion_criteria``,
+    ``exemplars``, ``parent_code_id``, ``related_codes``,
+    ``theoretical_memo``, ``stage``, ``colour``, ``status``, ``provenance``.
+
+    The optional ``change_note`` key annotates the new version that
+    F2.2's revision log records when the definition actually changes.
+
+    Refuses with 409 when the codebook is locked (F2.4); the UI should
+    prompt for an unlock-with-reason memo before retrying.
+    """
+    _check_project_id(project_id)
+    _check_code_id(code_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    change_note = str(body.get("change_note", "") or "")
+    # Strip the metadata key from the patch dict so apply_update only
+    # sees real Code fields.
+    patch = {k: v for k, v in body.items() if k != "change_note"}
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        # F2.4: refuse edits to a locked codebook.
+        try:
+            _codebook_lock.assert_codebook_unlocked(
+                _projects_root(), project_id
+            )
+        except _codebook_lock.LockedCodebookError as e:
+            raise HTTPException(409, str(e))
+        try:
+            code = _codes.load_code(_projects_root(), project_id, code_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Code not found")
+        try:
+            code.apply_update(patch)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid code patch: {e}")
+        # save_code_with_version records a new revision when the
+        # F2.2 DEFINITION_FIELDS actually changed; otherwise it just
+        # writes the file and re-uses the latest version. Either way
+        # callers (e.g. existing applications) keep a stable
+        # definition_version_id_at_apply pointer.
+        _code_versions.save_code_with_version(
+            _projects_root(), code, change_note=change_note
+        )
     return JSONResponse(code.to_dict())
 
 

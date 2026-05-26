@@ -124,10 +124,230 @@ class TestCodesREST:
         rec = json.loads(lines[0])
         assert rec["version"] == 1
 
+    def test_create_persists_full_field_set(self, env) -> None:
+        """F2.1: every Code-entity field round-trips through POST."""
+        client, _ = env
+        pid = _new_project(client)
+        r = client.post(
+            f"/api/projects/{pid}/codes",
+            json={
+                "name": "managing pain",
+                "definition": "moments of coping",
+                "exemplars": ["I just sit with it.", "Take a breath."],
+                "theoretical_memo": "links to Charmaz §3.2",
+                "stage": "focused",
+                "colour": "#a78bfa",
+                "status": "active",
+            },
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["stage"] == "focused"
+        assert body["colour"] == "#a78bfa"
+        assert body["exemplars"] == ["I just sit with it.", "Take a breath."]
+        assert body["theoretical_memo"] == "links to Charmaz §3.2"
+
 
 # --------------------------------------------------------------------------- #
-# Applications
+# F2.1: Code edit (PATCH) — full-field-set round trip + lock + versioning
 # --------------------------------------------------------------------------- #
+
+
+class TestCodePatch:
+    """The PATCH endpoint exposes F2.1's full Code-entity field set
+    (exemplars / parent / related / theoretical memo / stage / colour /
+    status / provenance) and records a new F2.2 version when the
+    definition actually changes. F2.4's lock blocks edits with 409.
+    """
+
+    def _make_code(self, client: TestClient, pid: str, **extra) -> str:
+        r = client.post(
+            f"/api/projects/{pid}/codes",
+            json={"name": "managing", "definition": "v1", **extra},
+        )
+        assert r.status_code == 201, r.text
+        return r.json()["id"]
+
+    def test_patch_round_trips_simple_fields(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        cid = self._make_code(client, pid)
+        r = client.patch(
+            f"/api/projects/{pid}/codes/{cid}",
+            json={"name": "managing pain", "definition": "v2"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["name"] == "managing pain"
+        assert body["definition"] == "v2"
+
+    def test_patch_persists_advanced_fields(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        cid = self._make_code(client, pid)
+        r = client.patch(
+            f"/api/projects/{pid}/codes/{cid}",
+            json={
+                "exemplars": ["I just sit with it.", "Take a breath."],
+                "theoretical_memo": "ties to constructivism",
+                "stage": "focused",
+                "colour": "#a78bfa",
+                "status": "draft",
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["exemplars"] == [
+            "I just sit with it.", "Take a breath.",
+        ]
+        assert body["theoretical_memo"] == "ties to constructivism"
+        assert body["stage"] == "focused"
+        assert body["colour"] == "#a78bfa"
+        assert body["status"] == "draft"
+
+    def test_patch_records_new_version_on_definition_change(self, env) -> None:
+        client, projects_root = env
+        pid = _new_project(client)
+        cid = self._make_code(client, pid)
+        version_file = projects_root / pid / "code_versions" / f"{cid}.jsonl"
+        assert version_file.exists()
+        lines_before = [
+            l for l in version_file.read_text().splitlines() if l.strip()
+        ]
+        assert len(lines_before) == 1
+        # Definition change → new version recorded.
+        r = client.patch(
+            f"/api/projects/{pid}/codes/{cid}",
+            json={"definition": "v2 — more nuance",
+                  "change_note": "broadened scope"},
+        )
+        assert r.status_code == 200, r.text
+        lines_after = [
+            l for l in version_file.read_text().splitlines() if l.strip()
+        ]
+        assert len(lines_after) == 2
+        rec = json.loads(lines_after[-1])
+        assert rec["version"] == 2
+        assert rec["change_note"] == "broadened scope"
+
+    def test_patch_skips_version_when_nothing_changed(self, env) -> None:
+        client, projects_root = env
+        pid = _new_project(client)
+        cid = self._make_code(client, pid)
+        version_file = projects_root / pid / "code_versions" / f"{cid}.jsonl"
+        before = len([
+            l for l in version_file.read_text().splitlines() if l.strip()
+        ])
+        # Editing only the colour does not change the F2.2 DEFINITION_FIELDS,
+        # so no new version line should appear.
+        r = client.patch(
+            f"/api/projects/{pid}/codes/{cid}",
+            json={"colour": "#aabbcc"},
+        )
+        assert r.status_code == 200, r.text
+        after = len([
+            l for l in version_file.read_text().splitlines() if l.strip()
+        ])
+        assert after == before
+
+    def test_patch_404_on_missing_code(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        r = client.patch(
+            f"/api/projects/{pid}/codes/aaaaaaaaaaaa",
+            json={"name": "x"},
+        )
+        assert r.status_code == 404
+
+    def test_patch_400_on_bad_json(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        cid = self._make_code(client, pid)
+        r = client.patch(
+            f"/api/projects/{pid}/codes/{cid}",
+            content="not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert r.status_code == 400
+
+    def test_patch_400_on_invalid_stage(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        cid = self._make_code(client, pid)
+        r = client.patch(
+            f"/api/projects/{pid}/codes/{cid}",
+            json={"stage": "not-a-real-stage"},
+        )
+        assert r.status_code == 400
+
+    def test_patch_400_on_invalid_colour(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        cid = self._make_code(client, pid)
+        r = client.patch(
+            f"/api/projects/{pid}/codes/{cid}",
+            json={"colour": "rebeccapurple"},  # named colours rejected
+        )
+        assert r.status_code == 400
+
+    def test_patch_409_when_codebook_locked(self, env) -> None:
+        from scribe import codebook_lock as _lock
+        client, projects_root = env
+        pid = _new_project(client)
+        cid = self._make_code(client, pid)
+        # Lock the codebook before attempting an edit.
+        _lock.lock_codebook(
+            projects_root,
+            pid,
+            reason="freezing for ICR",
+        )
+        r = client.patch(
+            f"/api/projects/{pid}/codes/{cid}",
+            json={"definition": "v2"},
+        )
+        assert r.status_code == 409
+
+
+# --------------------------------------------------------------------------- #
+# F2.1: Codebook editor template — every field surfaced
+# --------------------------------------------------------------------------- #
+
+
+class TestCodebookEditorTemplate:
+    """The codebook editor must expose every Code-entity field — anything
+    less and the data layer is unreachable from the user surface (W2.1).
+    """
+
+    def test_page_renders_with_full_field_set(self, env) -> None:
+        client, _ = env
+        pid = _new_project(client)
+        r = client.get(f"/projects/{pid}/codebook")
+        assert r.status_code == 200
+        text = r.text
+        # Form fields for every editable Code attribute.
+        for marker in (
+            'id="cb-name"',
+            'id="cb-def"',
+            'id="cb-incl"',
+            'id="cb-excl"',
+            'id="cb-exemplars"',
+            'id="cb-parent"',
+            'id="cb-related"',
+            'id="cb-theo"',
+            'id="cb-stage"',
+            'id="cb-colour"',
+            'id="cb-status"',
+        ):
+            assert marker in text, f"missing {marker} in codebook editor"
+        # The save button has both create + edit identities so the
+        # JS can flip between modes.
+        assert 'id="cb-submit"' in text
+        # Stage vocabulary mirrored from CODEBOOK_STAGES.
+        for stage in ("initial", "focused", "axial", "theoretical"):
+            assert f'value="{stage}"' in text
+        # Status vocabulary.
+        for status in ("active", "draft", "retired"):
+            assert f'value="{status}"' in text
 
 
 class TestApplicationsREST:
