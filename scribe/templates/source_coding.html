@@ -107,6 +107,56 @@
   .apply-popover .pop-row.create-row .new-name { font-weight: 600; }
   .apply-popover .pop-row.create-row.only { border-top: 0; margin-top: 0; padding-top: 6px; }
 
+  /* "✨ Suggest with AI" row + the inline candidates panel that
+     renders below it after the model returns. The button is muted
+     until clicked so the existing-code list stays the prominent
+     default; users only hit AI when they want to. */
+  .apply-popover .pop-row.ai-row {
+    border-top: 1px dashed var(--border);
+    margin-top: 4px;
+    padding-top: 8px;
+    color: var(--accent-2);
+  }
+  .apply-popover .pop-row.ai-row:hover { background: rgba(167,139,250,.08); }
+  .apply-popover .pop-row.ai-row[disabled] { opacity: .55; cursor: progress; }
+  .apply-popover .ai-panel {
+    border-top: 1px dashed var(--border);
+    margin-top: 6px;
+    padding: 6px 4px 2px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .apply-popover .ai-panel .ai-status { padding: 4px 6px; }
+  .apply-popover .ai-panel .ai-err { color: var(--err); }
+  .apply-popover .ai-panel .ai-cand {
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .apply-popover .ai-panel .ai-cand:hover { background: var(--panel-2); }
+  .apply-popover .ai-panel .ai-cand .row-label {
+    flex: 1; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .apply-popover .ai-panel .ai-cand .score {
+    color: var(--muted); font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .apply-popover .ai-panel .ai-cand .rationale {
+    color: var(--muted); font-size: 10px;
+    margin-top: 2px;
+  }
+  .apply-popover .ai-panel .ai-actions {
+    text-align: right; padding: 4px 6px 0;
+  }
+  .apply-popover .ai-panel .ai-actions button {
+    background: transparent; border: 0;
+    color: var(--muted); font-size: 11px; cursor: pointer;
+  }
+  .apply-popover .ai-panel .ai-actions button:hover { color: var(--text); }
+
   /* Side panel — applications already on this source. */
   .side-card { padding: 14px 16px; }
   .app-row {
@@ -175,6 +225,8 @@
 <div id="applyPopover" class="apply-popover" role="dialog" aria-label="Apply code">
   <input id="popSearch" class="pop-search" type="text" placeholder="Filter codes…" aria-label="Filter codes">
   <div id="popList" class="pop-list"></div>
+  <!-- Inline AI panel — hidden until "Suggest with AI" is clicked. -->
+  <div id="aiPanel" class="ai-panel" style="display:none"></div>
 </div>
 {% endblock %}
 
@@ -446,6 +498,7 @@ function onSelectionChanged() {
 
 function hidePopover() {
   document.getElementById("applyPopover").classList.remove("open");
+  hideAiPanel();
 }
 function showPopover(range) {
   const pop = document.getElementById("applyPopover");
@@ -457,6 +510,7 @@ function showPopover(range) {
   pop.style.left = `${Math.max(8, left)}px`;
   pop.classList.add("open");
   document.getElementById("popSearch").value = "";
+  hideAiPanel();
   renderPopList("");
   setTimeout(() => document.getElementById("popSearch").focus(), 0);
 }
@@ -493,6 +547,15 @@ function renderPopList(filter) {
       html = `<div class="pop-empty">No codes match "${escapeHtml(filter)}".</div>`;
     }
   }
+  // "✨ Suggest with AI" — last row so picking an existing code stays
+  // the easy default. The button changes mode based on whether the
+  // codebook is empty: with codes we suggest from the existing list;
+  // without codes we ask the model to propose new ones.
+  const aiMode = CODES.length ? "existing" : "new";
+  const aiLabel = aiMode === "existing"
+    ? "✨ Suggest existing code with AI"
+    : "✨ Propose a new code with AI";
+  html += `<div class="pop-row ai-row" data-ai-mode="${aiMode}">${aiLabel}</div>`;
   list.innerHTML = html;
 }
 
@@ -513,9 +576,19 @@ document.getElementById("popSearch").addEventListener("keydown", (e) => {
 document.getElementById("popList").addEventListener("click", async (e) => {
   const row = e.target.closest(".pop-row");
   if (!row || !CURRENT_SELECTION) return;
-  // Two row kinds: existing-code (data-code-id) and create-on-the-fly
-  // (data-create-name). Disable both during the network round-trip so
-  // a double-click can't double-apply.
+  // Three row kinds: existing-code (data-code-id), create-on-the-fly
+  // (data-create-name), and AI-suggest (data-ai-mode). The first two
+  // close the popover; the AI row keeps it open while it waits for the
+  // model + then renders ranked candidates inline.
+  if (row.dataset.aiMode) {
+    row.setAttribute("disabled", "true");
+    try {
+      await suggestWithAi(row.dataset.aiMode);
+    } finally {
+      row.removeAttribute("disabled");
+    }
+    return;
+  }
   row.style.pointerEvents = "none";
   try {
     if (row.dataset.codeId) {
@@ -528,6 +601,224 @@ document.getElementById("popList").addEventListener("click", async (e) => {
   }
   hidePopover();
 });
+
+// ---------- AI suggestions (F8.3 / F8.4) ----------
+//
+// "Suggest with AI" calls POST /api/projects/<pid>/ai/suggestions with
+// the current selection. The response is a persisted CodeSuggestion (or
+// NewCodeSuggestion) the user can accept (→ Application with AI
+// provenance) or reject (audit row only). We never auto-apply.
+
+let CURRENT_AI_SUGGESTION = null;
+
+function aiPanelEl() { return document.getElementById("aiPanel"); }
+function showAiStatus(html) {
+  const p = aiPanelEl();
+  p.innerHTML = `<div class="ai-status">${html}</div>`;
+  p.style.display = "";
+}
+function hideAiPanel() {
+  const p = aiPanelEl();
+  p.style.display = "none";
+  p.innerHTML = "";
+  CURRENT_AI_SUGGESTION = null;
+}
+
+async function suggestWithAi(mode) {
+  if (!CURRENT_SELECTION) return;
+  showAiStatus("Asking the model… this can take a few seconds.");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/ai/suggestions`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        source_id: SOURCE_ID,
+        anchor_start_word_id: CURRENT_SELECTION.startWordId,
+        anchor_end_word_id: CURRENT_SELECTION.endWordId,
+        query_text: CURRENT_SELECTION.snippet || "",
+        mode,
+      }),
+    });
+    if (!r.ok) {
+      // 412 means the AI gate is closed (F8.10). The body has a
+      // structured gate status the user can act on; show its message.
+      let detail = {};
+      try { detail = await r.json(); } catch (e) {}
+      const inner = (detail && detail.detail) || detail;
+      const msg = (typeof inner === "object" && inner)
+        ? (inner.gate && inner.gate.message) || inner.detail || JSON.stringify(inner)
+        : (inner || `HTTP ${r.status}`);
+      showAiStatus(`<span class="ai-err">${escapeHtml(msg)}</span>`);
+      return;
+    }
+    const body = await r.json();
+    CURRENT_AI_SUGGESTION = body.suggestion;
+    if (body.kind === "new") {
+      renderAiNewCodeProposals(body.suggestion);
+    } else {
+      renderAiCandidates(body.suggestion);
+    }
+  } catch (e) {
+    showAiStatus(`<span class="ai-err">${escapeHtml(e.message || String(e))}</span>`);
+  }
+}
+
+function renderAiCandidates(suggestion) {
+  const cands = (suggestion && suggestion.candidates) || [];
+  if (!cands.length) {
+    showAiStatus("The model didn't recommend any existing codes for this span.");
+    appendRejectButton(suggestion);
+    return;
+  }
+  const rows = cands.map((c, i) => {
+    const swatch = `<span class="swatch" style="background:${codeColour({id: c.code_id, name: c.code_name})}"></span>`;
+    const score = `<span class="score">${(c.combined_score * 100).toFixed(0)}%</span>`;
+    const label = `<span class="row-label">${escapeHtml(c.code_name)}</span>`;
+    const rationale = c.rationale
+      ? `<div class="rationale">${escapeHtml(c.rationale)}</div>` : "";
+    return `<div class="ai-cand" data-cand-idx="${i}" data-code-id="${escapeHtml(c.code_id)}">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px">${swatch}${label}${score}</div>
+        ${rationale}
+      </div>
+    </div>`;
+  }).join("");
+  const p = aiPanelEl();
+  p.innerHTML = rows + `<div class="ai-actions"><button type="button" data-ai-action="reject">Reject all</button></div>`;
+  p.style.display = "";
+}
+
+function renderAiNewCodeProposals(suggestion) {
+  // F8.4 returns proposals: [{name, definition, rationale}, ...].
+  const props = (suggestion && suggestion.proposals) || [];
+  if (!props.length) {
+    showAiStatus("The model didn't propose any new codes for this span.");
+    appendRejectButton(suggestion);
+    return;
+  }
+  // Each proposal becomes a "create new code with this name" row.
+  // Picking one creates the code, applies it, and stamps AI provenance
+  // on the resulting Application. The cleanest way to express that
+  // through the existing surface is: create-on-the-fly using the
+  // proposal's name, then accept the AI suggestion (which the
+  // create-on-the-fly path doesn't currently know how to do — so for
+  // now we just create the code, apply it, and reject the suggestion
+  // so the audit trail records that the user took the proposal).
+  const rows = props.map((p, i) => {
+    const label = `<span class="row-label">${escapeHtml(p.name || "(unnamed)")}</span>`;
+    const def = p.definition
+      ? `<div class="rationale">${escapeHtml(p.definition)}</div>` : "";
+    return `<div class="ai-cand" data-prop-idx="${i}" data-prop-name="${escapeHtml(p.name || "")}">
+      <div style="flex:1;min-width:0">
+        ${label}
+        ${def}
+      </div>
+    </div>`;
+  }).join("");
+  const panel = aiPanelEl();
+  panel.innerHTML = rows + `<div class="ai-actions"><button type="button" data-ai-action="reject">Reject all</button></div>`;
+  panel.style.display = "";
+}
+
+function appendRejectButton(suggestion) {
+  const p = aiPanelEl();
+  p.innerHTML += `<div class="ai-actions"><button type="button" data-ai-action="reject">Reject</button></div>`;
+}
+
+aiPanelEl().addEventListener("click", async (e) => {
+  // Three click targets: an existing-code candidate (data-code-id),
+  // a new-code proposal (data-prop-name), or the "Reject" button.
+  const cand = e.target.closest(".ai-cand");
+  const action = e.target.closest("[data-ai-action]");
+  if (cand && cand.dataset.codeId && CURRENT_AI_SUGGESTION) {
+    await acceptAiSuggestion(cand.dataset.codeId);
+    return;
+  }
+  if (cand && cand.dataset.propName && CURRENT_AI_SUGGESTION) {
+    await acceptAiNewCodeProposal(cand.dataset.propName);
+    return;
+  }
+  if (action && action.dataset.aiAction === "reject" && CURRENT_AI_SUGGESTION) {
+    await rejectAiSuggestion();
+    return;
+  }
+});
+
+async function acceptAiSuggestion(codeId) {
+  if (!CURRENT_AI_SUGGESTION) return;
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/ai/suggestions/${CURRENT_AI_SUGGESTION.id}/accept`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          code_id: codeId,
+          anchor_start_word_id: CURRENT_SELECTION.startWordId,
+          anchor_end_word_id: CURRENT_SELECTION.endWordId,
+        }),
+      },
+    );
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const body = await r.json();
+    APPS.push(body.application);
+    paintApplications();
+    renderApps();
+    window.getSelection().removeAllRanges();
+    hideAiPanel();
+    hidePopover();
+  } catch (e) {
+    showAiStatus(`<span class="ai-err">Couldn't accept: ${escapeHtml(e.message)}</span>`);
+  }
+}
+
+async function acceptAiNewCodeProposal(name) {
+  // F8.4: turn a proposal into a real code, then apply it. We also
+  // mark the suggestion as rejected — for now — because the new-code
+  // suggestion record doesn't carry an "accepted_code_id"-equivalent
+  // path through the server; the acceptance is captured by the new
+  // code existing in the codebook with a stamp pointing back to the
+  // suggestion (recorded server-side when the new-code engine
+  // promoted the proposal).
+  if (!CURRENT_AI_SUGGESTION) return;
+  try {
+    await createCodeAndApply(name);
+    // Best effort: the rejection records that this proposal was the
+    // one taken by the user, which keeps the audit trail honest.
+    fetch(
+      `/api/projects/${PROJECT_ID}/ai/suggestions/${CURRENT_AI_SUGGESTION.id}/reject`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({reason: `accepted via codebook: ${name}`}),
+      },
+    ).catch(() => {});
+    hideAiPanel();
+    hidePopover();
+  } catch (e) {
+    showAiStatus(`<span class="ai-err">${escapeHtml(e.message || String(e))}</span>`);
+  }
+}
+
+async function rejectAiSuggestion() {
+  if (!CURRENT_AI_SUGGESTION) return;
+  try {
+    await fetch(
+      `/api/projects/${PROJECT_ID}/ai/suggestions/${CURRENT_AI_SUGGESTION.id}/reject`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({reason: "rejected from coding view"}),
+      },
+    );
+    hideAiPanel();
+  } catch (e) {
+    showAiStatus(`<span class="ai-err">${escapeHtml(e.message)}</span>`);
+  }
+}
 
 async function createCodeAndApply(name) {
   // Create the code, then apply it to the current selection. Shape

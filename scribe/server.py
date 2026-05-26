@@ -2440,6 +2440,402 @@ async def put_project_ai_gate_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# AI code suggestions (F8.3 / F8.4)
+#
+# Two related endpoints expose the existing scribe.code_suggestions and
+# scribe.new_code_suggestions logic to the coding UI:
+#
+#   POST .../ai/suggestions   — given a span + query_text + mode,
+#                                returns ranked existing codes (or new-code
+#                                proposals) and persists the suggestion as
+#                                an audit record (F9.6).
+#   POST .../ai/suggestions/{sid}/accept   — turn an accepted suggestion
+#                                into an Application; record decision.
+#   POST .../ai/suggestions/{sid}/reject   — record rejection (kept as
+#                                evidence per F9.6).
+#
+# All three are guarded by the AI gate (F8.10): if the project hasn't met
+# the hand-coded threshold and isn't overriding, we return 412 with the
+# gate status so the UI can show "code more by hand first".
+# --------------------------------------------------------------------------- #
+
+from . import code_suggestions as _code_suggestions  # noqa: E402
+from . import new_code_suggestions as _new_code_suggestions  # noqa: E402
+from . import ai_provenance as _ai_provenance  # noqa: E402
+
+
+# Optional per-process override so tests can swap in an in-memory backend
+# without touching the real Ollama daemon. Production code never sets this.
+_ai_suggest_backend_override: Any = None
+
+
+def _make_embed_and_generate_fns(
+    cfg: "_ai_backend.BackendConfig",
+    backend: "_ai_backend.ModelBackend",
+) -> tuple[Any, Any, str, str]:
+    """Wrap the backend's embed/generate methods into the simple
+    Callables the suggestion modules expect, plus return the model
+    names so they get persisted into the suggestion record.
+
+    The signatures the suggestion modules want are:
+        embed_fn(texts: Sequence[str]) -> Sequence[Sequence[float]]
+        generate_fn(prompt: str) -> str
+
+    We bake the model names + transport into the closure so the
+    suggestion modules don't have to know about BackendConfig.
+    """
+    embedding_model = cfg.default_embedding_model
+    generation_model = cfg.default_model
+    transport = _ai_backend_transport_override or _ai_backend.urllib_transport
+
+    def embed_fn(texts):
+        if not embedding_model:
+            raise _ai_backend.BackendValidationError(
+                "No default_embedding_model configured for this project"
+            )
+        req = _ai_backend.EmbeddingRequest(
+            model=embedding_model, inputs=tuple(texts),
+        )
+        resp = backend.embed(cfg, req, transport=transport)
+        return resp.vectors
+
+    def generate_fn(prompt):
+        if not generation_model:
+            raise _ai_backend.BackendValidationError(
+                "No default_model (generation) configured for this project"
+            )
+        req = _ai_backend.GenerationRequest(
+            model=generation_model, prompt=prompt,
+        )
+        resp = backend.generate(cfg, req, transport=transport)
+        return resp.text
+
+    return embed_fn, generate_fn, embedding_model, generation_model
+
+
+def _resolve_suggestion_backend(project: "_projects.Project"):
+    """Load + dispatch the configured AI backend, surfacing a helpful
+    HTTPException if the user hasn't picked one yet."""
+    if _ai_suggest_backend_override is not None:
+        cfg, backend = _ai_suggest_backend_override
+        return cfg, backend
+    cfg = _ai_backend.load_backend_config(project)
+    backend = _ai_backend.backend_for_config(cfg)
+    return cfg, backend
+
+
+@app.post("/api/projects/{project_id}/ai/suggestions")
+async def post_ai_suggestion_endpoint(project_id: str, request: Request) -> JSONResponse:
+    """F8.3 / F8.4 — suggest codes for a highlighted span.
+
+    Body shape:
+        {
+          "source_id": "<sid>",
+          "anchor_start_word_id": "s0w0",
+          "anchor_end_word_id": "s0w12",
+          "query_text": "the highlighted text the user selected",
+          "mode": "existing" | "new"     (default: "existing")
+        }
+
+    Returns the persisted CodeSuggestion or NewCodeSuggestion dict.
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    source_id = body.get("source_id")
+    start_id = body.get("anchor_start_word_id")
+    end_id = body.get("anchor_end_word_id")
+    query_text = body.get("query_text") or ""
+    mode = (body.get("mode") or "existing").lower()
+    if not source_id or not start_id or not end_id:
+        raise HTTPException(400, "source_id, anchor_start_word_id, anchor_end_word_id are required")
+    if mode not in ("existing", "new"):
+        raise HTTPException(400, "mode must be 'existing' or 'new'")
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+
+        # AI gate (F8.10) — feature names live in scribe.ai_provenance.AI_FEATURES.
+        gate_feature = (
+            _ai_provenance.AI_FEATURE_NEW_CODE_SUGGESTION if mode == "new"
+            else _ai_provenance.AI_FEATURE_CODE_SUGGESTION
+        )
+        try:
+            gate = _ai_gate.evaluate_project_ai_gate(
+                _projects_root(), project_id, feature=gate_feature,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        if not gate.allowed:
+            raise HTTPException(412, {
+                "detail": "AI gate not satisfied",
+                "gate": gate.to_dict(),
+            })
+
+        # Backend
+        try:
+            cfg, backend = _resolve_suggestion_backend(project)
+            embed_fn, generate_fn, emb_model, gen_model = _make_embed_and_generate_fns(cfg, backend)
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+
+        # Project state for the suggestion modules
+        codes = _codes.list_codes(_projects_root(), project_id)
+        applications = _applications.list_applications(
+            _projects_root(), project_id,
+        )
+
+        try:
+            if mode == "existing":
+                suggestion = _code_suggestions.suggest_codes_for_span(
+                    projects_root=_projects_root(),
+                    project_id=project_id,
+                    source_id=str(source_id),
+                    anchor_start_word_id=str(start_id),
+                    anchor_end_word_id=str(end_id),
+                    query_text=str(query_text),
+                    codes=codes,
+                    applications=applications,
+                    embed_fn=embed_fn,
+                    generate_fn=generate_fn,
+                    embedding_model=emb_model,
+                    generation_model=gen_model,
+                )
+                _code_suggestions.save_suggestion(_projects_root(), suggestion)
+                return JSONResponse({
+                    "kind": "existing",
+                    "suggestion": suggestion.to_dict(),
+                })
+            else:
+                suggestion = _new_code_suggestions.suggest_new_codes_for_span(
+                    project_id=project_id,
+                    source_id=str(source_id),
+                    anchor_start_word_id=str(start_id),
+                    anchor_end_word_id=str(end_id),
+                    query_text=str(query_text),
+                    codes=codes,
+                    embed_fn=embed_fn,
+                    generate_fn=generate_fn,
+                    embedding_model=emb_model,
+                    generation_model=gen_model,
+                )
+                _new_code_suggestions.save_new_code_suggestion(_projects_root(), suggestion)
+                return JSONResponse({
+                    "kind": "new",
+                    "suggestion": suggestion.to_dict(),
+                })
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except _ai_backend.BackendUnavailable as e:
+            raise HTTPException(502, f"Backend unavailable: {e}")
+        except _ai_backend.BackendError as e:
+            raise HTTPException(500, str(e))
+
+
+@app.post("/api/projects/{project_id}/ai/suggestions/{suggestion_id}/accept")
+async def accept_ai_suggestion_endpoint(
+    project_id: str, suggestion_id: str, request: Request,
+) -> JSONResponse:
+    """Turn an existing-code suggestion into an Application.
+
+    Body shape (all optional except code_id; if missing we use the top
+    candidate from the suggestion):
+        {
+          "code_id": "<cid>",      # which candidate was accepted
+          "anchor_start_word_id": "s0w0",   # may differ from suggestion
+          "anchor_end_word_id": "s0w12",
+          "modified": false,       # true if user changed the code/anchor
+        }
+    """
+    _check_project_id(project_id)
+    if not _code_suggestions.SUGGESTION_ID_RE.match(suggestion_id):
+        raise HTTPException(400, "Invalid suggestion id")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body and not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            suggestion = _code_suggestions.load_suggestion(
+                _projects_root(), project_id, suggestion_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Suggestion not found")
+        if suggestion.decision != _code_suggestions.SUGGESTION_DECISION_PENDING:
+            raise HTTPException(409, f"Suggestion already {suggestion.decision}")
+
+        # Pick which candidate the human actually accepted. Default to the
+        # top one. If the body specifies a code_id, look it up among the
+        # suggestion's candidates AND among the project's full codebook
+        # (in case the user picked a code that the suggestion didn't list).
+        code_id = body.get("code_id")
+        if not code_id and suggestion.candidates:
+            code_id = suggestion.candidates[0].code_id
+        if not code_id:
+            raise HTTPException(400, "No code_id supplied and the suggestion has no candidates")
+
+        # Verify the chosen code exists.
+        try:
+            code = _codes.load_code(_projects_root(), project_id, str(code_id))
+        except FileNotFoundError:
+            raise HTTPException(404, "Code not found")
+
+        # Anchors come from the suggestion unless overridden.
+        start_id = body.get("anchor_start_word_id") or suggestion.anchor_start_word_id
+        end_id = body.get("anchor_end_word_id") or suggestion.anchor_end_word_id
+
+        # Latest version for the apply-record.
+        latest = _code_versions.latest_code_version(
+            _projects_root(), project_id, code.id,
+        )
+        if latest is None:
+            latest = _code_versions.record_code_version(
+                _projects_root(), code, change_note="initial-on-accept",
+            )
+
+        coder_id = _ensure_default_coder(project_id)
+
+        # "modified" means the human deviated from the suggestion: a
+        # different code, or a different span. The body can also assert
+        # it explicitly when the UI knows the user fiddled with things
+        # the server can't see.
+        top_candidate_code_id = (
+            suggestion.candidates[0].code_id if suggestion.candidates else None
+        )
+        deviated = (
+            (top_candidate_code_id is not None and code.id != top_candidate_code_id)
+            or str(start_id) != suggestion.anchor_start_word_id
+            or str(end_id) != suggestion.anchor_end_word_id
+        )
+        modified = bool(body.get("modified")) or deviated
+
+        decision = (
+            _code_suggestions.SUGGESTION_DECISION_MODIFIED if modified
+            else _code_suggestions.SUGGESTION_DECISION_ACCEPTED
+        )
+
+        # Pull the chosen candidate's confidence (if any) so the
+        # Application's AIProvenance carries it forward (F8.9).
+        chosen_confidence: float | None = None
+        for cand in suggestion.candidates:
+            if cand.code_id == code.id:
+                chosen_confidence = float(cand.combined_score)
+                break
+
+        ai_prov = _applications.AIProvenance.new(
+            feature=_ai_provenance.AI_FEATURE_CODE_SUGGESTION,
+            generation_model=suggestion.generation_model,
+            embedding_model=suggestion.embedding_model,
+            suggestion_id=suggestion.id,
+            decision=decision,
+            decided_by_coder_id=coder_id,
+            confidence=chosen_confidence,
+        )
+
+        try:
+            app_obj = _applications.Application.new(
+                project_id=project_id,
+                code_id=code.id,
+                source_id=suggestion.source_id,
+                coder_id=coder_id,
+                anchor_start_word_id=str(start_id),
+                anchor_end_word_id=str(end_id),
+                definition_version_id_at_apply=latest.id,
+                confidence=chosen_confidence,
+                ai_provenance=ai_prov,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _applications.save_application(_projects_root(), app_obj)
+
+        try:
+            _code_suggestions.record_decision(
+                suggestion,
+                decision=decision,
+                coder_id=coder_id,
+                accepted_code_id=code.id,
+                accepted_application_id=app_obj.id,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _code_suggestions.save_suggestion(_projects_root(), suggestion)
+
+    return JSONResponse({
+        "suggestion": suggestion.to_dict(),
+        "application": app_obj.to_dict(),
+    })
+
+
+@app.post("/api/projects/{project_id}/ai/suggestions/{suggestion_id}/reject")
+async def reject_ai_suggestion_endpoint(
+    project_id: str, suggestion_id: str, request: Request,
+) -> JSONResponse:
+    """Record a rejection (F9.6: rejected suggestions are evidence too)."""
+    _check_project_id(project_id)
+    if not _code_suggestions.SUGGESTION_ID_RE.match(suggestion_id):
+        raise HTTPException(400, "Invalid suggestion id")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = (body or {}).get("reason", "") if isinstance(body, dict) else ""
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            suggestion = _code_suggestions.load_suggestion(
+                _projects_root(), project_id, suggestion_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Suggestion not found")
+        if suggestion.decision != _code_suggestions.SUGGESTION_DECISION_PENDING:
+            raise HTTPException(409, f"Suggestion already {suggestion.decision}")
+        try:
+            _code_suggestions.record_decision(
+                suggestion,
+                decision=_code_suggestions.SUGGESTION_DECISION_REJECTED,
+                coder_id=_ensure_default_coder(project_id),
+                rejection_reason=str(reason or "")[:_code_suggestions.MAX_REJECTION_REASON_LEN],
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _code_suggestions.save_suggestion(_projects_root(), suggestion)
+
+    return JSONResponse({"suggestion": suggestion.to_dict()})
+
+
+@app.get("/api/projects/{project_id}/ai/suggestions")
+async def list_ai_suggestions_endpoint(
+    project_id: str, source_id: str = "", decision: str = "",
+) -> JSONResponse:
+    """List persisted suggestions for the project. Optional filters
+    narrow by source or decision (e.g. ?decision=pending)."""
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        suggestions = _code_suggestions.list_suggestions(
+            _projects_root(), project_id,
+            source_id=source_id or None,
+            decision=decision or None,
+        )
+    return JSONResponse({
+        "suggestions": [s.to_dict() for s in suggestions],
+    })
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 
