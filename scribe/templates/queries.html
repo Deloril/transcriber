@@ -22,9 +22,10 @@
       participant — the SPEAKER_ROLES vocabulary in scribe.speaker_map).
     * Run button, results table grouped by source, count + warnings.
 
-  Future graduations (F3.6 matrix views, F3.7 saved queries, F6.2
-  retrieval reports) layer onto the same page — they consume the
-  same /queries/run endpoint and add their own controls / sections.
+  Future graduations (F6.2 retrieval reports) layer onto the same
+  page — they consume the same /queries/run endpoint and add their
+  own controls / sections. F3.7 saved queries (named, re-runnable)
+  are wired below the matrix panel.
 #}
 {% extends "_shell.html" %}
 {% set active_nav = "projects" %}
@@ -35,7 +36,7 @@
 {% endblock %}
 
 {% block subtitle_block %}
-  <span class="sub">F3.5 + F3.6 — code · source · participant · speaker · boolean · proximity, with matrix views over the matching subset. Saved queries (F3.7) graduate later.</span>
+  <span class="sub">F3.5 + F3.6 + F3.7 — code · source · participant · speaker · boolean · proximity, with matrix views over the matching subset, plus named re-runnable queries.</span>
 {% endblock %}
 
 {% block extra_styles %}
@@ -222,6 +223,66 @@
     border: 1px solid color-mix(in srgb, var(--err) 40%, var(--border));
     padding: 8px 10px; border-radius: 6px;
   }
+
+  /* F3.7 saved-queries panel */
+  .sq-panel {
+    margin-top: 20px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .sq-panel h2 { margin: 0 0 6px; font-size: 16px; }
+  .sq-panel .hint { color: var(--muted); font-size: 12.5px; margin: 0 0 12px; }
+  .sq-controls {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    margin-bottom: 10px;
+  }
+  .sq-controls input.sq-name,
+  .sq-controls input.sq-desc {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 10px; font: inherit; font-size: 13px;
+    min-width: 200px;
+  }
+  .sq-list {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .sq-row {
+    display: flex; flex-wrap: wrap; align-items: baseline;
+    gap: 8px; padding: 8px 10px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 13px;
+  }
+  .sq-row .sq-row-name {
+    font-weight: 600; color: var(--text-strong);
+  }
+  .sq-row .sq-row-desc {
+    color: var(--muted); font-size: 12px;
+  }
+  .sq-row .sq-row-runs {
+    color: var(--muted); font-size: 11.5px; font-family: var(--mono);
+    margin-left: auto;
+  }
+  .sq-row .sq-row-actions {
+    display: flex; gap: 4px;
+  }
+  .sq-row .sq-row-actions .btn {
+    padding: 3px 8px; font-size: 12px;
+  }
+  .sq-empty {
+    color: var(--muted); font-style: italic; padding: 8px 0;
+    font-size: 12.5px;
+  }
+  .sq-error {
+    color: var(--err);
+    background: color-mix(in srgb, var(--err) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--err) 40%, var(--border));
+    padding: 8px 10px; border-radius: 6px;
+    margin-bottom: 8px; font-size: 12.5px;
+  }
 {% endblock %}
 
 {% block body %}
@@ -359,6 +420,32 @@
   </div>
 </div>
 
+{# ============================================================ #}
+{# F3.7 — Saved queries (named, re-runnable)                    #}
+{# ============================================================ #}
+<div class="card sq-panel" data-test-feature="F3.7">
+  <h2>⭐ Saved queries</h2>
+  <p class="hint">Name the query above so you can re-run it later. Re-runs bump the run counter and stamp <em>last run</em> for the audit trail; renaming or deleting a saved query never removes the underlying applications.</p>
+
+  <div class="sq-controls">
+    <input type="text" id="sqName" class="sq-name"
+           data-test-id="sq-name-input"
+           placeholder="Saved query name (required)" maxlength="200">
+    <input type="text" id="sqDesc" class="sq-desc"
+           data-test-id="sq-desc-input"
+           placeholder="Optional description">
+    <button id="sqSave" class="btn"
+            data-test-id="sq-save">Save current query</button>
+  </div>
+
+  <div id="sqError" class="sq-error" style="display:none"
+       data-test-id="sq-error"></div>
+
+  <ul id="sqList" class="sq-list" data-test-id="sq-list"></ul>
+  <div id="sqEmpty" class="sq-empty" data-test-id="sq-empty"
+       style="display:none">No saved queries yet. Build a query above, give it a name, and hit "Save current query".</div>
+</div>
+
 <script type="module">
 // Pure helpers — buildQueryPayload + groupApplicationsBySource — are
 // in helpers.mjs so the JS-side translation from the form to the
@@ -368,6 +455,8 @@
 import {
   buildQueryPayload,
   buildMatrixPayload,
+  buildSavedQueryPayload,
+  formatSavedQueryRunSummary,
   groupApplicationsBySource,
   matrixToTable,
 } from "/static/js/helpers.mjs";
@@ -727,8 +816,192 @@ document.getElementById("mxRun").addEventListener("click", runMatrix);
 refreshMatrixControls();
 
 
+// ============================================================ //
+// F3.7 — Saved queries wiring                                  //
+// ============================================================ //
+
+function showSqError(msg) {
+  const errEl = document.getElementById("sqError");
+  if (!msg) {
+    errEl.style.display = "none";
+    errEl.textContent = "";
+  } else {
+    errEl.textContent = msg;
+    errEl.style.display = "";
+  }
+}
+
+function renderSavedQueriesList(savedQueries) {
+  const list = document.getElementById("sqList");
+  const empty = document.getElementById("sqEmpty");
+  list.innerHTML = "";
+  if (!savedQueries.length) {
+    empty.style.display = "";
+    return;
+  }
+  empty.style.display = "none";
+  savedQueries.forEach(sq => {
+    const li = document.createElement("li");
+    li.className = "sq-row";
+    li.dataset.savedQueryId = sq.id;
+    li.dataset.testId = "sq-row";
+
+    const nameEl = document.createElement("span");
+    nameEl.className = "sq-row-name";
+    nameEl.dataset.testId = "sq-row-name";
+    nameEl.textContent = sq.query && sq.query.name ? sq.query.name : "(unnamed)";
+    li.appendChild(nameEl);
+
+    if (sq.query && sq.query.description) {
+      const descEl = document.createElement("span");
+      descEl.className = "sq-row-desc";
+      descEl.textContent = "— " + sq.query.description;
+      li.appendChild(descEl);
+    }
+
+    const runsEl = document.createElement("span");
+    runsEl.className = "sq-row-runs";
+    runsEl.dataset.testId = "sq-row-runs";
+    runsEl.textContent = formatSavedQueryRunSummary(sq);
+    li.appendChild(runsEl);
+
+    const actions = document.createElement("span");
+    actions.className = "sq-row-actions";
+
+    const runBtn = document.createElement("button");
+    runBtn.className = "btn";
+    runBtn.dataset.testId = "sq-row-run";
+    runBtn.textContent = "Run";
+    runBtn.addEventListener("click", () => runSavedQuery(sq.id));
+    actions.appendChild(runBtn);
+
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn secondary";
+    delBtn.dataset.testId = "sq-row-delete";
+    delBtn.textContent = "Delete";
+    delBtn.addEventListener("click", () => deleteSavedQuery(sq.id));
+    actions.appendChild(delBtn);
+
+    li.appendChild(actions);
+    list.appendChild(li);
+  });
+}
+
+async function loadSavedQueries() {
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/saved-queries`);
+    if (!r.ok) {
+      showSqError(`Failed to load saved queries (HTTP ${r.status})`);
+      return;
+    }
+    const data = await r.json();
+    renderSavedQueriesList(data.saved_queries || []);
+  } catch (e) {
+    showSqError(`Failed to load saved queries: ${e.message || e}`);
+  }
+}
+
+async function saveCurrentQuery() {
+  showSqError("");
+  const name = document.getElementById("sqName").value.trim();
+  const desc = document.getElementById("sqDesc").value.trim();
+  if (!name) {
+    showSqError("Saved query needs a name.");
+    return;
+  }
+  let payload;
+  try {
+    const inner = readFormPayload();
+    // The wrapped Query needs a name (validate() on server-side
+    // requires it on a SavedQuery). Mirror it from the top-level
+    // shortcut so the route accepts a minimal POST.
+    inner.name = name;
+    if (desc) inner.description = desc;
+    payload = buildSavedQueryPayload({ query: inner, name, description: desc });
+  } catch (e) {
+    showSqError(e.message || String(e));
+    return;
+  }
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/saved-queries`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try { const e = await r.json(); if (e && e.detail) msg = String(e.detail); }
+      catch (_) {}
+      showSqError(`Save failed: ${msg}`);
+      return;
+    }
+    document.getElementById("sqName").value = "";
+    document.getElementById("sqDesc").value = "";
+    await loadSavedQueries();
+  } catch (e) {
+    showSqError(`Save failed: ${e.message || e}`);
+  }
+}
+
+async function runSavedQuery(sqid) {
+  showSqError("");
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/saved-queries/${encodeURIComponent(sqid)}/run`,
+      { method: "POST" },
+    );
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try { const e = await r.json(); if (e && e.detail) msg = String(e.detail); }
+      catch (_) {}
+      showSqError(`Run failed: ${msg}`);
+      return;
+    }
+    const report = await r.json();
+    // Re-use the F3.5 results pane to render the matches.
+    renderResults(report);
+    // Update the run counter on the saved-queries list without a
+    // full reload — splice the post-run saved query in place.
+    if (report.saved_query) {
+      const list = await fetch(`/api/projects/${PROJECT_ID}/saved-queries`);
+      if (list.ok) {
+        const data = await list.json();
+        renderSavedQueriesList(data.saved_queries || []);
+      }
+    }
+  } catch (e) {
+    showSqError(`Run failed: ${e.message || e}`);
+  }
+}
+
+async function deleteSavedQuery(sqid) {
+  showSqError("");
+  if (!window.confirm("Delete this saved query? The underlying coded segments are untouched.")) {
+    return;
+  }
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/saved-queries/${encodeURIComponent(sqid)}`,
+      { method: "DELETE" },
+    );
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try { const e = await r.json(); if (e && e.detail) msg = String(e.detail); }
+      catch (_) {}
+      showSqError(`Delete failed: ${msg}`);
+      return;
+    }
+    await loadSavedQueries();
+  } catch (e) {
+    showSqError(`Delete failed: ${e.message || e}`);
+  }
+}
+
+document.getElementById("sqSave").addEventListener("click", saveCurrentQuery);
+
+
 (async () => {
-  await Promise.all([loadCodes(), loadSources()]);
+  await Promise.all([loadCodes(), loadSources(), loadSavedQueries()]);
 })();
 </script>
 {% endblock %}

@@ -2628,3 +2628,77 @@ export function matrixToTable(payload) {
 
   return { header, body, rowTotals, colTotals, grandTotal };
 }
+
+
+// ---------- F3.7 saved-query payload builders ----------
+//
+// The F3.7 saved-queries surface re-uses the F3.5 query payload
+// (`buildQueryPayload` above) and wraps it with a name + optional
+// description so the resulting POST body matches what
+// `scribe.server.create_saved_query_endpoint` expects:
+//
+//   {
+//     "query": <buildQueryPayload(...)>,
+//     "name":  "Quotes about power",
+//     "description": "Optional notes about this query"
+//   }
+//
+// `buildSavedQueryPayload` is the create/PATCH shape; it validates
+// the name (required, non-blank) before emitting. Pulled into
+// helpers.mjs so the page-side wiring is unit-tested rather than
+// crafted ad-hoc inside the template.
+export function buildSavedQueryPayload({
+  query,
+  name = "",
+  description = "",
+} = {}) {
+  if (!query || typeof query !== "object") {
+    throw new Error("buildSavedQueryPayload: query is required");
+  }
+  const trimmed = String(name || "").trim();
+  if (!trimmed) {
+    throw new Error("buildSavedQueryPayload: name is required");
+  }
+  const out = {
+    query: query,
+    name: trimmed,
+  };
+  const desc = String(description || "");
+  if (desc) {
+    out.description = desc;
+  }
+  return out;
+}
+
+
+// Format a SavedQuery's run-tracking metadata into a single short
+// string for the saved-queries list. Handles the never-run case
+// ("never run") and the standard ISO timestamp ("last run … · 3 ×").
+//
+// `nowFn` is injectable so the test suite can pin `Date.now()` and
+// assert "5 minutes ago" style strings without timing flake.
+export function formatSavedQueryRunSummary(sq, { nowFn } = {}) {
+  if (!sq || typeof sq !== "object") return "";
+  const count = Number(sq.run_count || 0);
+  const last = String(sq.last_run_at || "");
+  if (!last) {
+    return count > 0
+      ? `${count} run${count === 1 ? "" : "s"}`
+      : "never run";
+  }
+  // Best-effort parse — saved queries store ISO-8601 UTC strings.
+  let when = last;
+  try {
+    const d = new Date(last);
+    if (!isNaN(d.getTime())) {
+      const now = (typeof nowFn === "function") ? nowFn() : Date.now();
+      const dMs = now - d.getTime();
+      const sec = Math.round(dMs / 1000);
+      if (sec < 60) when = "just now";
+      else if (sec < 3600) when = `${Math.round(sec / 60)} min ago`;
+      else if (sec < 86400) when = `${Math.round(sec / 3600)} h ago`;
+      else when = `${Math.round(sec / 86400)} d ago`;
+    }
+  } catch (_) { /* keep raw ISO */ }
+  return `last run ${when} · ${count} ×`;
+}

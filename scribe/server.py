@@ -2390,6 +2390,290 @@ async def run_project_matrix_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Saved queries (F3.7) — named, re-runnable queries.
+#
+# scribe.saved_queries shipped the pure SavedQuery dataclass + on-disk
+# CRUD + run-tracking in 6bb1947 with 53 unit tests, but had **no HTTP
+# surface** — the F3.7 commit body explicitly deferred routes + UI
+# ('to land alongside the rest of Phase B'). This block wires the
+# saved-queries store through to the user-facing /projects/<pid>/queries
+# page so a researcher can name a query, see the list of named queries,
+# re-run one (recording the run + bumping run_count), and delete one
+# they no longer want.
+#
+# Endpoints:
+#
+#   GET    /api/projects/<pid>/saved-queries
+#           List every saved query in the project (sorted newest-edited
+#           first to match scribe.saved_queries.list_saved_queries).
+#
+#   POST   /api/projects/<pid>/saved-queries
+#           Create. Body: {query: <Query payload>, name?, description?}.
+#           ``name`` / ``description`` shortcuts populate the wrapped
+#           Query if the inner query payload didn't carry them. The
+#           wrapped query.project_id must match the URL pid.
+#
+#   GET    /api/projects/<pid>/saved-queries/<sqid>
+#           Fetch one. 404 if missing.
+#
+#   PATCH  /api/projects/<pid>/saved-queries/<sqid>
+#           Partial update via SavedQuery.apply_update — accepts any
+#           subset of {query, name, description}. ``project_id`` /
+#           ``id`` / timestamps / run_count are managed by the entity.
+#
+#   DELETE /api/projects/<pid>/saved-queries/<sqid>
+#           Remove. 404 if missing.
+#
+#   POST   /api/projects/<pid>/saved-queries/<sqid>/run
+#           Load + execute via the F3.5 runtime; bump run_count and
+#           stamp last_run_at. Returns the same shape as
+#           POST /queries/run plus the post-run saved query (so the UI
+#           can show the updated run_count without a follow-up GET).
+# --------------------------------------------------------------------------- #
+
+from . import saved_queries as _saved_queries  # noqa: E402
+
+
+def _check_saved_query_id(saved_query_id: str) -> None:
+    if not _saved_queries.SAVED_QUERY_ID_RE.match(saved_query_id):
+        raise HTTPException(400, "Invalid saved query id")
+
+
+def _saved_query_payload_to_query(
+    project_id: str, body: dict
+) -> "_query.Query":
+    """Helper for POST/PATCH: lift the inner Query payload, stamp the
+    URL project_id, and propagate name / description shortcuts so the
+    UI can send {name, query} without re-typing the metadata into the
+    inner Query.
+    """
+    raw_query = body.get("query")
+    if not isinstance(raw_query, dict):
+        raise HTTPException(
+            400, "Body must include a 'query' object payload"
+        )
+    query_payload = dict(raw_query)
+    query_payload.setdefault("project_id", project_id)
+    if query_payload.get("project_id") != project_id:
+        raise HTTPException(
+            400, "query.project_id must match the URL project_id"
+        )
+    # Top-level name / description shortcuts override the inner ones
+    # only when the caller actually supplied them — researchers can
+    # rename a query by passing just {name: "..."} into PATCH without
+    # re-sending the whole filter tree.
+    if "name" in body and body["name"] is not None:
+        query_payload["name"] = str(body["name"])
+    if "description" in body and body["description"] is not None:
+        query_payload["description"] = str(body["description"])
+    try:
+        q = _query.Query.from_dict(query_payload)
+    except _projects.ProjectValidationError as e:
+        raise HTTPException(400, f"Invalid query: {e}")
+    return q
+
+
+@app.get("/api/projects/{project_id}/saved-queries")
+async def list_saved_queries_endpoint(project_id: str) -> JSONResponse:
+    """List every saved query in the project (F3.7).
+
+    Sorted newest-edited first; matches the underlying store's order
+    so the UI can render the list without re-sorting.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        out = _saved_queries.list_saved_queries(_projects_root(), project_id)
+    return JSONResponse(
+        {"saved_queries": [sq.to_dict() for sq in out]}
+    )
+
+
+@app.post("/api/projects/{project_id}/saved-queries")
+async def create_saved_query_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    """Create a new saved query (F3.7).
+
+    Request body shape::
+
+        {
+          "query": {<scribe.query.Query payload>},
+          "name": "<display name>",          # optional shortcut
+          "description": "<optional>"        # optional shortcut
+        }
+
+    The wrapped query's ``project_id`` must equal the URL
+    ``project_id`` (server-side: stamped from the URL when missing,
+    400 on mismatch). The display name is required (a saved query
+    needs a name for the "re-run X" UI to make sense); a 400 lands if
+    the inner query and the top-level shortcut both omit it.
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    q = _saved_query_payload_to_query(project_id, body)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            sq = _saved_queries.SavedQuery.new(
+                project_id=project_id, query=q,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        try:
+            _saved_queries.save_saved_query(_projects_root(), sq)
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+    return JSONResponse(sq.to_dict(), status_code=201)
+
+
+@app.get("/api/projects/{project_id}/saved-queries/{saved_query_id}")
+async def get_saved_query_endpoint(
+    project_id: str, saved_query_id: str
+) -> JSONResponse:
+    """Fetch one saved query by id (F3.7). 404 if missing."""
+    _check_project_id(project_id)
+    _check_saved_query_id(saved_query_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            sq = _saved_queries.load_saved_query(
+                _projects_root(), project_id, saved_query_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Saved query not found")
+    return JSONResponse(sq.to_dict())
+
+
+@app.patch("/api/projects/{project_id}/saved-queries/{saved_query_id}")
+async def patch_saved_query_endpoint(
+    project_id: str, saved_query_id: str, request: Request
+) -> JSONResponse:
+    """Partial update a saved query (F3.7).
+
+    Accepts any subset of ``{query, name, description}``. Managed
+    fields (``id``, ``project_id``, ``created_at``, ``modified_at``,
+    ``last_run_at``, ``run_count``) are ignored if passed — the entity
+    owns them.
+    """
+    _check_project_id(project_id)
+    _check_saved_query_id(saved_query_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            sq = _saved_queries.load_saved_query(
+                _projects_root(), project_id, saved_query_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Saved query not found")
+        try:
+            sq.apply_update(body)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid saved-query patch: {e}")
+        _saved_queries.save_saved_query(_projects_root(), sq)
+    return JSONResponse(sq.to_dict())
+
+
+@app.delete("/api/projects/{project_id}/saved-queries/{saved_query_id}")
+async def delete_saved_query_endpoint(
+    project_id: str, saved_query_id: str
+) -> JSONResponse:
+    """Remove a saved query (F3.7). 404 if missing."""
+    _check_project_id(project_id)
+    _check_saved_query_id(saved_query_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        ok = _saved_queries.delete_saved_query(
+            _projects_root(), project_id, saved_query_id
+        )
+    if not ok:
+        raise HTTPException(404, "Saved query not found")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/projects/{project_id}/saved-queries/{saved_query_id}/run")
+async def run_saved_query_endpoint(
+    project_id: str, saved_query_id: str
+) -> JSONResponse:
+    """Re-run a saved query (F3.7).
+
+    Loads the saved query, executes it via the same F3.5 runtime the
+    ad-hoc query route uses, and bumps the run-tracking fields
+    (``run_count`` + ``last_run_at``). Returns the executor's output
+    plus the post-run :class:`SavedQuery` so the UI can update the
+    "last run" / "run count" indicator without a follow-up GET.
+
+    Status codes:
+      * 200 — query ran (even if zero matches).
+      * 400 — invalid project / saved-query id, or any
+        :class:`ProjectValidationError` from the executor.
+      * 404 — project or saved query does not exist on disk.
+    """
+    _check_project_id(project_id)
+    _check_saved_query_id(saved_query_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            sq = _saved_queries.load_saved_query(
+                _projects_root(), project_id, saved_query_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Saved query not found")
+
+        sources_by_id: dict[str, _sources.Source] = {}
+
+        def _segments_loader(sid: str):
+            src = sources_by_id.get(sid)
+            if src is None:
+                try:
+                    src = _sources.load_source(
+                        _projects_root(), project_id, sid
+                    )
+                except FileNotFoundError:
+                    return None
+                except _projects.ProjectValidationError:
+                    return None
+                sources_by_id[sid] = src
+            return _load_segments_for_source_speaker_map(src)
+
+        try:
+            report = _query_runtime.run_query_against_project(
+                _projects_root(), project_id, sq.query,
+                segments_loader=_segments_loader,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+        # Stamp run_count + last_run_at after a successful execution
+        # (a 400 / 500 must not advance the audit trail). record_run
+        # persists immediately.
+        sq = _saved_queries.record_run(
+            _projects_root(), project_id, saved_query_id,
+        )
+
+    return JSONResponse({
+        "saved_query": sq.to_dict(),
+        "applications": [a.to_dict() for a in report.matches],
+        "total_applications": report.total_applications,
+        "sources_missing_transcript": list(report.sources_missing_transcript),
+        "warnings": list(report.warnings),
+    })
+
+
+# --------------------------------------------------------------------------- #
 # Coders (F2.5, multi-coder mode) — REST surface
 #
 # The pure data layer (``scribe/coders.py``) and the ICR statistics
