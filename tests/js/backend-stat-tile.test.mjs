@@ -561,3 +561,197 @@ describe("backendStatTile (G2.2 CT2 ROCm fallback mirrors)", () => {
     );
   });
 });
+
+// ---------- G2.3: Linux distro support tier on the sub-line ----------
+//
+// G2.3 added ``gpu.distro_tier`` to the /api/capabilities payload —
+// the AMD-official ROCm support classification for the active
+// distro, one of "first-class" / "supported" / "best-effort" /
+// "unknown" on ROCm; null on every non-ROCm backend. The home page
+// Recording details card surfaces the tier next to the distro
+// pretty-name so a researcher pasting their machine info into a
+// support thread sees at a glance whether AMD officially supports
+// their distro for ROCm.
+//
+// Contract:
+//   - non-ROCm backends: ``distro_tier`` is null (the field doesn't
+//     apply); tile sub-line stays clean.
+//   - ROCm + classifier failed: ``distro_tier`` is null (defensive
+//     fallback when /etc/os-release is missing); tile stays clean.
+//   - ROCm + classified:        ``distro_tier`` is one of the four
+//     tier strings; tile sub-line gains "<tier> distro" segment.
+//
+// Renders the tier with a trailing " distro" so the bare tier label
+// alone (e.g. "first-class") doesn't read strangely in the sub-line.
+// "first-class distro" is what a researcher wants to copy into a
+// bug report.
+
+describe("backendStatTile (G2.3 distro support tier)", () => {
+  it("appends 'first-class distro' on a ROCm + Ubuntu LTS tile", () => {
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      gfx_target: "gfx1100",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.7.2",
+      ct2_drift_message: null,
+      ct2_rocm_fallback_urls: [],
+      distro_tier: "first-class",
+      distro_tier_explanation:
+        "AMD officially supports this distro for ROCm; tested by Scribe",
+    });
+    expect(tile.sub).toBe(
+      "AMD Radeon RX 7900 XTX · 24 GB VRAM · gfx1100 · " +
+      "Ubuntu 24.04.4 LTS · CT2 v4.7.2 · first-class distro"
+    );
+  });
+
+  it("appends 'supported distro' on a ROCm + RHEL 9 tile", () => {
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon Pro W6800",
+      vram_gb: 32.0,
+      gfx_target: "gfx1030",
+      distro: "Red Hat Enterprise Linux 9.7 (Plow)",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.7.2",
+      ct2_drift_message: null,
+      distro_tier: "supported",
+    });
+    expect(tile.sub).toContain("supported distro");
+    // RHEL is "supported" but not "first-class" — pin the distinction
+    // so a future change can't quietly upgrade RHEL to first-class
+    // without updating the matrix.
+    expect(tile.sub).not.toContain("first-class");
+  });
+
+  it("appends 'best-effort distro' on a ROCm + Fedora tile", () => {
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 9070 XT",
+      vram_gb: 16.0,
+      gfx_target: "gfx1201",
+      distro: "Fedora Linux 41 (Workstation Edition)",
+      distro_tier: "best-effort",
+    });
+    expect(tile.sub).toContain("best-effort distro");
+  });
+
+  it("appends 'unknown distro' when classifier couldn't identify the host", () => {
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      distro: "Some Unknown Linux 1.0",
+      distro_tier: "unknown",
+    });
+    expect(tile.sub).toContain("unknown distro");
+  });
+
+  it("omits tier segment when distro_tier is null (non-ROCm backend)", () => {
+    // CUDA box on Ubuntu 24.04 — distro is set, but tier is null
+    // because the AMD matrix is irrelevant on NVIDIA.
+    const tile = backendStatTile({
+      backend: "cuda",
+      device_name: "NVIDIA GeForce RTX 4090",
+      vram_gb: 24.0,
+      distro: "Ubuntu 24.04.4 LTS",
+      distro_tier: null,
+    });
+    expect(tile.sub).toBe(
+      "NVIDIA GeForce RTX 4090 · 24 GB VRAM · Ubuntu 24.04.4 LTS"
+    );
+    expect(tile.sub).not.toContain("distro");  // the segment is omitted
+  });
+
+  it("omits tier segment when distro_tier field is missing entirely", () => {
+    // Defensive: an older API version that doesn't carry the field
+    // shouldn't make the tile blow up.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      distro: "Ubuntu 24.04.4 LTS",
+    });
+    expect(tile.sub).toBe(
+      "AMD Radeon RX 7900 XTX · 24 GB VRAM · Ubuntu 24.04.4 LTS"
+    );
+    // No tier segment at all — the trailing " distro" suffix
+    // shouldn't leak.
+    expect(tile.sub.endsWith("distro")).toBe(false);
+  });
+
+  it("omits tier segment when distro_tier is empty string", () => {
+    // Defensive: server returning an empty string for some reason
+    // should not render an empty " distro" segment.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      distro_tier: "",
+    });
+    expect(tile.sub).toBe("AMD Radeon RX 7900 XTX · 24 GB VRAM");
+  });
+
+  it("renders tier alongside drift warning + mirror count (worst-case ROCm)", () => {
+    // Realistic worst case: best-effort distro with ROCm wheel drift
+    // and configured fallback mirrors. The tile must surface all
+    // three pieces clearly.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 9070 XT",
+      vram_gb: 16.0,
+      gfx_target: "gfx1201",
+      distro: "Fedora Linux 43 (Workstation Edition)",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.6.0",
+      ct2_drift_message:
+        "ctranslate2 v4.6.0 installed; pinned ROCm wheel is v4.7.2 " +
+        "(run ./setup.sh --rocm to realign)",
+      ct2_rocm_fallback_urls: ["https://lab-mirror.internal/a.zip"],
+      distro_tier: "best-effort",
+    });
+    expect(tile.sub).toContain("Fedora Linux 43");
+    expect(tile.sub).toContain("CT2 v4.7.2");
+    expect(tile.sub).toContain("+1 mirror");
+    expect(tile.sub).toContain("best-effort distro");
+    expect(tile.warning).toContain("./setup.sh --rocm");
+  });
+
+  it("preserves the GPU tile shape (label / value / sub / warning)", () => {
+    // Pin the contract: G2.3 is additive — the four-key tile shape
+    // is unchanged, only the sub-line composition gains a segment.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      distro_tier: "first-class",
+    });
+    expect(Object.keys(tile).sort()).toEqual(
+      ["label", "sub", "value", "warning"]
+    );
+  });
+
+  it("tier appears after mirror count (last sub-line segment)", () => {
+    // Order pins triage relevance: device → VRAM → gfx → distro →
+    // CT2 pin → mirrors → tier. Tier is last because it's the
+    // highest-level meta-classification; the more concrete
+    // identifiers (gfx target, distro pretty-name) come first so a
+    // copy-pasted line into a bug report front-loads the most
+    // searchable strings.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      gfx_target: "gfx1100",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_rocm_fallback_urls: ["https://m1/a.zip"],
+      distro_tier: "first-class",
+    });
+    const segments = tile.sub.split(" · ");
+    expect(segments[segments.length - 1]).toBe("first-class distro");
+  });
+});

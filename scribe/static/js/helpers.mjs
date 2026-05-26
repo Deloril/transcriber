@@ -123,6 +123,20 @@ export function formatBackendLabel(backend) {
  *     Suppressed on CUDA / MPS / CPU (the API also nulls the field
  *     there) and on ROCm with no mirrors configured (no point
  *     printing "+0 mirrors").
+ *   - **G2.3** Distro support tier (only on ROCm with a classifiable
+ *     distro; ``first-class distro`` / ``supported distro`` /
+ *     ``best-effort distro`` / ``unknown distro``). This is the AMD-
+ *     official ROCm support classification for the active distro,
+ *     read from ``gpu.distro_tier`` on the API payload (None on
+ *     non-ROCm backends, populated on ROCm via
+ *     ``scribe.rocm_distro.tier_for_system``). Surfacing the tier
+ *     next to the distro pretty-name lets a researcher pasting their
+ *     machine info into a support thread see at a glance whether
+ *     AMD officially supports their distro for ROCm — Ubuntu LTS
+ *     and RHEL 9/10 are first-class / supported; Fedora / Arch /
+ *     Debian are best-effort. Suppressed on CUDA / MPS / CPU (the
+ *     field is null there) and on ROCm where classification failed
+ *     (e.g. sandboxed FS without ``/etc/os-release``).
  *
  * The sub line collapses to ``null`` when every component is missing
  * (e.g. CPU backend on a Mac with no discrete GPU), so the renderer
@@ -165,6 +179,19 @@ export function backendStatTile(gpu) {
   const mirrors = gpu.ct2_rocm_fallback_urls;
   if (Array.isArray(mirrors) && mirrors.length > 0) {
     parts.push(`+${mirrors.length} ${mirrors.length === 1 ? "mirror" : "mirrors"}`);
+  }
+  // G2.3: surface the AMD-official ROCm distro support tier as the
+  // last sub-line segment on ROCm. ``distro_tier`` is null on every
+  // non-ROCm backend and on ROCm boxes where classification failed
+  // (sandboxed FS, missing /etc/os-release); the tile silently omits
+  // the segment in those cases. The four possible values on ROCm are
+  // ``"first-class"`` / ``"supported"`` / ``"best-effort"`` /
+  // ``"unknown"`` — rendered with a trailing " distro" so the bare
+  // tier label isn't ambiguous on its own (a sub-line ending in
+  // "first-class" alone reads strangely; "first-class distro" is
+  // what a researcher pasting into a bug report wants to copy).
+  if (gpu.distro_tier) {
+    parts.push(`${String(gpu.distro_tier)} distro`);
   }
   // G2.1 drift warning. Falsy ``ct2_drift_message`` (null / undefined /
   // empty string) means no drift — the tile renders without a warning

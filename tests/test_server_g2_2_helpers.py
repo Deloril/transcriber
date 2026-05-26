@@ -271,6 +271,8 @@ class TestG2_2ApiCapabilitiesCarriesFallbackUrls:
             "ct2_installed",
             "ct2_drift_message",
             "ct2_rocm_fallback_urls",
+            "distro_tier",
+            "distro_tier_explanation",
         }
 
     def test_capabilities_swallows_helper_exception(

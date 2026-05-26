@@ -937,10 +937,25 @@ async def capabilities() -> JSONResponse:
     tile appends "+N mirror(s)" to the sub-line so a researcher who
     set the env var for an air-gapped install can verify the value
     survived without dropping to a terminal.
+
+    G2.3: ``gpu.distro_tier`` (one of ``"first-class"`` / ``"supported"`` /
+    ``"best-effort"`` / ``"unknown"``) and ``gpu.distro_tier_explanation``
+    (one-line human-readable rationale) carry the AMD-official ROCm
+    support classification for the active distro. Both are ``None`` on
+    every non-ROCm backend — a CUDA / MPS / CPU user doesn't care which
+    Radeon-supporting distro they're on (and the ``unsupported`` tier
+    that ``rocm_distro`` returns for non-Linux is meaningless to them
+    anyway). The CLI surface (``python -m scribe.devices``) prints the
+    same classification under the ``Distro support:`` header on ROCm
+    only; the home page Backend tile appends ``"<tier> distro"`` to
+    the sub-line so a researcher pasting their machine info into a
+    support thread can see at a glance whether AMD officially supports
+    their distro for ROCm.
     """
     from .parakeet import nemo_available
     from .engine import gpu_backend, _gpu_device_name, _cuda_vram_gb, gpu_arch_name
-    from .devices import _linux_distro
+    from .devices import _linux_distro, _rocm_distro_tier
+    from .rocm_distro import tier_explanation
     from .rocm_install import (
         ct2_drift_message,
         installed_ct2_version,
@@ -981,6 +996,15 @@ async def capabilities() -> JSONResponse:
     # configured; populated list when the user has set
     # ``SCRIBE_CT2_ROCM_FALLBACK_URLS``.
     ct2_rocm_fallback_urls: list[str] | None = None
+    # G2.3: ROCm-only distro support classification. The tier label is
+    # one of "first-class" / "supported" / "best-effort" / "unknown"
+    # on Linux+ROCm; the rocm_distro module only returns "unsupported"
+    # on non-Linux, which can't reach this branch (we gate on backend
+    # == "rocm" first, and ROCm wheels are Linux-only). Both fields
+    # collapse to None on every non-ROCm backend — a CUDA / MPS / CPU
+    # user doesn't care about AMD's distro matrix.
+    distro_tier: str | None = None
+    distro_tier_explanation_text: str | None = None
     if backend == "rocm":
         try:
             ct2_rocm_pin = pinned_ct2_rocm_version()
@@ -1000,6 +1024,17 @@ async def capabilities() -> JSONResponse:
             ct2_rocm_fallback_urls = list(rocm_wheel_fallback_urls())
         except Exception:  # noqa: BLE001
             ct2_rocm_fallback_urls = []
+        # G2.3: classify the active distro against AMD's official ROCm
+        # support matrix. Defensive — a missing /etc/os-release or a
+        # sandboxed FS shouldn't 500 the route; fall to None so the JS
+        # tile silently omits the segment instead.
+        try:
+            tier_label, _pretty = _rocm_distro_tier()
+            distro_tier = tier_label
+            distro_tier_explanation_text = tier_explanation(tier_label)
+        except Exception:  # noqa: BLE001
+            distro_tier = None
+            distro_tier_explanation_text = None
     return JSONResponse({
         "parakeet": {
             "available": parakeet_runtime_ok,
@@ -1017,6 +1052,8 @@ async def capabilities() -> JSONResponse:
             "ct2_installed": ct2_installed,
             "ct2_drift_message": ct2_drift,
             "ct2_rocm_fallback_urls": ct2_rocm_fallback_urls,
+            "distro_tier": distro_tier,
+            "distro_tier_explanation": distro_tier_explanation_text,
         },
     })
 

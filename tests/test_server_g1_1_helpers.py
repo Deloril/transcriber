@@ -192,13 +192,15 @@ class TestG1_1ApiCapabilitiesUsesHelperChain:
 
         body = client.get("/api/capabilities").json()
         gpu = body["gpu"]
-        # G1.4 fields + G1.3 fields + G2.1 fields. New fields are
-        # nullable; the tile helper tolerates missing-or-null values
-        # so the contract remains backwards compatible.
+        # G1.4 fields + G1.3 fields + G2.1 fields + G2.3 fields. New
+        # fields are nullable; the tile helper tolerates
+        # missing-or-null values so the contract remains backwards
+        # compatible.
         assert set(gpu.keys()) == {
             "backend", "device_name", "vram_gb", "gfx_target", "distro",
             "ct2_rocm_pin", "ct2_installed", "ct2_drift_message",
             "ct2_rocm_fallback_urls",
+            "distro_tier", "distro_tier_explanation",
         }
         assert gpu["backend"] == "rocm"
         assert gpu["device_name"] == "Radeon RX 7900 XTX"
