@@ -280,11 +280,73 @@
       diff. Use the <a href="#aiSecondCoderCard">Second-coder pass</a>
       card below to start a pass and review per-code agreement.
     </li>
-    <li>
-      <strong>Memo drafting</strong> (<code>F8.8</code>) — "✨ Draft with AI"
-      action on a memo (lands with the memos page graduations).
+    <li data-test-feature="F8.8" data-test-id="ai-surface-f8-8">
+      <strong>Memo drafting</strong> (<code>F8.8</code>) — open the
+      <a href="/projects/{{ project_id }}/codebook">codebook editor</a>,
+      pick a code, and click "✨ Draft memo with AI" to seed a first-draft
+      analytic memo from the code's exemplars and applications. The draft
+      lands as a pending record under
+      <code>/api/projects/&lt;pid&gt;/memo-drafts</code>; saving promotes
+      it into a Memo with provenance <code>source=ai_drafted</code>;
+      rejecting still records the invocation per F9.6. The
+      <a href="#aiMemoDraftsCard">Memo drafts</a> card below lists every
+      draft across the project.
     </li>
   </ul>
+</div>
+
+{# F8.8 — memo-drafts overview card.
+
+   The action that *creates* a draft lives on the codebook editor (a
+   draft is bound to a code, so that's the right discovery point).
+   This card on the project AI page is the cross-project audit-trail
+   view: every draft ever generated, with its decision badge, so the
+   researcher can scan "what has the AI seeded for me lately?"
+
+   Reads:
+     GET /api/projects/<pid>/memo-drafts — list drafts (filterable)
+
+   Writes (from this card):
+     POST /api/projects/<pid>/memo-drafts/<did>/reject — quick reject
+                                                         action on
+                                                         pending drafts
+                                                         from the list.
+#}
+<div id="aiMemoDraftsCard" class="card ai-card"
+     data-test-feature="F8.8"
+     data-test-id="ai-memo-drafts-card">
+  <h2>Memo drafts <span class="ai-pill">F8.8</span></h2>
+  <p class="ai-help">
+    Every memo draft generated from the codebook editor lands here as
+    a pending record. Saved drafts become <code>Memo</code>s with
+    provenance <code>source=ai_drafted</code>; rejected drafts stay
+    on disk as F9.6 audit evidence.
+  </p>
+
+  <div class="ai-section" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <label for="ai-md-filter-decision" class="ai-field-label" style="margin:0">
+      Filter by decision
+    </label>
+    <select id="ai-md-filter-decision" class="ai-field-input"
+            data-test-id="ai-memo-drafts-filter-decision"
+            style="max-width:180px">
+      <option value="">All</option>
+      <option value="pending">pending</option>
+      <option value="accepted">accepted</option>
+      <option value="modified">modified</option>
+      <option value="rejected">rejected</option>
+    </select>
+    <span id="ai-md-count" class="hint" data-test-id="ai-memo-drafts-count"></span>
+  </div>
+
+  <div id="ai-md-list"
+       class="ai-section"
+       data-test-id="ai-memo-drafts-list"
+       style="margin-top:8px"></div>
+
+  <div id="ai-md-error" class="ai-section" hidden
+       style="color:var(--err);font-size:13px"
+       data-test-id="ai-memo-drafts-error"></div>
 </div>
 
 {# F8.7 — AI second-coder card.
@@ -985,5 +1047,123 @@ document.getElementById("aiSecondCoderForm").addEventListener("submit", async (e
 loadSecondCoderLockState();
 loadSecondCoderPickers();
 loadSecondCoderPasses();
+
+// --- F8.8 memo-drafts list card ---------------------------------- //
+
+function _mdDecisionBadge(decision) {
+  const palette = {
+    pending: "var(--muted)",
+    accepted: "var(--ok)",
+    modified: "var(--accent)",
+    rejected: "var(--err)",
+  };
+  const colour = palette[decision] || "var(--muted)";
+  return `<span class="ai-pill" style="background:transparent;border:1px solid ${colour};color:${colour}">${escapeHtml(decision)}</span>`;
+}
+
+function _mdRenderRow(d) {
+  const title = (d.title || "(no title)").trim();
+  const when = (d.created_at || "").slice(0, 19).replace("T", " ");
+  const seedCount = (d.seed_snippets || []).length;
+  const memoLink = d.accepted_memo_id
+    ? `<a href="/projects/${PROJECT_ID}/memos">memo ${escapeHtml(d.accepted_memo_id.slice(0, 8))}</a>`
+    : "";
+  const codeLink = `<a href="/projects/${PROJECT_ID}/codebook">code ${escapeHtml((d.code_id || "").slice(0, 8))}</a>`;
+  const rejectBtn = (d.decision === "pending")
+    ? `<button type="button" class="btn secondary"
+                data-action="reject"
+                data-draft-id="${escapeHtml(d.id)}"
+                data-test-id="ai-memo-drafts-reject">🗑 Reject</button>`
+    : "";
+  return `
+    <div class="ai-model-row"
+         data-test-id="ai-memo-drafts-row"
+         data-draft-id="${escapeHtml(d.id)}">
+      <div style="flex:1;min-width:0">
+        <div>${_mdDecisionBadge(d.decision || "pending")}
+             <code>${escapeHtml(d.id)}</code></div>
+        <div class="meta">
+          ${escapeHtml(title)}
+        </div>
+        <div class="meta">
+          ${codeLink} · ${escapeHtml(d.memo_type || "")} ·
+          ${seedCount} seed${seedCount === 1 ? "" : "s"} ·
+          ${escapeHtml(when)}
+          ${memoLink ? " · " + memoLink : ""}
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${rejectBtn}</div>
+    </div>`;
+}
+
+async function loadMemoDrafts() {
+  const decision = document.getElementById("ai-md-filter-decision").value;
+  const errBox = document.getElementById("ai-md-error");
+  const list = document.getElementById("ai-md-list");
+  const count = document.getElementById("ai-md-count");
+  errBox.hidden = true;
+  list.innerHTML = `<div class="hint">Loading…</div>`;
+  try {
+    const url = decision
+      ? `/api/projects/${PROJECT_ID}/memo-drafts?decision=${encodeURIComponent(decision)}`
+      : `/api/projects/${PROJECT_ID}/memo-drafts`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const drafts = (await r.json()).drafts || [];
+    count.textContent = `${drafts.length} draft${drafts.length === 1 ? "" : "s"}`;
+    if (!drafts.length) {
+      list.innerHTML = `
+        <div class="hint" data-test-id="ai-memo-drafts-empty">
+          No drafts yet. Open the codebook editor and click
+          <strong>✨ Draft memo with AI</strong> on a code.
+        </div>`;
+      return;
+    }
+    // Reverse-chronological so the newest is at the top.
+    list.innerHTML = drafts.slice().reverse().map(_mdRenderRow).join("");
+  } catch (e) {
+    errBox.textContent = `Couldn't load memo drafts: ${e.message}`;
+    errBox.hidden = false;
+    list.innerHTML = "";
+  }
+}
+
+document.getElementById("ai-md-filter-decision")
+  .addEventListener("change", () => { loadMemoDrafts(); });
+
+document.getElementById("ai-md-list").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("[data-action=reject]");
+  if (!btn) return;
+  const did = btn.dataset.draftId;
+  if (!did) return;
+  const reason = prompt(
+    "Optional reason for rejecting this draft (kept in the F9.6 audit trail):",
+    ""
+  );
+  if (reason === null) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/memo-drafts/${did}/reject`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({rejection_reason: (reason || "").trim()}),
+      }
+    );
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.detail || `HTTP ${r.status}`);
+    }
+    loadMemoDrafts();
+  } catch (e) {
+    const errBox = document.getElementById("ai-md-error");
+    errBox.textContent = `Couldn't reject: ${e.message}`;
+    errBox.hidden = false;
+    btn.disabled = false;
+  }
+});
+
+loadMemoDrafts();
 </script>
 {% endblock %}

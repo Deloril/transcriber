@@ -341,6 +341,75 @@
   .cb-export-sep {
     height: 1px; background: var(--border); margin: 4px 0;
   }
+
+  /* F8.8: memo-draft modal */
+  .cb-draft-memo-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, .55);
+    z-index: 200;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 5vh 16px 16px;
+    overflow-y: auto;
+  }
+  .cb-draft-memo-modal[hidden] { display: none; }
+  .cb-draft-memo-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 22px;
+    width: 100%;
+    max-width: 720px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, .35);
+  }
+  .cb-draft-memo-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; margin-bottom: 4px;
+  }
+  .cb-draft-memo-close {
+    background: transparent; color: var(--muted);
+    border: 0; cursor: pointer;
+    padding: 4px 8px; border-radius: 4px;
+    font-size: 16px;
+  }
+  .cb-draft-memo-close:hover { color: var(--text); background: var(--panel-2); }
+  .cb-draft-memo-config { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .cb-draft-memo-rationale {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: var(--muted);
+    min-height: 28px;
+    white-space: pre-wrap;
+  }
+  .cb-draft-memo-history {
+    border-top: 1px dashed var(--border);
+    padding-top: 12px;
+    font-size: 12px;
+  }
+  .cb-draft-memo-history .cb-draft-memo-history-row {
+    padding: 6px 0; border-bottom: 1px solid var(--border);
+  }
+  .cb-draft-memo-history .cb-draft-memo-history-row:last-child { border-bottom: 0; }
+  .cb-draft-memo-history .decision-badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    margin-right: 6px;
+  }
+  .cb-draft-memo-history .decision-badge.pending  { color: var(--muted); }
+  .cb-draft-memo-history .decision-badge.accepted { color: var(--ok); border-color: var(--ok); }
+  .cb-draft-memo-history .decision-badge.modified { color: var(--accent); border-color: var(--accent); }
+  .cb-draft-memo-history .decision-badge.rejected { color: var(--err); border-color: var(--err); }
 {% endblock %}
 
 {% block body %}
@@ -470,12 +539,168 @@
         </div>
       </details>
 
-      <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+      <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <button class="btn" type="submit" id="cb-submit">Add code</button>
         <button class="btn secondary" type="button" id="cb-history-btn" style="display:none">📜 Revision history</button>
+        {#
+          F8.8 — "Draft memo with AI" lives in the codebook editor (not
+          the memos page) because the action is anchored to a *code*,
+          not a memo. The button only shows when an existing code is
+          selected — drafting against a code that doesn't yet exist
+          would have nothing to seed from. The full UI flow lives in
+          the modal below; the button just opens it.
+        #}
+        <button
+          class="btn secondary"
+          type="button"
+          id="cb-draft-memo-btn"
+          data-test-feature="F8.8"
+          data-test-id="cb-draft-memo-btn"
+          style="display:none"
+          title="Generate a first-draft analytic memo for this code with AI (F8.8)"
+        >✨ Draft memo with AI</button>
         <span id="cb-msg" class="hint" role="alert" aria-live="polite"></span>
       </div>
     </form>
+
+    {#
+      F8.8 — memo-draft modal. Hidden by default. The "Draft memo with AI"
+      button opens it; the modal POSTs to
+      /api/projects/<pid>/codes/<cid>/draft-memo and renders the LLM's
+      title / body / rationale with three actions:
+        - Save as memo  → POST /accept (decision auto-derived: modified
+                          if the human edited title/body, else accepted).
+        - Reject        → POST /reject with optional reason.
+        - Cancel        → close without persisting a decision (the
+                          pending draft stays on disk so the audit
+                          trail captures the invocation).
+      The flow mirrors F8.4's accept-or-reject lifecycle. UI text nudges
+      the researcher to *rewrite* the draft, not accept it as-is —
+      Charmaz memos are the researcher's analytic voice, the AI is
+      seeding it.
+    #}
+    <div
+      id="cb-draft-memo-modal"
+      class="cb-draft-memo-modal"
+      data-test-feature="F8.8"
+      data-test-id="cb-draft-memo-modal"
+      hidden
+    >
+      <div class="cb-draft-memo-card">
+        <div class="cb-draft-memo-head">
+          <h3 style="margin:0">✨ Draft memo with AI</h3>
+          <button
+            type="button"
+            class="cb-draft-memo-close"
+            id="cb-draft-memo-close-btn"
+            aria-label="Close"
+            data-test-id="cb-draft-memo-close"
+          >✕</button>
+        </div>
+        <p class="hint" style="margin:6px 0 10px">
+          The LLM seeds a first-draft analytic memo from this code's
+          exemplars and (when transcripts are present) the actual
+          quoted text of its applications. The draft is a starting
+          point for you to rewrite — not a finished artefact. Every
+          invocation, including rejections, is recorded for the F9.6
+          audit trail.
+        </p>
+
+        <div class="cb-draft-memo-config" id="cb-draft-memo-config">
+          <div class="row-2">
+            <div>
+              <label for="cb-draft-memo-type">Memo type</label>
+              <select id="cb-draft-memo-type" data-test-id="cb-draft-memo-type">
+                <option value="theoretical" selected>theoretical</option>
+                <option value="code">code</option>
+                <option value="reflexive">reflexive</option>
+                <option value="methodological">methodological</option>
+                <option value="free">free</option>
+              </select>
+            </div>
+            <div>
+              <label for="cb-draft-memo-max">Max seed snippets</label>
+              <input
+                id="cb-draft-memo-max"
+                type="number"
+                min="1" max="64" value="12"
+                data-test-id="cb-draft-memo-max"
+              >
+            </div>
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;margin-top:6px;text-transform:none;letter-spacing:0">
+            <input type="checkbox" id="cb-draft-memo-incl-apps" checked
+                   data-test-id="cb-draft-memo-incl-apps">
+            <span style="font-size:12px;color:var(--muted)">
+              Include the quoted text of existing applications as seed material
+            </span>
+          </label>
+          <div style="margin-top:10px">
+            <button
+              type="button"
+              class="btn"
+              id="cb-draft-memo-start-btn"
+              data-test-id="cb-draft-memo-start"
+            >✨ Generate draft</button>
+            <span id="cb-draft-memo-msg" class="hint" role="alert" aria-live="polite"></span>
+          </div>
+        </div>
+
+        <div
+          class="cb-draft-memo-result"
+          id="cb-draft-memo-result"
+          data-test-id="cb-draft-memo-result"
+          hidden
+          style="margin-top:14px"
+        >
+          <label for="cb-draft-memo-title">Title</label>
+          <input
+            id="cb-draft-memo-title"
+            type="text"
+            maxlength="200"
+            data-test-id="cb-draft-memo-result-title"
+          >
+          <label for="cb-draft-memo-body">Body</label>
+          <textarea
+            id="cb-draft-memo-body"
+            rows="14"
+            maxlength="65536"
+            data-test-id="cb-draft-memo-result-body"
+            style="font-family:var(--mono);font-size:12px"
+          ></textarea>
+          <label>Rationale (read-only)</label>
+          <div
+            id="cb-draft-memo-rationale"
+            class="cb-draft-memo-rationale"
+            data-test-id="cb-draft-memo-result-rationale"
+          ></div>
+          <div class="hint" style="margin-top:8px">
+            Seed snippets used:
+            <span id="cb-draft-memo-seed-count" data-test-id="cb-draft-memo-seed-count">—</span>
+          </div>
+          <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+            <button
+              type="button"
+              class="btn"
+              id="cb-draft-memo-save-btn"
+              data-test-id="cb-draft-memo-save"
+            >💾 Save as memo</button>
+            <button
+              type="button"
+              class="btn secondary"
+              id="cb-draft-memo-reject-btn"
+              data-test-id="cb-draft-memo-reject"
+            >🗑 Reject</button>
+            <span id="cb-draft-memo-result-msg" class="hint"
+                  data-test-id="cb-draft-memo-result-msg" role="alert" aria-live="polite"></span>
+          </div>
+        </div>
+
+        {# Past drafts for this code — quick access to the audit trail. #}
+        <div class="cb-draft-memo-history" id="cb-draft-memo-history"
+             data-test-id="cb-draft-memo-history" style="margin-top:14px"></div>
+      </div>
+    </div>
 
     <!--
       F2.2 revision history panel. Toggled by the "Revision history"
@@ -695,6 +920,7 @@ function setMode(code) {
   const colourInput = document.getElementById("cb-colour");
   const changeNote = document.getElementById("cb-change-note");
   const historyBtn = document.getElementById("cb-history-btn");
+  const draftMemoBtn = document.getElementById("cb-draft-memo-btn");
   const historyPanel = document.getElementById("cb-history-panel");
   // Always collapse the history panel when switching contexts; it's
   // only meaningful for the currently-edited code.
@@ -703,6 +929,7 @@ function setMode(code) {
   if (code) {
     editingCodeId = code.id;
     historyBtn.style.display = "";
+    if (draftMemoBtn) draftMemoBtn.style.display = "";
     title.textContent = `Edit "${code.name}"`;
     submit.textContent = "Save changes";
     cancel.style.display = "";
@@ -733,6 +960,7 @@ function setMode(code) {
   } else {
     editingCodeId = null;
     historyBtn.style.display = "none";
+    if (draftMemoBtn) draftMemoBtn.style.display = "none";
     title.textContent = "New code";
     submit.textContent = "Add code";
     cancel.style.display = "none";
@@ -1364,5 +1592,232 @@ refreshCodes().catch(err => {
 });
 
 loadLockState();
+
+// --------------------------------------------------------------------- //
+// F8.8 — memo-draft modal
+//
+// Opens when the user clicks "✨ Draft memo with AI" while editing a
+// code. Posts to /api/projects/<pid>/codes/<cid>/draft-memo, renders
+// the LLM's title / body / rationale, and offers Save / Reject.
+// --------------------------------------------------------------------- //
+
+const cbDraftMemoModal = document.getElementById("cb-draft-memo-modal");
+const cbDraftMemoBtn = document.getElementById("cb-draft-memo-btn");
+const cbDraftMemoStartBtn = document.getElementById("cb-draft-memo-start-btn");
+const cbDraftMemoSaveBtn = document.getElementById("cb-draft-memo-save-btn");
+const cbDraftMemoRejectBtn = document.getElementById("cb-draft-memo-reject-btn");
+const cbDraftMemoCloseBtn = document.getElementById("cb-draft-memo-close-btn");
+
+let currentDraft = null;     // the persisted draft from /draft-memo
+let draftOriginalTitle = ""; // captured to detect "modified" decisions
+let draftOriginalBody = "";
+
+function setDraftMemoMsg(text, kind) {
+  const el = document.getElementById("cb-draft-memo-msg");
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = kind === "err" ? "var(--err)"
+    : kind === "ok" ? "var(--ok)"
+    : "var(--muted)";
+}
+
+function setDraftMemoResultMsg(text, kind) {
+  const el = document.getElementById("cb-draft-memo-result-msg");
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = kind === "err" ? "var(--err)"
+    : kind === "ok" ? "var(--ok)"
+    : "var(--muted)";
+}
+
+function openDraftMemoModal() {
+  if (!editingCodeId) {
+    alert("Select a code first.");
+    return;
+  }
+  cbDraftMemoModal.hidden = false;
+  // Reset the result panel between opens.
+  document.getElementById("cb-draft-memo-result").hidden = true;
+  document.getElementById("cb-draft-memo-config").hidden = false;
+  setDraftMemoMsg("", "");
+  setDraftMemoResultMsg("", "");
+  currentDraft = null;
+  loadDraftMemoHistory();
+}
+
+function closeDraftMemoModal() {
+  cbDraftMemoModal.hidden = true;
+}
+
+async function loadDraftMemoHistory() {
+  const box = document.getElementById("cb-draft-memo-history");
+  if (!editingCodeId) {
+    box.innerHTML = "";
+    return;
+  }
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/memo-drafts?code_id=${encodeURIComponent(editingCodeId)}`
+    );
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const drafts = (await r.json()).drafts || [];
+    if (!drafts.length) {
+      box.innerHTML = `<div class="hint">No drafts yet for this code.</div>`;
+      return;
+    }
+    // Reverse-chronological for the audit-trail view.
+    const sorted = drafts.slice().reverse();
+    const rows = sorted.map(d => {
+      const cls = String(d.decision || "pending");
+      const title = (d.title || "(no title)").trim();
+      const when = (d.created_at || "").slice(0, 19).replace("T", " ");
+      return `
+        <div class="cb-draft-memo-history-row">
+          <span class="decision-badge ${escapeHtml(cls)}">${escapeHtml(cls)}</span>
+          <code>${escapeHtml(d.id)}</code>
+          <span class="hint" style="margin-left:6px">${escapeHtml(when)}</span>
+          <div style="margin-top:2px">${escapeHtml(title)}</div>
+        </div>`;
+    }).join("");
+    box.innerHTML = `<strong style="font-size:12px">Past drafts (${drafts.length})</strong>${rows}`;
+  } catch (e) {
+    box.innerHTML = `<div class="hint" style="color:var(--err)">Couldn't load history: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function startDraftMemo() {
+  if (!editingCodeId) {
+    setDraftMemoMsg("Select a code first.", "err");
+    return;
+  }
+  const memoType = document.getElementById("cb-draft-memo-type").value;
+  const maxSeed = parseInt(document.getElementById("cb-draft-memo-max").value, 10) || 12;
+  const includeApps = document.getElementById("cb-draft-memo-incl-apps").checked;
+
+  setDraftMemoMsg("Drafting…", "");
+  cbDraftMemoStartBtn.disabled = true;
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/codes/${editingCodeId}/draft-memo`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          memo_type: memoType,
+          include_applications: includeApps,
+          max_seed_snippets: maxSeed,
+        }),
+      }
+    );
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const detail = data.detail;
+      if (r.status === 412 && detail && typeof detail === "object" && detail.gate) {
+        setDraftMemoMsg("AI gate not satisfied: " + (detail.gate.message || ""), "err");
+        return;
+      }
+      throw new Error(typeof detail === "string" ? detail : `HTTP ${r.status}`);
+    }
+    currentDraft = data.draft;
+    draftOriginalTitle = currentDraft.title || "";
+    draftOriginalBody = currentDraft.body || "";
+    document.getElementById("cb-draft-memo-title").value = draftOriginalTitle;
+    document.getElementById("cb-draft-memo-body").value = draftOriginalBody;
+    const rationaleEl = document.getElementById("cb-draft-memo-rationale");
+    rationaleEl.textContent = currentDraft.rationale || "(no rationale)";
+    const seedCount = (currentDraft.seed_snippets || []).length;
+    document.getElementById("cb-draft-memo-seed-count").textContent = String(seedCount);
+    document.getElementById("cb-draft-memo-result").hidden = false;
+    setDraftMemoMsg("", "");
+    setDraftMemoResultMsg(
+      "Draft generated. Edit before saving — or reject if it's not useful.",
+      ""
+    );
+    loadDraftMemoHistory();
+  } catch (e) {
+    setDraftMemoMsg(`Couldn't draft: ${e.message}`, "err");
+  } finally {
+    cbDraftMemoStartBtn.disabled = false;
+  }
+}
+
+async function saveDraftMemo() {
+  if (!currentDraft) return;
+  const title = document.getElementById("cb-draft-memo-title").value;
+  const body = document.getElementById("cb-draft-memo-body").value;
+  const modified =
+    title !== draftOriginalTitle || body !== draftOriginalBody;
+  setDraftMemoResultMsg("Saving…", "");
+  cbDraftMemoSaveBtn.disabled = true;
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/memo-drafts/${currentDraft.id}/accept`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({title, body, modified}),
+      }
+    );
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(data.detail || `HTTP ${r.status}`);
+    }
+    setDraftMemoResultMsg("Saved as memo. Visit the memos page to see it.", "ok");
+    cbDraftMemoSaveBtn.disabled = true;
+    cbDraftMemoRejectBtn.disabled = true;
+    loadDraftMemoHistory();
+  } catch (e) {
+    setDraftMemoResultMsg(`Couldn't save: ${e.message}`, "err");
+    cbDraftMemoSaveBtn.disabled = false;
+  }
+}
+
+async function rejectDraftMemo() {
+  if (!currentDraft) return;
+  const reason = prompt(
+    "Optional reason for rejecting this draft (kept in the F9.6 audit trail):",
+    ""
+  );
+  if (reason === null) return; // user hit cancel
+  setDraftMemoResultMsg("Recording rejection…", "");
+  cbDraftMemoRejectBtn.disabled = true;
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/memo-drafts/${currentDraft.id}/reject`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({rejection_reason: (reason || "").trim()}),
+      }
+    );
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      throw new Error(data.detail || `HTTP ${r.status}`);
+    }
+    setDraftMemoResultMsg("Rejection recorded.", "ok");
+    cbDraftMemoSaveBtn.disabled = true;
+    loadDraftMemoHistory();
+  } catch (e) {
+    setDraftMemoResultMsg(`Couldn't reject: ${e.message}`, "err");
+    cbDraftMemoRejectBtn.disabled = false;
+  }
+}
+
+if (cbDraftMemoBtn) cbDraftMemoBtn.addEventListener("click", openDraftMemoModal);
+if (cbDraftMemoCloseBtn) cbDraftMemoCloseBtn.addEventListener("click", closeDraftMemoModal);
+if (cbDraftMemoStartBtn) cbDraftMemoStartBtn.addEventListener("click", startDraftMemo);
+if (cbDraftMemoSaveBtn) cbDraftMemoSaveBtn.addEventListener("click", saveDraftMemo);
+if (cbDraftMemoRejectBtn) cbDraftMemoRejectBtn.addEventListener("click", rejectDraftMemo);
+// Click outside the card to close.
+if (cbDraftMemoModal) {
+  cbDraftMemoModal.addEventListener("click", (e) => {
+    if (e.target === cbDraftMemoModal) closeDraftMemoModal();
+  });
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !cbDraftMemoModal.hidden) {
+    closeDraftMemoModal();
+  }
+});
 </script>
 {% endblock %}

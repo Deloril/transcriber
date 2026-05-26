@@ -8619,6 +8619,378 @@ async def get_second_coder_pass_diff_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# F8.8 — AI memo-draft action on a code (HTTP surface)
+#
+# The engine module ``scribe.memo_drafts`` shipped in d860e180 with the
+# full SeedSnippet / MemoDraft data model, draft_memo_for_code
+# orchestration, decision lifecycle (pending → accepted | modified |
+# rejected), and promote_memo_draft_to_memo helper. It explicitly
+# deferred the FastAPI surface and UI. Until this commit the only path
+# from a researcher to "draft a memo for this code with AI" was direct
+# Python — i.e. unreachable.
+#
+# Endpoints:
+#
+#   POST /api/projects/<pid>/codes/<cid>/draft-memo
+#         Generate a fresh memo draft for the given code. Body keys
+#         (all optional except none — the engine takes care of the
+#         seed material from the code's own exemplars + applications):
+#           {
+#             "memo_type":             "theoretical" (default) | other,
+#             "include_applications":  bool (default True),
+#             "include_existing_memo": bool (default True),
+#             "max_seed_snippets":     int (1..64, default 12)
+#           }
+#         Refuses with 412 + structured gate body when F8.10 blocks.
+#
+#   GET  /api/projects/<pid>/memo-drafts
+#         List drafts. Optional ``code_id`` and ``decision`` filters.
+#
+#   GET  /api/projects/<pid>/memo-drafts/<did>
+#         Single-draft fetch.
+#
+#   POST /api/projects/<pid>/memo-drafts/<did>/accept
+#         Promote a pending draft into a saved Memo (F5.1). Body keys:
+#           {
+#             "title":      override draft.title (optional),
+#             "body":       override draft.body  (optional),
+#             "modified":   bool (auto-set true if title/body changed),
+#             "extra_links":      [{target_type, target_id, role?}, ...],
+#             "extra_provenance": {key: value, ...} (string→string)
+#           }
+#         Returns ``{draft, memo}``. The Memo gets
+#         provenance.source=ai_drafted + provenance.draft_id=<did> +
+#         a "drafted_for" back-link to the source code. Reserved keys
+#         (source / draft_id) cannot be overridden.
+#
+#   POST /api/projects/<pid>/memo-drafts/<did>/reject
+#         Record rejection with optional reason / notes. Pending →
+#         rejected; double-decisions refused (409).
+#
+# Decisions are recorded as F9.6 audit events via
+# ``record_decision_event_for_memo_draft``. Rejected drafts stay on
+# disk — rejection is evidence too.
+# --------------------------------------------------------------------------- #
+
+from . import memo_drafts as _memo_drafts  # noqa: E402
+
+
+@app.post("/api/projects/{project_id}/codes/{code_id}/draft-memo")
+async def post_memo_draft_endpoint(
+    project_id: str, code_id: str, request: Request,
+) -> JSONResponse:
+    """F8.8 — generate an LLM-drafted memo seeded by the code's exemplars."""
+    _check_project_id(project_id)
+    _check_code_id(code_id)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body and not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    body = body or {}
+
+    memo_type = str(body.get("memo_type") or _memo_drafts.DEFAULT_MEMO_TYPE)
+    if memo_type not in _memos.MEMO_TYPES:
+        raise HTTPException(
+            400, f"memo_type must be one of {list(_memos.MEMO_TYPES)}",
+        )
+    include_apps_raw = body.get("include_applications", True)
+    include_apps = bool(include_apps_raw)
+    include_existing_raw = body.get("include_existing_memo", True)
+    include_existing = bool(include_existing_raw)
+    raw_max = body.get(
+        "max_seed_snippets", _memo_drafts.DEFAULT_MAX_SEED_SNIPPETS,
+    )
+    try:
+        max_seed = int(raw_max)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "max_seed_snippets must be an integer")
+    if max_seed < 1 or max_seed > _memo_drafts.MAX_SEED_SNIPPETS_PERSISTED:
+        raise HTTPException(
+            400,
+            "max_seed_snippets must be in "
+            f"[1, {_memo_drafts.MAX_SEED_SNIPPETS_PERSISTED}]",
+        )
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            code = _codes.load_code(_projects_root(), project_id, code_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Code not found")
+
+        # F8.10 gate.
+        try:
+            gate = _ai_gate.evaluate_project_ai_gate(
+                _projects_root(), project_id,
+                feature=_ai_provenance.AI_FEATURE_MEMO_DRAFT,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        if not gate.allowed:
+            raise HTTPException(412, {
+                "detail": "AI gate not satisfied",
+                "gate": gate.to_dict(),
+            })
+
+        # Backend.
+        try:
+            cfg, backend = _resolve_suggestion_backend(project)
+            _embed_fn, generate_fn, _emb_model, _gen_model = (
+                _make_embed_and_generate_fns(cfg, backend)
+            )
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+
+        # Resolve segments-by-source so the engine can pull anchored
+        # text from existing applications of this code (engine handles
+        # missing transcripts gracefully).
+        applications = _applications.list_applications(
+            _projects_root(), project_id,
+        )
+        sources = _sources.list_sources(_projects_root(), project_id)
+        segments_by_source = _gather_segments_by_source(sources)
+
+        try:
+            draft = _memo_drafts.draft_memo_for_code(
+                project_id=project_id,
+                code=code,
+                generate_fn=generate_fn,
+                applications=applications,
+                segments_by_source=segments_by_source,
+                memo_type=memo_type,
+                include_applications=include_apps,
+                include_existing_memo=include_existing,
+                max_seed_snippets=max_seed,
+                generation_model=cfg.default_model,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except _ai_backend.BackendUnavailable as e:
+            raise HTTPException(502, f"Backend unavailable: {e}")
+        except _ai_backend.BackendError as e:
+            raise HTTPException(500, str(e))
+
+        try:
+            _memo_drafts.save_memo_draft(_projects_root(), draft)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+    return JSONResponse({"draft": draft.to_dict()}, status_code=201)
+
+
+@app.get("/api/projects/{project_id}/memo-drafts")
+async def list_memo_drafts_endpoint(
+    project_id: str, code_id: str = "", decision: str = "",
+) -> JSONResponse:
+    """F8.8 — list memo drafts in a project, optionally filtered."""
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            drafts = _memo_drafts.list_memo_drafts(
+                _projects_root(), project_id,
+                code_id=code_id or None,
+                decision=decision or None,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({"drafts": [d.to_dict() for d in drafts]})
+
+
+@app.get("/api/projects/{project_id}/memo-drafts/{draft_id}")
+async def get_memo_draft_endpoint(
+    project_id: str, draft_id: str,
+) -> JSONResponse:
+    """F8.8 — fetch a single memo draft by id."""
+    _check_project_id(project_id)
+    if not _memo_drafts.MEMO_DRAFT_ID_RE.match(draft_id):
+        raise HTTPException(400, "Invalid memo draft id")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            draft = _memo_drafts.load_memo_draft(
+                _projects_root(), project_id, draft_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Memo draft not found")
+    return JSONResponse({"draft": draft.to_dict()})
+
+
+@app.post("/api/projects/{project_id}/memo-drafts/{draft_id}/accept")
+async def accept_memo_draft_endpoint(
+    project_id: str, draft_id: str, request: Request,
+) -> JSONResponse:
+    """F8.8 — promote a pending memo draft into a real :class:`Memo`."""
+    _check_project_id(project_id)
+    if not _memo_drafts.MEMO_DRAFT_ID_RE.match(draft_id):
+        raise HTTPException(400, "Invalid memo draft id")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body and not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    body = body or {}
+
+    title_in = body.get("title")
+    body_in = body.get("body")
+    modified_flag = bool(body.get("modified"))
+    extra_links = body.get("extra_links")
+    extra_prov = body.get("extra_provenance")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            draft = _memo_drafts.load_memo_draft(
+                _projects_root(), project_id, draft_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Memo draft not found")
+        if draft.decision != _memo_drafts.MEMO_DRAFT_DECISION_PENDING:
+            raise HTTPException(
+                409, f"Memo draft already {draft.decision}",
+            )
+
+        # Auto-detect modification: if the user changed title/body
+        # before submitting, record decision=modified per F9.6.
+        deviated = False
+        if title_in is not None and str(title_in) != (draft.title or ""):
+            deviated = True
+        if body_in is not None and str(body_in) != (draft.body or ""):
+            deviated = True
+        if modified_flag or deviated:
+            decision = _memo_drafts.MEMO_DRAFT_DECISION_MODIFIED
+        else:
+            decision = _memo_drafts.MEMO_DRAFT_DECISION_ACCEPTED
+
+        coder_id = _ensure_default_coder(project_id)
+        try:
+            memo = _memo_drafts.promote_memo_draft_to_memo(
+                _projects_root(),
+                draft,
+                coder_id=coder_id,
+                decision=decision,
+                title=str(title_in) if title_in is not None else None,
+                body=str(body_in) if body_in is not None else None,
+                author_coder_id=coder_id,
+                extra_links=extra_links if extra_links else None,
+                extra_provenance=extra_prov if extra_prov else None,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+        # F9.6 audit — best-effort.
+        try:
+            _ai_invocation_log.record_decision_event_for_memo_draft(
+                _projects_root(), draft,
+                actor_coder_id=coder_id,
+            )
+        except Exception:
+            pass
+
+    return JSONResponse({
+        "draft": draft.to_dict(),
+        "memo": memo.to_dict(),
+    })
+
+
+@app.post("/api/projects/{project_id}/memo-drafts/{draft_id}/reject")
+async def reject_memo_draft_endpoint(
+    project_id: str, draft_id: str, request: Request,
+) -> JSONResponse:
+    """F8.8 — record a rejection on a pending memo draft (F9.6 audit)."""
+    _check_project_id(project_id)
+    if not _memo_drafts.MEMO_DRAFT_ID_RE.match(draft_id):
+        raise HTTPException(400, "Invalid memo draft id")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body and not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    body = body or {}
+    reason = str(body.get("rejection_reason") or "")[
+        : _memo_drafts.MAX_REJECTION_REASON_LEN
+    ]
+    notes_in = body.get("notes")
+    notes = (
+        str(notes_in)[: _memo_drafts.MAX_NOTES_LEN]
+        if notes_in is not None else None
+    )
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            draft = _memo_drafts.load_memo_draft(
+                _projects_root(), project_id, draft_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Memo draft not found")
+        if draft.decision != _memo_drafts.MEMO_DRAFT_DECISION_PENDING:
+            raise HTTPException(
+                409, f"Memo draft already {draft.decision}",
+            )
+
+        coder_id = _ensure_default_coder(project_id)
+        try:
+            _memo_drafts.record_memo_draft_decision(
+                draft,
+                decision=_memo_drafts.MEMO_DRAFT_DECISION_REJECTED,
+                coder_id=coder_id,
+                rejection_reason=reason,
+                notes=notes,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        try:
+            _memo_drafts.save_memo_draft(_projects_root(), draft)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+        # F9.6 audit — best-effort.
+        try:
+            _ai_invocation_log.record_decision_event_for_memo_draft(
+                _projects_root(), draft,
+                actor_coder_id=coder_id,
+            )
+        except Exception:
+            pass
+
+    return JSONResponse({"draft": draft.to_dict()})
+
+
+@app.delete("/api/projects/{project_id}/memo-drafts/{draft_id}")
+async def delete_memo_draft_endpoint(
+    project_id: str, draft_id: str,
+) -> JSONResponse:
+    """F8.8 — remove a memo-draft record.
+
+    Production callers should prefer keeping drafts for the F9.6 audit
+    trail; this is mostly here for the UI's "I don't want this taking
+    up space" trash action and for tests.
+    """
+    _check_project_id(project_id)
+    if not _memo_drafts.MEMO_DRAFT_ID_RE.match(draft_id):
+        raise HTTPException(400, "Invalid memo draft id")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            removed = _memo_drafts.delete_memo_draft(
+                _projects_root(), project_id, draft_id,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    if not removed:
+        raise HTTPException(404, "Memo draft not found")
+    return JSONResponse({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 
