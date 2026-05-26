@@ -41,6 +41,60 @@
 
 {% block actions %}
   <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+  {#
+    F9.2 — definition-at-apply audit report download menu.
+
+    Three direct download targets — CSV / Markdown / RTF — all live
+    behind /api/projects/<pid>/definition-at-apply?format=...
+
+    Each row is one Application paired with the historical Code
+    definition that was in force at apply time (resolved from the F2.2
+    version log) plus a drift summary against the current Code state.
+    The links carry ``download`` so the browser saves rather than
+    rendering inline. Same open / close / outside-click / Escape JS
+    pattern as F6.2's retrieval-report dropdown on the queries page;
+    the namespace prefix ``daa-`` keeps the two menus distinct so a
+    future page that surfaces both can co-exist.
+  #}
+  <span class="daa-export-wrap" data-test-feature="F9.2">
+    <button
+      type="button"
+      class="btn secondary"
+      id="daa-export-btn"
+      data-test-id="daa-export-btn"
+      title="Download every application paired with the code definition that was in force when it was made (CSV / Markdown / Word)"
+      aria-haspopup="menu"
+      aria-expanded="false"
+    >📥 Definition at apply ▾</button>
+    <div
+      class="daa-export-menu"
+      id="daa-export-menu"
+      role="menu"
+      aria-label="Export definition-at-apply audit report"
+    >
+      <a
+        role="menuitem"
+        class="daa-export-item"
+        href="/api/projects/{{ project_id }}/definition-at-apply?format=csv"
+        data-fmt="csv"
+        download
+      >CSV <span class="daa-export-hint">spreadsheet — RFC 4180</span></a>
+      <a
+        role="menuitem"
+        class="daa-export-item"
+        href="/api/projects/{{ project_id }}/definition-at-apply?format=markdown"
+        data-fmt="markdown"
+        download
+      >Markdown <span class="daa-export-hint">structured, paste into thesis</span></a>
+      <a
+        role="menuitem"
+        class="daa-export-item"
+        href="/api/projects/{{ project_id }}/definition-at-apply?format=rtf"
+        data-fmt="rtf"
+        download
+      >Word (RTF) <span class="daa-export-hint">opens in Word / LibreOffice</span></a>
+    </div>
+  </span>
 {% endblock %}
 
 {% block extra_styles %}
@@ -143,6 +197,40 @@
   }
   .audit-toolbar .count {
     color: var(--muted); font-size: 13px;
+  }
+
+  /* F9.2: definition-at-apply download dropdown (header-actions area).
+     Mirrors the F6.2 ``rr-export-`` menu on the queries page so the
+     two surfaces feel like the same idiom. */
+  .daa-export-wrap { position: relative; display: inline-block; }
+  .daa-export-menu {
+    display: none;
+    position: absolute; right: 0; top: calc(100% + 6px);
+    z-index: 50;
+    min-width: 280px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px;
+    box-shadow: 0 4px 18px rgba(0,0,0,.18);
+  }
+  .daa-export-menu.open { display: block; }
+  .daa-export-item {
+    display: block;
+    padding: 8px 10px;
+    border-radius: 6px;
+    color: var(--text);
+    text-decoration: none;
+    font-size: 13px;
+  }
+  .daa-export-item:hover, .daa-export-item:focus {
+    background: var(--panel); outline: none;
+  }
+  .daa-export-item .daa-export-hint {
+    display: block;
+    color: var(--muted);
+    font-size: 11.5px;
+    margin-top: 2px;
   }
 {% endblock %}
 
@@ -353,5 +441,43 @@ for (const id of ["f-action", "f-entity", "f-order"]) {
 document.getElementById("f-actor").addEventListener("change", load);
 
 load();
+
+// ---------------------------------------------------------------- //
+// F9.2 — Definition-at-apply download dropdown                     //
+// ---------------------------------------------------------------- //
+// Same open / close / outside-click / Escape pattern as the F6.2
+// retrieval-report dropdown on the queries page. The links inside
+// the menu point straight at /api/projects/<pid>/definition-at-apply
+// with ``download`` so clicking saves rather than navigating.
+const daaExportBtn = document.getElementById("daa-export-btn");
+const daaExportMenu = document.getElementById("daa-export-menu");
+if (daaExportBtn && daaExportMenu) {
+  function closeDaaMenu() {
+    daaExportMenu.classList.remove("open");
+    daaExportBtn.setAttribute("aria-expanded", "false");
+  }
+  function toggleDaaMenu() {
+    const open = daaExportMenu.classList.toggle("open");
+    daaExportBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  daaExportBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleDaaMenu();
+  });
+  document.addEventListener("click", (e) => {
+    if (!daaExportMenu.classList.contains("open")) return;
+    if (e.target.closest(".daa-export-item")) {
+      closeDaaMenu();
+      return;
+    }
+    if (e.target === daaExportBtn || daaExportBtn.contains(e.target)) {
+      return;
+    }
+    closeDaaMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeDaaMenu();
+  });
+}
 </script>
 {% endblock %}

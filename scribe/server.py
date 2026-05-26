@@ -6890,6 +6890,110 @@ async def get_project_event_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# F9.2 — definition-at-apply audit reports
+#
+# F9.2 ships ``scribe.definition_at_apply``: a renderer that pairs every
+# Application with the *Code definition that was in force at apply
+# time* (resolved from the F2.2 per-code version log) and flags drift
+# against the current Code state. The pure module is the renderer plus
+# CSV / Markdown / RTF formatters; until this endpoint landed, the
+# audit-trail report was unreachable through the HTTP / FastAPI surface
+# and the only consumer was a future CLI script.
+#
+# Why a separate URL from the F6.2 retrieval report:
+#
+#   F6.2 hydrates each application with the *current* code / source /
+#   coder / participant names — the surface a researcher uses while
+#   writing up findings.
+#
+#   F9.2 hydrates each application with the *historical* definition
+#   the application was made under — the surface a thesis examiner
+#   asks for two years on ("show me the definition you applied to
+#   this quote when you coded it").
+#
+# Both eventually land on the same data, but the audit story is a
+# different report, with different columns + a drift summary, so it
+# gets its own URL and its own download menu (on the audit timeline
+# page rather than the queries page).
+#
+# Empty projects are valid input — they produce a header-only CSV /
+# placeholder Markdown / minimal RTF, never a 404. Same contract as
+# F6.1 / F6.2.
+# --------------------------------------------------------------------------- #
+
+
+from . import definition_at_apply as _definition_at_apply  # noqa: E402
+
+
+@app.get("/api/projects/{project_id}/definition-at-apply")
+async def export_definition_at_apply_endpoint(
+    project_id: str, format: str = "csv"
+) -> Response:
+    """Download the project's definition-at-apply audit report (F9.2).
+
+    Body is one of CSV / Markdown / RTF, rendered by
+    :func:`scribe.definition_at_apply.render_report`. Each row is one
+    Application paired with the :class:`scribe.code_versions.CodeVersion`
+    snapshot that was in force at apply time, plus a drift summary
+    against the current :class:`scribe.codes.Code`.
+
+    Query string ``format``:
+
+    * ``csv`` — RFC-4180 CSV (default). Public column contract is
+      :data:`scribe.definition_at_apply.CSV_COLUMNS`.
+    * ``markdown`` — structured CommonMark; alias ``md``.
+    * ``rtf`` — minimal RTF 1.x (Word, LibreOffice, Pages all open
+      it natively); aliases ``word`` / ``doc`` / ``docx``.
+
+    Headers:
+
+    * ``Content-Type`` matches the format (charset=utf-8 for CSV /
+      Markdown).
+    * ``Content-Disposition: attachment; filename="<slug>-definition-
+      at-apply.<ext>"`` so browsers prompt a save rather than rendering
+      inline.
+
+    Status codes: ``404`` if the project is missing; ``400`` for an
+    unrecognised format; ``200`` otherwise (including projects with no
+    applications — header-only / placeholder body).
+    """
+    _check_project_id(project_id)
+    try:
+        fmt = _definition_at_apply.normalise_format(format)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        apps = _applications.list_applications(_projects_root(), project_id)
+        codes = _codes.list_codes(_projects_root(), project_id)
+        try:
+            rows = _definition_at_apply.build_definition_at_apply_rows(
+                _projects_root(), apps, codes=codes,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+    text = _definition_at_apply.render_report(fmt, rows, project=project)
+    spec = _definition_at_apply.EXPORT_FORMATS[fmt]
+    filename = _definition_at_apply.slugify_report_filename(project, fmt)
+    headers = {
+        # Quote the filename so spaces / non-ASCII never break the
+        # header. We slugify to ASCII upstream, so the simple quoted
+        # form is sufficient — same convention as F6.1 / F6.2.
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(
+        content=text,
+        media_type=spec.media_type,
+        headers=headers,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # AI code suggestions (F8.3 / F8.4)
 #
 # Two related endpoints expose the existing scribe.code_suggestions and
