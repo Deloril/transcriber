@@ -7455,6 +7455,121 @@ async def export_audit_trail_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# F9.8 — Time-travel view (read-only project state at any timestamp)
+#
+# Per PLANNING.md F9.8:
+#
+#   > "Time-travel" view — display the project read-only as it was on
+#   > date Y.
+#
+# The pure module ``scribe.time_travel`` shipped in caccdc3 with 54
+# tests covering pure helpers + per-entity reconstructors + the
+# :class:`ProjectStateAtTime` aggregator. That commit explicitly
+# deferred both the HTTP route and the UI affordance ("Same staged
+# approach as F9.1 / F9.6 / F9.7: ship the data layer, add the
+# surface incrementally"). Until this block landed, the
+# reconstruction was unreachable through the user-facing surface —
+# you could only reach it from Python.
+#
+# This route + the F9.8 panel on the audit timeline page close that
+# loop. A researcher (or thesis examiner) types an ISO-8601 timestamp,
+# the panel POSTs to this endpoint, and the response is rendered as a
+# "the project on that date" read-only summary: codebook size, lock
+# state, applications / memos / sources / participants counts, and the
+# list of warnings the reconstruction emitted (e.g. "memo XYZ modified
+# after as_of; showing current state").
+#
+# Routes:
+#
+#   GET /api/projects/<pid>/time-travel?as_of=<iso8601>
+#     [&include_applications=0|1] [&include_memos=0|1]
+#     [&include_sources=0|1] [&include_participants=0|1]
+#
+#     Returns JSON shaped by :meth:`ProjectStateAtTime.to_dict`.
+#     Status: 404 if the project doesn't exist; 400 for an invalid
+#     project id, missing/empty as_of, or an as_of that the
+#     reconstruction's pure helper rejects (non-string, etc).
+# --------------------------------------------------------------------------- #
+
+from . import time_travel as _time_travel  # noqa: E402
+
+
+def _bool_query(value: str, *, default: bool) -> bool:
+    """Tolerant 0/1 / true/false / yes/no parser for query strings.
+
+    Mirrors the pattern used elsewhere in the server for optional
+    boolean query params (e.g. F8.10's gate config). Empty or missing
+    falls back to ``default``.
+    """
+    if value is None:
+        return default
+    s = str(value).strip().lower()
+    if not s:
+        return default
+    if s in {"1", "true", "yes", "on", "y", "t"}:
+        return True
+    if s in {"0", "false", "no", "off", "n", "f"}:
+        return False
+    return default
+
+
+@app.get("/api/projects/{project_id}/time-travel")
+async def time_travel_endpoint(
+    project_id: str,
+    as_of: str = "",
+    include_applications: str = "1",
+    include_memos: str = "1",
+    include_sources: str = "1",
+    include_participants: str = "1",
+) -> JSONResponse:
+    """Reconstruct project state at ``as_of`` (F9.8).
+
+    Composes :func:`scribe.time_travel.reconstruct_state_at`. The
+    response body is the dataclass ``to_dict()`` shape: ``project_id``,
+    ``as_of``, ``project`` (or null), ``codes``, ``applications``,
+    ``memos``, ``sources``, ``participants``, ``codebook_stage``,
+    ``codebook_locked``, ``best_effort``, ``warnings``.
+
+    Toggling ``include_applications=0`` (etc.) skips the corresponding
+    best-effort section so a researcher who only cares about the
+    *exact-history* parts (project + codebook + lock state) gets a
+    smaller payload and no modified-after-as_of warnings for entities
+    they didn't ask for.
+
+    Status: ``404`` if the project doesn't exist; ``400`` for an
+    invalid project id, an empty ``as_of``, or an ``as_of`` value the
+    pure helper rejects. ``200`` otherwise — including for an
+    ``as_of`` that pre-dates the project (the response carries
+    ``project: null`` and empty entity lists, mirroring the
+    reconstruction module's contract).
+    """
+    _check_project_id(project_id)
+    as_of_clean = (as_of or "").strip()
+    if not as_of_clean:
+        raise HTTPException(400, "as_of is required (ISO-8601 timestamp)")
+    inc_apps = _bool_query(include_applications, default=True)
+    inc_memos = _bool_query(include_memos, default=True)
+    inc_sources = _bool_query(include_sources, default=True)
+    inc_participants = _bool_query(include_participants, default=True)
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            state = _time_travel.reconstruct_state_at(
+                _projects_root(),
+                project_id,
+                as_of_clean,
+                include_applications=inc_apps,
+                include_memos=inc_memos,
+                include_sources=inc_sources,
+                include_participants=inc_participants,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse(state.to_dict())
+
+
+# --------------------------------------------------------------------------- #
 # F9.3 — named codebook snapshots
 #
 # F9.3 ships ``scribe.codebook_snapshots``: a named, dated, immutable

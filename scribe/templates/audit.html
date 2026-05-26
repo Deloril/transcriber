@@ -516,6 +516,114 @@
     color: var(--err);
     font-style: italic;
   }
+
+  /* F9.8: Time-travel viewer.
+     Same card-with-form idiom as the F9.3 / F9.4 panels above; one
+     ISO-8601 input + a "View as of" submit button + a result block
+     rendered by the JS. Read-only — the reconstruction never writes
+     to disk. Designed to surface the warnings list prominently so
+     the researcher can tell which sections are exact (project +
+     codebook + lock) vs best-effort (applications / memos /
+     sources / participants). */
+  .tt-panel { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  .tt-form {
+    display: grid;
+    grid-template-columns: 1fr 220px;
+    gap: 8px;
+    align-items: start;
+  }
+  @media (max-width: 800px) { .tt-form { grid-template-columns: 1fr; } }
+  .tt-form input[type="datetime-local"],
+  .tt-form input[type="text"] {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 11px; font: inherit; font-size: 13px;
+    box-sizing: border-box;
+    font-family: var(--mono);
+  }
+  .tt-actions {
+    display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap;
+  }
+  .tt-error {
+    padding: 8px 10px; border-radius: 6px;
+    background: var(--panel-2); border: 1px solid var(--err);
+    color: var(--err); font-size: 13px;
+  }
+  .tt-result {
+    margin-top: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    background: var(--panel-2);
+  }
+  .tt-result .tt-headline {
+    font-size: 13px; font-family: var(--mono); color: var(--muted);
+    margin-bottom: 8px;
+  }
+  .tt-result .tt-headline .tt-as-of {
+    color: var(--text);
+  }
+  .tt-result .tt-headline .tt-best-effort {
+    display: inline-block; margin-left: 8px;
+    padding: 1px 7px; border-radius: 999px;
+    font-size: 10.5px; letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+  }
+  .tt-result .tt-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+  }
+  @media (max-width: 900px) {
+    .tt-result .tt-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  .tt-result .tt-stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .tt-result .tt-stat .tt-num {
+    font-size: 22px; font-weight: 600; color: var(--text);
+    font-family: var(--mono);
+  }
+  .tt-result .tt-stat .tt-lbl {
+    color: var(--muted); font-size: 12px; margin-top: 2px;
+  }
+  .tt-result .tt-meta {
+    margin-top: 10px;
+    color: var(--text); font-size: 13px;
+  }
+  .tt-result .tt-meta .tt-meta-row {
+    display: grid; grid-template-columns: 160px 1fr;
+    gap: 8px; padding: 3px 0;
+  }
+  .tt-result .tt-meta .tt-meta-row .tt-key {
+    color: var(--muted); font-family: var(--mono);
+    font-size: 12px;
+  }
+  .tt-result .tt-warnings {
+    margin-top: 10px;
+    border-top: 1px dashed var(--border);
+    padding-top: 8px;
+  }
+  .tt-result .tt-warnings h4 {
+    margin: 0 0 4px 0; font-size: 13px;
+    color: var(--muted);
+  }
+  .tt-result .tt-warnings ul {
+    margin: 0; padding-left: 18px;
+    color: var(--text); font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .tt-result .tt-warnings li {
+    font-family: var(--mono);
+  }
+  .tt-result .tt-pre-project {
+    color: var(--muted); font-style: italic;
+    font-family: var(--serif); font-size: 13px;
+  }
 {% endblock %}
 
 {% block body %}
@@ -750,6 +858,71 @@
   <div id="la-error" class="lock-audit-error"
        data-test-id="la-error"
        style="display:none; color: var(--err); margin-top: 8px"></div>
+</div>
+
+{#
+  F9.8 — Time-travel viewer.
+
+  Per PLANNING.md F9.8:
+    > "Time-travel" view — display the project read-only as it was
+    > on date Y.
+
+  ``scribe/time_travel.py`` shipped in caccdc3 with 54 unit tests:
+  pure helpers (pick_version_at, replay_entity_states,
+  lock_state_from_log, filter_by_created_at) + per-entity
+  reconstructors (codes / project / applications / memos / sources /
+  participants / codebook lock state) + the aggregator
+  reconstruct_state_at returning a :class:`ProjectStateAtTime`. The
+  original commit explicitly deferred the HTTP / FastAPI surface
+  ("Same staged approach as F9.1 / F9.6 / F9.7"). Until this panel
+  + the /api/projects/<pid>/time-travel route landed, the
+  reconstruction was unreachable through the user-facing surface.
+
+  Reads:
+    GET /api/projects/<pid>/time-travel?as_of=<iso8601>
+       — returns ProjectStateAtTime.to_dict(): codes / applications /
+         memos / sources / participants live at that moment + the
+         codebook lock state + a list of best-effort warnings.
+
+  Why on the audit timeline page (and not its own route): time-
+  travel is an audit-trail surface — same researcher use-case as
+  the F9.1 events feed, F9.4 checkpoints, F9.5 lock history, F9.7
+  audit-trail download. Co-locating means a methods chapter
+  appendix can be assembled from one page.
+#}
+<div class="card" data-test-feature="F9.8" data-test-id="time-travel-panel"
+     style="margin-top:16px">
+  <h2 style="margin-top:0">Time-travel viewer</h2>
+  <p class="hint" style="margin-top:0">
+    Reconstruct the project as it was on a chosen date. The codebook
+    + lock state are <em>exact</em> (rebuilt from the F2.2 version log
+    + F2.4 lock log); applications, memos, sources and participants
+    are best-effort (filtered by their creation timestamp). Any
+    entities modified after the chosen moment surface a warning so
+    you know which rows are showing current rather than historical
+    state. Read-only — this view never writes to disk.
+  </p>
+  <form id="tt-form" class="tt-form" data-test-id="tt-form"
+        autocomplete="off"
+        onsubmit="return false;">
+    <input
+      id="tt-as-of"
+      type="datetime-local"
+      step="1"
+      placeholder="YYYY-MM-DDTHH:MM:SS"
+      data-test-id="tt-as-of-input"
+      required>
+    <div class="tt-actions">
+      <button type="submit"
+              id="tt-submit"
+              class="btn"
+              data-test-id="tt-submit-btn">⏳ View as of date</button>
+    </div>
+  </form>
+  <div id="tt-error" class="tt-error" style="display:none"
+       data-test-id="tt-error" role="alert"></div>
+  <div id="tt-result" class="tt-result" style="display:none"
+       data-test-id="tt-result"></div>
 </div>
 
 <div id="loadingCard" class="card hint" style="margin-top:16px">Loading audit timeline…</div>
@@ -1451,6 +1624,182 @@ if (auditTrailExportBtn && auditTrailExportMenu) {
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeAuditTrailMenu();
+  });
+}
+
+// ---------------------------------------------------------------- //
+// F9.8 — Time-travel viewer                                        //
+// ---------------------------------------------------------------- //
+// Submits an ISO-8601 timestamp to /api/projects/<pid>/time-travel
+// and renders the response. Read-only; the reconstruction module
+// never writes to disk so this panel cannot mutate project state.
+//
+// Two pieces of UX nuance:
+//
+//   * The <input type="datetime-local"> returns a *naive* "YYYY-MM-
+//     DDTHH:MM[:SS]" string; the on-disk timestamps Scribe writes
+//     are UTC ``Z``-suffixed. We coerce the local input to a UTC
+//     ``Z``-suffixed string before sending so the lexical comparison
+//     used by ``time_travel._validate_as_of`` matches.
+//   * The "best-effort" pill is rendered when the response carries
+//     ``best_effort: true`` so the researcher can see at a glance
+//     that some sections are filtered by creation timestamp rather
+//     than reconstructed from a version log.
+const ttForm = document.getElementById("tt-form");
+const ttAsOfInput = document.getElementById("tt-as-of");
+const ttSubmitBtn = document.getElementById("tt-submit");
+const ttErrorEl = document.getElementById("tt-error");
+const ttResultEl = document.getElementById("tt-result");
+
+function setTtError(msg) {
+  if (!ttErrorEl) return;
+  if (!msg) {
+    ttErrorEl.style.display = "none";
+    ttErrorEl.textContent = "";
+    return;
+  }
+  ttErrorEl.style.display = "block";
+  ttErrorEl.textContent = msg;
+}
+
+function ttLocalToIsoZ(value) {
+  // datetime-local returns "YYYY-MM-DDTHH:MM" or "YYYY-MM-DDTHH:MM:SS".
+  // Treat as local time, convert to UTC, and emit Z-suffixed ISO-8601
+  // with microseconds (matching scribe.utcnow_iso()).
+  if (!value) return "";
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return value;  // pass through; let server validate
+  return d.toISOString();
+}
+
+function renderTtResult(data) {
+  ttResultEl.style.display = "block";
+  const project = data.project || null;
+  const codes = Array.isArray(data.codes) ? data.codes : [];
+  const apps = Array.isArray(data.applications) ? data.applications : [];
+  const memos = Array.isArray(data.memos) ? data.memos : [];
+  const sources = Array.isArray(data.sources) ? data.sources : [];
+  const participants = Array.isArray(data.participants) ? data.participants : [];
+  const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+
+  const headline = `
+    <div class="tt-headline" data-test-id="tt-headline">
+      Project state as of
+      <span class="tt-as-of" data-test-id="tt-as-of-rendered">${escapeHtml(data.as_of || "—")}</span>
+      ${data.best_effort
+        ? '<span class="tt-best-effort" data-test-id="tt-best-effort">best-effort</span>'
+        : ""}
+    </div>
+  `;
+
+  if (!project) {
+    ttResultEl.innerHTML = headline + `
+      <div class="tt-pre-project" data-test-id="tt-pre-project">
+        Project did not exist yet at this moment — it was created later.
+      </div>
+    `;
+    return;
+  }
+
+  const stats = `
+    <div class="tt-grid">
+      <div class="tt-stat" data-test-id="tt-stat-codes">
+        <div class="tt-num">${codes.length}</div>
+        <div class="tt-lbl">codes</div>
+      </div>
+      <div class="tt-stat" data-test-id="tt-stat-applications">
+        <div class="tt-num">${apps.length}</div>
+        <div class="tt-lbl">applications</div>
+      </div>
+      <div class="tt-stat" data-test-id="tt-stat-memos">
+        <div class="tt-num">${memos.length}</div>
+        <div class="tt-lbl">memos</div>
+      </div>
+      <div class="tt-stat" data-test-id="tt-stat-sources">
+        <div class="tt-num">${sources.length}</div>
+        <div class="tt-lbl">sources</div>
+      </div>
+      <div class="tt-stat" data-test-id="tt-stat-participants">
+        <div class="tt-num">${participants.length}</div>
+        <div class="tt-lbl">participants</div>
+      </div>
+      <div class="tt-stat" data-test-id="tt-stat-stage">
+        <div class="tt-num" style="font-size:14px;line-height:30px">${escapeHtml(data.codebook_stage || "—")}</div>
+        <div class="tt-lbl">codebook stage</div>
+      </div>
+      <div class="tt-stat" data-test-id="tt-stat-locked">
+        <div class="tt-num" style="font-size:14px;line-height:30px">${data.codebook_locked ? "🔒 locked" : "unlocked"}</div>
+        <div class="tt-lbl">lock state</div>
+      </div>
+    </div>
+  `;
+
+  const meta = `
+    <div class="tt-meta">
+      <div class="tt-meta-row">
+        <span class="tt-key">project name</span>
+        <span data-test-id="tt-project-name">${escapeHtml(project.name || "—")}</span>
+      </div>
+      <div class="tt-meta-row">
+        <span class="tt-key">project id</span>
+        <span data-test-id="tt-project-id">${escapeHtml(project.id || data.project_id || "")}</span>
+      </div>
+      <div class="tt-meta-row">
+        <span class="tt-key">created at</span>
+        <span>${escapeHtml(project.created_at || "—")}</span>
+      </div>
+    </div>
+  `;
+
+  let warningsHtml = "";
+  if (warnings.length) {
+    warningsHtml = `
+      <div class="tt-warnings" data-test-id="tt-warnings">
+        <h4>Warnings (${warnings.length})</h4>
+        <ul>
+          ${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}
+        </ul>
+      </div>
+    `;
+  }
+
+  ttResultEl.innerHTML = headline + stats + meta + warningsHtml;
+}
+
+async function ttSubmit() {
+  setTtError("");
+  ttResultEl.style.display = "none";
+  const raw = ttAsOfInput.value;
+  if (!raw) {
+    setTtError("Pick a date / time first.");
+    return;
+  }
+  const asOfIso = ttLocalToIsoZ(raw);
+  const params = new URLSearchParams();
+  params.set("as_of", asOfIso);
+  ttSubmitBtn.disabled = true;
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/time-travel?${params.toString()}`,
+    );
+    if (!r.ok) {
+      let detail = "";
+      try { detail = (await r.json()).detail || ""; } catch (_) {}
+      throw new Error(detail || `HTTP ${r.status}`);
+    }
+    const data = await r.json();
+    renderTtResult(data);
+  } catch (e) {
+    setTtError(`Could not reconstruct state: ${e.message || e}`);
+  } finally {
+    ttSubmitBtn.disabled = false;
+  }
+}
+
+if (ttForm) {
+  ttForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    ttSubmit();
   });
 }
 </script>
