@@ -1384,6 +1384,7 @@ async def append_sampling_log_endpoint(
 from . import codes as _codes  # noqa: E402
 from . import applications as _applications  # noqa: E402
 from . import code_versions as _code_versions  # noqa: E402
+from . import code_lifecycle as _code_lifecycle  # noqa: E402
 from . import coders as _coders  # noqa: E402
 from . import codebook_lock as _codebook_lock  # noqa: E402
 
@@ -1603,6 +1604,270 @@ async def list_code_versions_endpoint(
         prev_sig = sig
 
     return JSONResponse({"versions": out})
+
+
+# --------------------------------------------------------------------------- #
+# F2.3 — Code lifecycle ops (rename / retire / merge / split / hierarchy)
+#
+# These wrap :mod:`scribe.code_lifecycle` so the codebook editor's per-row
+# ⋮ menu has somewhere to call. Every op respects F2.4's lock guard:
+# locked codebooks 409 with the LockedCodebookError message.
+# --------------------------------------------------------------------------- #
+
+
+def _lifecycle_lock_guard(project_id: str) -> None:
+    """409 if the codebook is locked. Caller must hold ``PROJECTS_LOCK``."""
+    try:
+        _codebook_lock.assert_codebook_unlocked(_projects_root(), project_id)
+    except _codebook_lock.LockedCodebookError as e:
+        raise HTTPException(409, str(e))
+
+
+def _lifecycle_response(code: _codes.Code, version: _code_versions.CodeVersion | None) -> dict:
+    return {
+        "code": code.to_dict(),
+        "version": version.to_dict() if version is not None else None,
+    }
+
+
+@app.post("/api/projects/{project_id}/codes/{code_id}/rename")
+async def rename_code_endpoint(
+    project_id: str, code_id: str, request: Request
+) -> JSONResponse:
+    """Rename a code (F2.3). ``name`` is a definition field, so the
+    rename automatically records a new immutable version (F2.2)."""
+    _check_project_id(project_id)
+    _check_code_id(code_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    new_name = str(body.get("name", "") or "").strip()
+    if not new_name:
+        raise HTTPException(400, "name is required")
+    change_note = str(body.get("change_note", "") or "")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        _lifecycle_lock_guard(project_id)
+        try:
+            code, version = _code_lifecycle.rename_code(
+                _projects_root(), project_id, code_id, new_name,
+                change_note=change_note,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Code not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid rename payload: {e}")
+    return JSONResponse(_lifecycle_response(code, version))
+
+
+@app.post("/api/projects/{project_id}/codes/{code_id}/retire")
+async def retire_code_endpoint(
+    project_id: str, code_id: str, request: Request
+) -> JSONResponse:
+    """Mark a code as ``status='retired'`` (F2.3). Idempotent."""
+    _check_project_id(project_id)
+    _check_code_id(code_id)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    change_note = str(body.get("change_note", "") or "")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        _lifecycle_lock_guard(project_id)
+        try:
+            code, version = _code_lifecycle.retire_code(
+                _projects_root(), project_id, code_id,
+                change_note=change_note,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Code not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse(_lifecycle_response(code, version))
+
+
+@app.post("/api/projects/{project_id}/codes/{code_id}/parent")
+async def set_code_parent_endpoint(
+    project_id: str, code_id: str, request: Request
+) -> JSONResponse:
+    """Set / clear ``parent_code_id`` (F2.3). Cycles + missing-parent
+    are rejected with 400. Pass ``parent_code_id: null`` (or the empty
+    string) to detach a code to the top level."""
+    _check_project_id(project_id)
+    _check_code_id(code_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    raw_parent = body.get("parent_code_id")
+    new_parent = None
+    if raw_parent not in (None, ""):
+        new_parent = str(raw_parent)
+    change_note = str(body.get("change_note", "") or "")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        _lifecycle_lock_guard(project_id)
+        try:
+            code, version = _code_lifecycle.set_code_parent(
+                _projects_root(), project_id, code_id, new_parent,
+                change_note=change_note,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Code not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse(_lifecycle_response(code, version))
+
+
+@app.post("/api/projects/{project_id}/codes/{code_id}/promote")
+async def promote_code_endpoint(
+    project_id: str, code_id: str, request: Request
+) -> JSONResponse:
+    """Lift a code one level in the hierarchy (F2.3). Idempotent on
+    root codes."""
+    _check_project_id(project_id)
+    _check_code_id(code_id)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    change_note = str(body.get("change_note", "") or "")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        _lifecycle_lock_guard(project_id)
+        try:
+            code, version = _code_lifecycle.promote_code(
+                _projects_root(), project_id, code_id,
+                change_note=change_note,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Code not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse(_lifecycle_response(code, version))
+
+
+@app.post("/api/projects/{project_id}/codes/merge")
+async def merge_codes_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    """Merge one or more source codes into ``target_code_id`` (F2.3).
+
+    Body shape::
+
+        {
+            "target_code_id": "...",
+            "source_code_ids": ["...", "..."],
+            "change_note": "optional"
+        }
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    target_id = body.get("target_code_id") or ""
+    source_ids = body.get("source_code_ids") or []
+    if not target_id or not isinstance(target_id, str):
+        raise HTTPException(400, "target_code_id is required")
+    if not isinstance(source_ids, list) or not source_ids:
+        raise HTTPException(400, "source_code_ids must be a non-empty list")
+    _check_code_id(target_id)
+    for sid in source_ids:
+        if not isinstance(sid, str):
+            raise HTTPException(400, "source_code_ids must be strings")
+        _check_code_id(sid)
+    change_note = str(body.get("change_note", "") or "")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        _lifecycle_lock_guard(project_id)
+        try:
+            target, retired = _code_lifecycle.merge_codes(
+                _projects_root(), project_id, source_ids, target_id,
+                change_note=change_note,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Code not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({
+        "target": target.to_dict(),
+        "retired": [c.to_dict() for c in retired],
+    })
+
+
+@app.post("/api/projects/{project_id}/codes/{code_id}/split")
+async def split_code_endpoint(
+    project_id: str, code_id: str, request: Request
+) -> JSONResponse:
+    """Split a code into two or more new codes (F2.3).
+
+    Body shape::
+
+        {
+            "new_codes": [
+                {"name": "...", "definition": "..." (optional), ...},
+                {"name": "..."}
+            ],
+            "change_note": "optional"
+        }
+
+    The source code is retired with ``provenance['split_into']``;
+    each new code carries ``provenance['split_from'] = <source_id>``.
+    """
+    _check_project_id(project_id)
+    _check_code_id(code_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    new_codes_raw = body.get("new_codes")
+    if not isinstance(new_codes_raw, list):
+        raise HTTPException(400, "new_codes must be a list")
+    if len(new_codes_raw) < 2:
+        raise HTTPException(400, "Splitting requires at least two new codes")
+    for spec in new_codes_raw:
+        if not isinstance(spec, dict):
+            raise HTTPException(400, "Each split entry must be an object")
+        name = spec.get("name")
+        if not name or not str(name).strip():
+            raise HTTPException(400, "Each split entry must include a 'name'")
+    change_note = str(body.get("change_note", "") or "")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        _lifecycle_lock_guard(project_id)
+        try:
+            source, new_codes = _code_lifecycle.split_code(
+                _projects_root(), project_id, code_id,
+                list(new_codes_raw),
+                change_note=change_note,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Code not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid split payload: {e}")
+    return JSONResponse({
+        "source": source.to_dict(),
+        "new_codes": [c.to_dict() for c in new_codes],
+    })
 
 
 @app.get("/api/projects/{project_id}/applications")

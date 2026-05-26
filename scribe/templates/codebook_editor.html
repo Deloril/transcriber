@@ -45,6 +45,38 @@
     border-radius: 4px; font-size: 14px;
   }
   .cb-row .del:hover { background: var(--err); color: white; }
+
+  /* F2.3: per-row lifecycle ops (rename / retire / merge / split / parent) */
+  .cb-row-menu-wrap {
+    position: relative;
+  }
+  .cb-row .cb-row-menu-btn {
+    background: transparent; color: var(--muted);
+    border: 0; cursor: pointer; padding: 2px 6px;
+    border-radius: 4px; font-size: 16px; line-height: 1;
+  }
+  .cb-row .cb-row-menu-btn:hover { background: var(--panel-3); color: var(--text); }
+  .cb-row-menu {
+    position: absolute; right: 0; top: calc(100% + 4px);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; min-width: 180px;
+    box-shadow: 0 4px 12px rgba(0,0,0,.2);
+    z-index: 20;
+    display: none;
+    padding: 4px 0;
+  }
+  .cb-row-menu.open { display: block; }
+  .cb-row-menu button {
+    display: block; width: 100%; text-align: left;
+    background: transparent; color: var(--text); border: 0;
+    padding: 7px 12px; font: inherit; font-size: 13px;
+    cursor: pointer;
+  }
+  .cb-row-menu button:hover { background: var(--panel-2); }
+  .cb-row-menu .danger { color: var(--err); }
+  .cb-row-menu .sep {
+    height: 1px; background: var(--border); margin: 4px 0;
+  }
   .cb-form input, .cb-form textarea, .cb-form select {
     width: 100%;
     background: var(--panel-2); color: var(--text);
@@ -429,6 +461,19 @@ function renderList() {
       <span class="name">${escapeHtml(c.name)}</span>
       <span class="stage">${stageLabel}</span>${statusLabel}
       <span class="count" title="${count} application${count === 1 ? "" : "s"}">${count}</span>
+      <span class="cb-row-menu-wrap">
+        <button class="cb-row-menu-btn" data-act="open-menu" title="Lifecycle ops" aria-label="Lifecycle ops">⋮</button>
+        <div class="cb-row-menu" role="menu">
+          <button data-act="rename" type="button">Rename…</button>
+          <button data-act="parent" type="button">Re-parent…</button>
+          <button data-act="promote" type="button">Promote one level</button>
+          <div class="sep"></div>
+          <button data-act="merge" type="button">Merge into…</button>
+          <button data-act="split" type="button">Split into new codes…</button>
+          <div class="sep"></div>
+          <button data-act="retire" type="button" class="danger">Retire</button>
+        </div>
+      </span>
       <button class="del" data-act="delete" title="Delete this code">✕</button>
     `;
     list.appendChild(div);
@@ -577,7 +622,209 @@ document.getElementById("cb-history-btn").addEventListener("click", toggleHistor
 
 document.getElementById("cb-cancel").addEventListener("click", () => setMode(null));
 
+// --------------------------------------------------------------------- //
+// F2.3 — Lifecycle ops (rename / retire / parent / promote / merge / split)
+//
+// The per-row ⋮ menu hits one of:
+//   POST /api/projects/<pid>/codes/<cid>/rename
+//   POST /api/projects/<pid>/codes/<cid>/retire
+//   POST /api/projects/<pid>/codes/<cid>/parent
+//   POST /api/projects/<pid>/codes/<cid>/promote
+//   POST /api/projects/<pid>/codes/<cid>/split
+//   POST /api/projects/<pid>/codes/merge
+//
+// The pure module (scribe/code_lifecycle.py) handles the audit-trail
+// invariants — version log, no dangling back-pointers, no cycles, etc.
+// The UI just needs to ask the user a yes/no or for the new name(s)
+// and POST.
+// --------------------------------------------------------------------- //
+
+function closeAllRowMenus() {
+  document.querySelectorAll(".cb-row-menu.open").forEach(m => m.classList.remove("open"));
+}
+
+document.addEventListener("click", () => closeAllRowMenus());
+
+async function lifecycleRequest(url, payload) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload || {}),
+  });
+  if (!r.ok) {
+    let msg;
+    try {
+      const detail = await r.json();
+      msg = detail.detail || `HTTP ${r.status}`;
+    } catch (_) {
+      msg = `HTTP ${r.status}`;
+    }
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+async function doRename(code) {
+  const next = prompt("New name for this code:", code.name || "");
+  if (next === null) return;
+  const trimmed = (next || "").trim();
+  if (!trimmed) return;
+  const note = prompt(
+    "Change note for the revision history (optional):",
+    "renamed"
+  ) || "";
+  await lifecycleRequest(
+    `/api/projects/${PROJECT_ID}/codes/${code.id}/rename`,
+    { name: trimmed, change_note: note }
+  );
+}
+
+async function doRetire(code) {
+  if (!confirm(`Retire "${code.name}"? It will be marked status=retired but not deleted.`)) return;
+  const note = prompt(
+    "Why is this code being retired? (optional change note)",
+    ""
+  ) || "";
+  await lifecycleRequest(
+    `/api/projects/${PROJECT_ID}/codes/${code.id}/retire`,
+    { change_note: note }
+  );
+}
+
+async function doSetParent(code) {
+  const others = allCodes.filter(c => c.id !== code.id && c.status !== "retired");
+  if (!others.length) {
+    alert("No other codes to use as a parent. Create one first.");
+    return;
+  }
+  // Pick a parent via prompt. Cheap UI; works without a modal stack.
+  const pretty = others
+    .map((c, i) => `${i + 1}. ${c.name}`)
+    .join("\n");
+  const ans = prompt(
+    `Re-parent "${code.name}" — choose a parent by number, or 0 to detach to the top level.\n\n${pretty}`,
+    code.parent_code_id ? String(others.findIndex(c => c.id === code.parent_code_id) + 1) : "0"
+  );
+  if (ans === null) return;
+  const idx = parseInt(ans, 10);
+  if (Number.isNaN(idx) || idx < 0 || idx > others.length) {
+    alert("Invalid choice.");
+    return;
+  }
+  const parentId = idx === 0 ? null : others[idx - 1].id;
+  await lifecycleRequest(
+    `/api/projects/${PROJECT_ID}/codes/${code.id}/parent`,
+    { parent_code_id: parentId }
+  );
+}
+
+async function doPromote(code) {
+  if (!code.parent_code_id) {
+    alert("This code is already at the top level.");
+    return;
+  }
+  await lifecycleRequest(
+    `/api/projects/${PROJECT_ID}/codes/${code.id}/promote`,
+    {}
+  );
+}
+
+async function doMerge(code) {
+  const targets = allCodes.filter(c => c.id !== code.id && c.status !== "retired");
+  if (!targets.length) {
+    alert("No target code available to merge into.");
+    return;
+  }
+  const pretty = targets
+    .map((c, i) => `${i + 1}. ${c.name}`)
+    .join("\n");
+  const ans = prompt(
+    `Merge "${code.name}" INTO another code (this code will be retired with provenance.merged_into pointing at the target).\n\nChoose a target by number:\n\n${pretty}`,
+    "1"
+  );
+  if (ans === null) return;
+  const idx = parseInt(ans, 10);
+  if (Number.isNaN(idx) || idx < 1 || idx > targets.length) {
+    alert("Invalid choice.");
+    return;
+  }
+  const target = targets[idx - 1];
+  if (!confirm(`Merge "${code.name}" into "${target.name}"? "${code.name}" will be retired.`)) return;
+  const note = prompt("Optional change note:", "merged during focused pass") || "";
+  await lifecycleRequest(
+    `/api/projects/${PROJECT_ID}/codes/merge`,
+    {
+      target_code_id: target.id,
+      source_code_ids: [code.id],
+      change_note: note,
+    }
+  );
+}
+
+async function doSplit(code) {
+  const raw = prompt(
+    `Split "${code.name}" into new codes. Enter the new names separated by commas (need at least 2):`,
+    ""
+  );
+  if (raw === null) return;
+  const names = raw.split(",").map(s => s.trim()).filter(Boolean);
+  if (names.length < 2) {
+    alert("Splitting requires at least two new code names.");
+    return;
+  }
+  if (!confirm(`Split "${code.name}" into ${names.length} new codes? "${code.name}" will be retired.`)) return;
+  const note = prompt("Optional change note:", "split for granularity") || "";
+  await lifecycleRequest(
+    `/api/projects/${PROJECT_ID}/codes/${code.id}/split`,
+    {
+      new_codes: names.map(n => ({ name: n })),
+      change_note: note,
+    }
+  );
+}
+
+async function runLifecycleAction(action, code) {
+  try {
+    if (action === "rename") await doRename(code);
+    else if (action === "retire") await doRetire(code);
+    else if (action === "parent") await doSetParent(code);
+    else if (action === "promote") await doPromote(code);
+    else if (action === "merge") await doMerge(code);
+    else if (action === "split") await doSplit(code);
+    else return;
+    // Anything that touched the codebook is reflected in the next list.
+    await refreshCodes();
+  } catch (err) {
+    alert(`Couldn't ${action}: ${err.message}`);
+  }
+}
+
 document.getElementById("codesList").addEventListener("click", async (e) => {
+  // Lifecycle ⋮ menu open / close.
+  const menuBtn = e.target.closest("[data-act='open-menu']");
+  if (menuBtn) {
+    e.stopPropagation();
+    const wrap = menuBtn.parentElement;
+    const menu = wrap.querySelector(".cb-row-menu");
+    const wasOpen = menu.classList.contains("open");
+    closeAllRowMenus();
+    if (!wasOpen) menu.classList.add("open");
+    return;
+  }
+  // Lifecycle action buttons inside an open menu.
+  const lifecycleBtn = e.target.closest(".cb-row-menu button[data-act]");
+  if (lifecycleBtn) {
+    e.stopPropagation();
+    closeAllRowMenus();
+    const row = lifecycleBtn.closest(".cb-row");
+    if (!row) return;
+    const id = row.dataset.id;
+    const code = allCodes.find(c => c.id === id);
+    if (!code) return;
+    await runLifecycleAction(lifecycleBtn.dataset.act, code);
+    return;
+  }
+
   const delBtn = e.target.closest("[data-act='delete']");
   if (delBtn) {
     e.stopPropagation();
