@@ -95,6 +95,63 @@
       >Word (RTF) <span class="daa-export-hint">opens in Word / LibreOffice</span></a>
     </div>
   </span>
+  {#
+    F9.7 — chronological audit-trail download menu.
+
+    Same three-format dropdown pattern as the F9.2 menu above, with
+    its own namespace prefix ``audit-trail-`` so the two menus can
+    coexist on this page without colliding. The links default to
+    *no filters* — i.e. the full chronological feed of every F9.1
+    event + every F9.6 AI invocation. The "current view" links pick
+    up the page's currently-selected action / entity-type / actor /
+    date filters via JS so a researcher can pre-narrow before the
+    download.
+
+    Why a separate menu from F9.2's: F9.2 is the *Application ×
+    historical-Code-definition* report (drift surface). F9.7 is the
+    *every operation, in chronological order* report (the generic
+    audit trail). They share the audit page but render different
+    rows and answer different questions for a methods chapter.
+  #}
+  <span class="audit-trail-export-wrap" data-test-feature="F9.7">
+    <button
+      type="button"
+      class="btn secondary"
+      id="audit-trail-export-btn"
+      data-test-id="audit-trail-export-btn"
+      title="Download the full chronological audit trail (F9.1 events + F9.6 AI invocations) as CSV / Markdown / Word"
+      aria-haspopup="menu"
+      aria-expanded="false"
+    >🧾 Audit trail ▾</button>
+    <div
+      class="audit-trail-export-menu"
+      id="audit-trail-export-menu"
+      role="menu"
+      aria-label="Export chronological audit trail"
+    >
+      <a
+        role="menuitem"
+        class="audit-trail-export-item"
+        href="/api/projects/{{ project_id }}/audit-trail?format=csv"
+        data-fmt="csv"
+        download
+      >CSV <span class="audit-trail-export-hint">spreadsheet — RFC 4180</span></a>
+      <a
+        role="menuitem"
+        class="audit-trail-export-item"
+        href="/api/projects/{{ project_id }}/audit-trail?format=markdown"
+        data-fmt="markdown"
+        download
+      >Markdown <span class="audit-trail-export-hint">structured, paste into thesis</span></a>
+      <a
+        role="menuitem"
+        class="audit-trail-export-item"
+        href="/api/projects/{{ project_id }}/audit-trail?format=rtf"
+        data-fmt="rtf"
+        download
+      >Word (RTF) <span class="audit-trail-export-hint">opens in Word / LibreOffice</span></a>
+    </div>
+  </span>
 {% endblock %}
 
 {% block extra_styles %}
@@ -227,6 +284,42 @@
     background: var(--panel); outline: none;
   }
   .daa-export-item .daa-export-hint {
+    display: block;
+    color: var(--muted);
+    font-size: 11.5px;
+    margin-top: 2px;
+  }
+
+  /* F9.7: chronological audit-trail download dropdown.
+     Same dropdown idiom as the F9.2 menu above; namespaced so the
+     two coexist on the audit page without selector collisions. */
+  .audit-trail-export-wrap {
+    position: relative; display: inline-block;
+  }
+  .audit-trail-export-menu {
+    display: none;
+    position: absolute; right: 0; top: calc(100% + 6px);
+    z-index: 50;
+    min-width: 280px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px;
+    box-shadow: 0 4px 18px rgba(0,0,0,.18);
+  }
+  .audit-trail-export-menu.open { display: block; }
+  .audit-trail-export-item {
+    display: block;
+    padding: 8px 10px;
+    border-radius: 6px;
+    color: var(--text);
+    text-decoration: none;
+    font-size: 13px;
+  }
+  .audit-trail-export-item:hover, .audit-trail-export-item:focus {
+    background: var(--panel); outline: none;
+  }
+  .audit-trail-export-item .audit-trail-export-hint {
     display: block;
     color: var(--muted);
     font-size: 11.5px;
@@ -1289,6 +1382,75 @@ if (daaExportBtn && daaExportMenu) {
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeDaaMenu();
+  });
+}
+
+// ---------------------------------------------------------------- //
+// F9.7 — Chronological audit-trail download dropdown               //
+// ---------------------------------------------------------------- //
+// Same open / close / outside-click / Escape pattern as the F9.2
+// menu above. Before opening, we splice the page's currently-active
+// filter selections into each link's ``href`` so the download
+// matches what the researcher is looking at on the page. Filters
+// that are blank are dropped — no ``?action=`` artefacts in the URL.
+const auditTrailExportBtn =
+  document.getElementById("audit-trail-export-btn");
+const auditTrailExportMenu =
+  document.getElementById("audit-trail-export-menu");
+if (auditTrailExportBtn && auditTrailExportMenu) {
+  function _atSyncLinkFilters() {
+    // Read the same form fields the events feed reads (`load()` above).
+    const action = (document.getElementById("f-action") || {}).value || "";
+    const entity = (document.getElementById("f-entity") || {}).value || "";
+    const actor = ((document.getElementById("f-actor") || {}).value || "")
+      .trim();
+    const items = auditTrailExportMenu.querySelectorAll(
+      ".audit-trail-export-item",
+    );
+    items.forEach((a) => {
+      const fmt = a.getAttribute("data-fmt") || "csv";
+      const params = new URLSearchParams();
+      params.set("format", fmt);
+      if (action) params.set("action", action);
+      if (entity) params.set("entity_type", entity);
+      if (actor) params.set("actor_coder_id", actor);
+      a.setAttribute(
+        "href",
+        `/api/projects/${PROJECT_ID}/audit-trail?${params.toString()}`,
+      );
+    });
+  }
+  function closeAuditTrailMenu() {
+    auditTrailExportMenu.classList.remove("open");
+    auditTrailExportBtn.setAttribute("aria-expanded", "false");
+  }
+  function toggleAuditTrailMenu() {
+    if (!auditTrailExportMenu.classList.contains("open")) {
+      _atSyncLinkFilters();
+    }
+    const open = auditTrailExportMenu.classList.toggle("open");
+    auditTrailExportBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  auditTrailExportBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleAuditTrailMenu();
+  });
+  document.addEventListener("click", (e) => {
+    if (!auditTrailExportMenu.classList.contains("open")) return;
+    if (e.target.closest(".audit-trail-export-item")) {
+      closeAuditTrailMenu();
+      return;
+    }
+    if (
+      e.target === auditTrailExportBtn ||
+      auditTrailExportBtn.contains(e.target)
+    ) {
+      return;
+    }
+    closeAuditTrailMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeAuditTrailMenu();
   });
 }
 </script>

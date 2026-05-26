@@ -7313,6 +7313,148 @@ async def export_definition_at_apply_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# F9.7 — audit-trail export (chronological CSV / Markdown / RTF)
+#
+# F9.7 ships ``scribe.audit_export``: a renderer that walks the F9.1
+# generic event log + the F9.6 unified AI invocation log into one
+# chronological audit trail and renders it in CSV / Markdown / RTF —
+# the three formats researchers reach for ("supervisor's spreadsheet",
+# "thesis appendix", "open in Word"). The pure module shipped in
+# ba781f4 with a CLI wrapper but explicitly deferred the HTTP /
+# FastAPI surface; until this route landed there was no way for a UI
+# to download the audit trail. This block closes that loop.
+#
+# Endpoint:
+#
+#   GET /api/projects/<pid>/audit-trail?format=csv|markdown|rtf
+#       &since=<ISO-8601>&until=<ISO-8601>
+#       &kind=event|ai_invocation (repeatable)
+#       &actor_coder_id=<12-char hex>
+#       &entity_type=<one of EVENT_ENTITY_TYPES>
+#       &action=<one of EVENT_ACTIONS>
+#       &feature=<one of AI_FEATURES>
+#       &decision=<one of INVOCATION_DECISIONS>
+#
+# All filters AND-combine. Filters that don't apply to a row's source
+# kind are not applied to that row (e.g. ``action=create`` filter
+# doesn't drop AI invocation rows); pass ``kind`` to restrict to one
+# source. Empty projects produce a header-only CSV / placeholder
+# Markdown / minimal RTF — never a 404.
+#
+# Why a separate URL from F9.2's ``/definition-at-apply``: F9.2 is the
+# *Application × historical-Code-definition* report (drift surface).
+# F9.7 is the *every operation, in chronological order* report (the
+# generic audit trail — codes, applications, memos, lock toggles,
+# snapshots, checkpoints, AI invocations). They share the audit
+# timeline page but render different rows.
+# --------------------------------------------------------------------------- #
+
+
+from . import audit_export as _audit_export  # noqa: E402
+
+
+@app.get("/api/projects/{project_id}/audit-trail")
+async def export_audit_trail_endpoint(
+    project_id: str,
+    format: str = "csv",
+    since: str = "",
+    until: str = "",
+    kind: list[str] | None = Query(default=None),
+    actor_coder_id: str = "",
+    entity_type: str = "",
+    action: str = "",
+    feature: str = "",
+    decision: str = "",
+) -> Response:
+    """Download the project's chronological audit trail (F9.7).
+
+    Body is one of CSV / Markdown / RTF, rendered by
+    :func:`scribe.audit_export.render_audit_trail`. Each row is one
+    operation (F9.1 event or F9.6 AI invocation), sorted by
+    ``(timestamp, kind, record_id)``.
+
+    Query string ``format``:
+
+    * ``csv`` — RFC-4180 CSV (default). Public column contract is
+      :data:`scribe.audit_export.CSV_COLUMNS`.
+    * ``markdown`` — structured CommonMark; alias ``md``.
+    * ``rtf`` — minimal RTF 1.x; aliases ``word`` / ``doc`` / ``docx``.
+
+    Filters
+    -------
+
+    All AND-combine and forward to
+    :func:`scribe.audit_export.build_audit_trail`. Filters that don't
+    apply to a row's source kind are not applied to that row. Pass
+    ``kind`` (repeatable) to restrict to one source.
+
+    Headers
+    -------
+
+    * ``Content-Type`` matches the format (charset=utf-8 for CSV /
+      Markdown).
+    * ``Content-Disposition: attachment; filename="<slug>-audit-
+      trail.<ext>"`` so browsers prompt a save rather than rendering
+      inline.
+
+    Status codes: ``404`` if the project is missing; ``400`` for an
+    unrecognised format or a filter value that doesn't match its
+    closed-set domain; ``200`` otherwise (including projects with no
+    events — header-only / placeholder body).
+    """
+    _check_project_id(project_id)
+    try:
+        fmt = _audit_export.normalise_format(format)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    kinds_arg: list[str] | None
+    if kind:
+        # Drop empty strings so ``?kind=`` passed without a value is a
+        # no-op rather than triggering the empty-list validation guard.
+        kinds_arg = [k for k in kind if k]
+        if not kinds_arg:
+            kinds_arg = None
+    else:
+        kinds_arg = None
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            rows = _audit_export.build_audit_trail(
+                _projects_root(),
+                project_id,
+                since=since or None,
+                until=until or None,
+                kinds=kinds_arg,
+                actor_coder_id=actor_coder_id or None,
+                entity_type=entity_type or None,
+                action=action or None,
+                feature=feature or None,
+                decision=decision or None,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+    text = _audit_export.render_audit_trail(fmt, rows, project=project)
+    spec = _audit_export.EXPORT_FORMATS[fmt]
+    filename = _audit_export.slugify_audit_trail_filename(project, fmt)
+    headers = {
+        # Quoted filename: same convention as F6.1 / F6.2 / F9.2 — we
+        # slugify to ASCII upstream so the simple form suffices.
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(
+        content=text,
+        media_type=spec.media_type,
+        headers=headers,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # F9.3 — named codebook snapshots
 #
 # F9.3 ships ``scribe.codebook_snapshots``: a named, dated, immutable
