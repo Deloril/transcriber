@@ -4075,6 +4075,120 @@ async def delete_application_endpoint(project_id: str, application_id: str) -> J
 
 
 # --------------------------------------------------------------------------- #
+# F4.6 — One-click playback range for a coded segment.
+#
+# The pure module :mod:`scribe.application_playback` (shipped in d476da3,
+# 34 unit tests) turns an Application's word-id anchor into a wall-clock
+# ``[start, end]`` second interval by reusing the editor's word→time map.
+# This endpoint exposes that lookup so the coding view can surface a
+# play button per application without duplicating the time-mapping
+# logic in JS — and so any external consumer (CLI, future REFI-QDA
+# round-trip) can ask "where in the media does this application play?"
+# through one URL.
+#
+# Returns 200 + the playback range when timing is available; 404 with a
+# diagnostic ``reason`` when the application has no playable timing
+# (untimed transcript, no source media, anchors that fell out of range
+# after a transcript edit). The UI renders a disabled play button in
+# those cases — never a silent seek-to-zero.
+# --------------------------------------------------------------------------- #
+
+from . import application_playback as _application_playback  # noqa: E402
+
+
+@app.get("/api/projects/{project_id}/applications/{application_id}/playback")
+async def application_playback_endpoint(
+    project_id: str, application_id: str,
+) -> JSONResponse:
+    """Resolve the wall-clock playback range for one coded application (F4.6).
+
+    Looks up the application, walks to its source's transcript via
+    ``transcript_job_id``, builds a word→time map, and returns the
+    ``[start, end]`` seconds the editor should seek through to play
+    just that coded segment back.
+
+    Response shape (mirrors :class:`scribe.application_playback.PlaybackRange`)::
+
+        {
+          "application_id": "<aid>",
+          "source_id":      "<sid>",
+          "transcript_job_id": "<job_id>",   # so the UI can fetch /api/job/<id>/media
+          "start":          <float seconds>,
+          "end":            <float seconds>
+        }
+
+    Errors:
+
+    * 400 — bad project / application id format.
+    * 404 — application not found, OR no playback range available
+      (source missing transcript, anchors out of range, transcript has
+      no usable timing). The body's ``reason`` field tells the UI which
+      case it hit so the play button can be hidden / tooltipped
+      sensibly rather than seeking to zero.
+    """
+    _check_project_id(project_id)
+    _check_application_id(application_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            app_obj = _applications.load_application(
+                _projects_root(), project_id, application_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Application not found")
+        try:
+            source = _sources.load_source(
+                _projects_root(), project_id, app_obj.source_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(
+                404,
+                {"detail": "Source not found", "reason": "no-source"},
+            )
+
+    job_id = getattr(source, "transcript_job_id", "") or ""
+    if not job_id:
+        raise HTTPException(
+            404,
+            {"detail": "Source has no transcript", "reason": "no-transcript"},
+        )
+
+    segments = _load_segments_for_source_speaker_map(source)
+    if segments is None:
+        raise HTTPException(
+            404,
+            {"detail": "Transcript file not found", "reason": "no-segments"},
+        )
+
+    try:
+        rng = _application_playback.playback_range_for_application(
+            app_obj, segments,
+        )
+    except _projects.ProjectValidationError:
+        # Anchor's segment_index falls outside this transcript — F4.5
+        # orphan condition. Surface as 404 + reason so the UI can route
+        # the user to the orphan queue rather than seeking blindly.
+        raise HTTPException(
+            404,
+            {"detail": "Application anchor out of range", "reason": "orphan"},
+        )
+
+    if rng is None:
+        raise HTTPException(
+            404,
+            {"detail": "No playable timing for this application", "reason": "no-timing"},
+        )
+
+    return JSONResponse({
+        "application_id": rng.application_id,
+        "source_id": rng.source_id,
+        "transcript_job_id": job_id,
+        "start": rng.start,
+        "end": rng.end,
+    })
+
+
+# --------------------------------------------------------------------------- #
 # Re-anchor on transcript edit + orphan-application review queue (F4.5)
 #
 # F4.5 ships :mod:`scribe.application_reanchor` as a pure planner that

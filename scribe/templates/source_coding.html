@@ -324,6 +324,9 @@
   }
   .app-row .actions {
     margin-top: 4px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
   }
   .app-row .actions button {
     background: transparent; border: 0;
@@ -331,6 +334,49 @@
     cursor: pointer; padding: 0;
   }
   .app-row .actions button:hover { color: var(--err); }
+  /* F4.6 — per-row play button. Hover and active state hint that this
+     button seeks media rather than mutates state (so it lives apart
+     from the Remove action's red hover). Disabled when no playback
+     range can be resolved (untimed transcript / orphan anchor). */
+  .app-row .actions button[data-act="play"] {
+    color: var(--accent);
+    font-size: 12px;
+  }
+  .app-row .actions button[data-act="play"]:hover { color: var(--text); }
+  .app-row .actions button[data-act="play"][disabled] {
+    opacity: .45;
+    cursor: not-allowed;
+    color: var(--muted);
+  }
+
+  /* F4.6 — inline media player. Hidden until the user clicks Play on
+     any application. Sticks to the bottom of the side panel so the
+     transcript text never reflows when the player appears. The dock
+     also surfaces what's currently playing so the user can re-press
+     the same play button without losing track of which segment it is. */
+  .play-dock {
+    position: sticky;
+    bottom: 8px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-top: 12px;
+    box-shadow: var(--shadow);
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .play-dock audio {
+    width: 100%;
+    margin-top: 4px;
+  }
+  .play-dock .now-playing {
+    display: flex; align-items: center; gap: 6px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .play-dock .now-playing .swatch { flex: 0 0 auto; }
+  .play-dock .now-playing .label { color: var(--text); font-weight: 500; }
+  .play-dock .nothing { color: var(--muted); font-style: italic; }
 
   /* Participants in this source (F3.3) — the focus-group / multi-
      speaker roster, editable inline. Set-style "save the whole list"
@@ -508,6 +554,31 @@
     <h3 style="margin-top:0;font-size:14px">Codebook</h3>
     <div id="codebookSummary" class="hint">Loading…</div>
     <a class="btn secondary" style="margin-top:8px" href="/projects/{{ project_id }}/codebook">Open codebook</a>
+
+    <!-- F4.6 — One-click playback of any coded segment. The dock is
+         present in the rendered template so the test harness can find
+         it; it is hidden until the user hits a Play button on any
+         application row, at which point the inline <audio> attaches
+         to the source's media via /api/job/<id>/media and seeks to the
+         resolved playback range. Stop-at-end is enforced via a
+         timeupdate listener so the user always hears just the coded
+         span. The same machinery powers the gutter lane-bar play
+         action so a researcher can scrub along the lane gutter and
+         spot-check every code in document order. -->
+    <div id="playDock"
+         class="play-dock"
+         data-test-feature="F4.6"
+         data-test-id="play-dock"
+         hidden>
+      <div id="playDockNow" class="now-playing">
+        <span class="nothing">Press ▶ on any coded segment to play it back.</span>
+      </div>
+      <audio id="playDockAudio"
+             data-test-id="play-dock-audio"
+             controls
+             preload="none"
+             style="display:none"></audio>
+    </div>
   </div>
 </div>
 
@@ -554,13 +625,23 @@
      tests/test_selection_snap.py, so the JS-side and Python-side
      snap behaviour stay byte-for-byte aligned. -->
 <script type="module">
+// F4.4 + F4.6 — pull the helpers we need from helpers.mjs once and
+// hang them off ``window`` so the classic-script handler below can
+// reach them without re-importing. The `playbackRangeForApplication`
+// import (F4.6) ships the JS mirror of `scribe.application_playback`;
+// the parallel suite in tests/js/playback.test.mjs locks the JS-side
+// behaviour against tests/test_application_playback.py.
 import {
   snapToWord,
   snapToSentence,
   snapToParagraph,
+  playbackRangeForApplication,
+  buildWordTimeMap,
 } from "/static/js/helpers.mjs";
 window.__snap = { snapToWord, snapToSentence, snapToParagraph };
+window.__playback = { playbackRangeForApplication, buildWordTimeMap };
 window.dispatchEvent(new CustomEvent("scribe:snap-ready"));
+window.dispatchEvent(new CustomEvent("scribe:playback-ready"));
 </script>
 <script>
 const PROJECT_ID = {{ project_id | tojson }};
@@ -1268,7 +1349,15 @@ function renderGutter() {
       bar.dataset.lane = String(lane);
       bar.style.left = `${lane * 8}px`;
       bar.style.background = colours.border;
-      bar.title = code ? code.name : `(deleted code ${a.code_id.slice(0,8)})`;
+      // F4.6 — clicking a lane bar plays the coded segment back. The
+      // tooltip carries a hint so a researcher hovering doesn't have
+      // to guess the affordance.
+      const codeName = code ? code.name : `(deleted code ${a.code_id.slice(0,8)})`;
+      bar.title = `${codeName} — click ▶ to play`;
+      bar.setAttribute("role", "button");
+      bar.setAttribute("aria-label", `Play coded segment: ${codeName}`);
+      bar.dataset.testFeature = "F4.6";
+      bar.dataset.testId = "gutter-lane-bar";
       gutter.appendChild(bar);
       painted += 1;
       const sd = stackOf.get(a.id) || 0;
@@ -2089,6 +2178,12 @@ function renderApps() {
     const placeBadge = place
       ? `<span class="place-badge" title="F4.2: place ${place.index} of ${place.total} non-contiguous occurrences">place ${place.index}/${place.total}</span>`
       : "";
+    // F4.6 — surface a play button on every row. The button hits the
+    // F4.6 endpoint to resolve a [start, end] in seconds and seeks the
+    // inline #playDockAudio element to that range. Disabled when the
+    // local resolver (the JS mirror of scribe.application_playback)
+    // can't compute a range — usually because the transcript itself
+    // has no word-level timing.
     return `<div class="app-row"
                  data-app-id="${escapeHtml(a.id)}"
                  data-start="${escapeHtml(a.anchor_start_word_id)}"
@@ -2096,7 +2191,12 @@ function renderApps() {
       <span class="code-name"><span class="swatch" style="background:${colours.swatch}"></span>${escapeHtml(codeName)}${placeBadge}</span>
       <div class="quote">"${escapeHtml(snippet)}"</div>
       <div class="actions">
-        <button data-act="delete">Remove</button>
+        <button type="button"
+                data-act="play"
+                data-test-feature="F4.6"
+                data-test-id="app-row-play"
+                title="Play this coded segment">▶ Play</button>
+        <button type="button" data-act="delete">Remove</button>
       </div>
     </div>`;
   }).join("");
@@ -2118,7 +2218,14 @@ function quoteSnippet(startId, endId) {
 
 document.getElementById("appList").addEventListener("click", async (e) => {
   const delBtn = e.target.closest("button[data-act='delete']");
+  const playBtn = e.target.closest("button[data-act='play']");
   const row = e.target.closest(".app-row");
+  if (playBtn && row) {
+    // F4.6 — one-click playback of the coded segment.
+    e.stopPropagation();
+    await playApplication(row.dataset.appId);
+    return;
+  }
   if (delBtn && row) {
     e.stopPropagation();
     const aid = row.dataset.appId;
@@ -2142,6 +2249,142 @@ document.getElementById("appList").addEventListener("click", async (e) => {
     const wordEl = document.querySelector(`.word[data-word-id="${CSS.escape(startId)}"]`);
     if (wordEl) wordEl.scrollIntoView({ behavior: "smooth", block: "center" });
   }
+});
+
+// F4.6 — One-click playback for a coded segment.
+//
+// playApplication(appId) does the full round-trip:
+//  1. resolve the [start, end] range via GET
+//     /api/projects/<pid>/applications/<aid>/playback (the server
+//     route is canonical; same answer the JS-side
+//     `playbackRangeForApplication` would give us, but having one
+//     authoritative endpoint keeps automation / scripts consistent).
+//  2. attach the source's media to the inline <audio> dock if it
+//     isn't attached yet (uses /api/job/<job_id>/media which already
+//     supports HTTP Range so seek-and-play works without buffering
+//     the whole file).
+//  3. seek to range.start, install a one-shot timeupdate watcher
+//     that pauses at range.end (so the user hears just the coded
+//     span — never bleeds into the next segment).
+//
+// Failure modes are explicit:
+//  * 404 + reason=no-timing/orphan/no-segments — disable the row's
+//    play button and surface a tooltip; never seek to zero.
+//  * media discarded (job state) — the <audio> element will fail to
+//    load; we surface that as a "media not available" message in the
+//    dock and leave the row's button enabled (other apps on this
+//    source may have media via a different fallback later).
+let _PLAYBACK_STOP_AT = null;
+let _PLAYBACK_TIMEUPDATE = null;
+let _PLAYBACK_ATTACHED_JOB = null;
+
+async function playApplication(appId) {
+  const dock = document.getElementById("playDock");
+  const audio = document.getElementById("playDockAudio");
+  const now = document.getElementById("playDockNow");
+  if (!dock || !audio || !now) return;
+
+  const app = APPS.find(a => a.id === appId);
+  if (!app) return;
+
+  let range;
+  try {
+    range = await fetchJSON(
+      `/api/projects/${encodeURIComponent(PROJECT_ID)}` +
+      `/applications/${encodeURIComponent(appId)}/playback`
+    );
+  } catch (err) {
+    // 404 with reason=… is the documented signal that no timing is
+    // available. Surface that to the user without scaring them — the
+    // application itself is still useful, just not playable.
+    dock.hidden = false;
+    audio.style.display = "none";
+    const codeForFail = CODES.find(c => c.id === app.code_id);
+    const codeNameFail = codeForFail ? codeForFail.name : "(deleted code)";
+    now.innerHTML =
+      `<span class="nothing">No playable timing for "${escapeHtml(codeNameFail)}" — ${escapeHtml(err.message || "unknown")}</span>`;
+    // Mark the row's button as visibly disabled until the page reloads.
+    const btn = document.querySelector(
+      `.app-row[data-app-id="${CSS.escape(appId)}"] button[data-act='play']`
+    );
+    if (btn) {
+      btn.disabled = true;
+      btn.title = "No playable timing for this segment";
+    }
+    return;
+  }
+
+  const code = CODES.find(c => c.id === app.code_id);
+  const codeName = code ? code.name : `(deleted code ${(app.code_id || "").slice(0,8)})`;
+  const colours = codeColours(code || { id: app.code_id });
+
+  // Attach media if we haven't yet, or if the source's job has changed.
+  if (_PLAYBACK_ATTACHED_JOB !== range.transcript_job_id) {
+    audio.src = `/api/job/${encodeURIComponent(range.transcript_job_id)}/media`;
+    _PLAYBACK_ATTACHED_JOB = range.transcript_job_id;
+  }
+
+  // Show the dock + audio control.
+  dock.hidden = false;
+  audio.style.display = "";
+  const safeName = escapeHtml(codeName);
+  const startStr = range.start.toFixed(2);
+  const endStr = range.end.toFixed(2);
+  now.innerHTML =
+    `<span class="swatch" style="background:${colours.swatch}"></span>` +
+    `<span class="label">${safeName}</span>` +
+    `<span class="hint" style="margin-left:auto">${startStr}s – ${endStr}s</span>`;
+
+  // Tear down any previous stop-at-end watcher before installing a new one.
+  if (_PLAYBACK_TIMEUPDATE) {
+    audio.removeEventListener("timeupdate", _PLAYBACK_TIMEUPDATE);
+    _PLAYBACK_TIMEUPDATE = null;
+  }
+  _PLAYBACK_STOP_AT = range.end;
+  _PLAYBACK_TIMEUPDATE = function () {
+    if (_PLAYBACK_STOP_AT == null) return;
+    if (audio.currentTime >= _PLAYBACK_STOP_AT) {
+      try { audio.pause(); } catch (_) {}
+      _PLAYBACK_STOP_AT = null;
+      audio.removeEventListener("timeupdate", _PLAYBACK_TIMEUPDATE);
+      _PLAYBACK_TIMEUPDATE = null;
+    }
+  };
+  audio.addEventListener("timeupdate", _PLAYBACK_TIMEUPDATE);
+
+  // Seek + play. We swallow play() errors so a stalled media stream
+  // doesn't throw to the console (autoplay policy / network); the
+  // dock's audio controls let the user hit play manually instead.
+  try {
+    audio.currentTime = Math.max(0, range.start);
+  } catch (_) {
+    // Some browsers reject currentTime before the first metadata
+    // event; install a one-shot loadedmetadata listener.
+    audio.addEventListener(
+      "loadedmetadata",
+      () => { try { audio.currentTime = Math.max(0, range.start); } catch (_) {} },
+      { once: true }
+    );
+  }
+  try { await audio.play(); } catch (_) {}
+}
+
+// F4.6 — Click delegation on the transcript root: lane-bar clicks
+// trigger playback of the application that bar represents. Hooked up
+// once at script bottom so the listener survives renderTranscript()
+// rebuilding the segments. We don't want to attach a per-bar click
+// handler — the bar nodes get rebuilt every time renderGutter() runs.
+document.addEventListener("click", (e) => {
+  const bar = e.target.closest(".lane-bar[data-app-id]");
+  if (!bar) return;
+  // Only handle inside the transcript root.
+  const root = document.getElementById("transcript");
+  if (!root || !root.contains(bar)) return;
+  const aid = bar.dataset.appId;
+  if (!aid) return;
+  e.preventDefault();
+  e.stopPropagation();
+  playApplication(aid);
 });
 
 function renderCodebookSummary() {
