@@ -16,6 +16,8 @@ from .engine import (
     _whisper_device_and_compute,
     gpu_arch_name,
     gpu_backend,
+    rocm_lstm_dropout_patch_active,
+    rocm_lstm_dropout_patch_explanation,
 )
 from .rocm_install import (
     ct2_drift_message,
@@ -171,6 +173,15 @@ def main() -> int:
                 print(f"  CT2 wheel mirrors: {len(fallbacks)} configured (fallbacks)")
                 for u in fallbacks:
                     print(f"    - {u}")
+            # G3.1: confirm the pyannote LSTM dropout MIOpen workaround
+            # is in the install (it fires automatically on diarization
+            # load — surfacing the line gives a ROCm user something
+            # actionable to copy into a pyannote-audio #1995 support
+            # thread instead of "I think the patch is there").
+            if rocm_lstm_dropout_patch_active():
+                print(
+                    f"  LSTM dropout patch: active ({rocm_lstm_dropout_patch_explanation()})"
+                )
     print(f"MPS available:      {torch.backends.mps.is_available()}")
 
     w_dev, w_compute = _whisper_device_and_compute()

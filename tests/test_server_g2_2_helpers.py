@@ -273,6 +273,8 @@ class TestG2_2ApiCapabilitiesCarriesFallbackUrls:
             "ct2_rocm_fallback_urls",
             "distro_tier",
             "distro_tier_explanation",
+            "rocm_lstm_patch",
+            "rocm_lstm_patch_explanation",
         }
 
     def test_capabilities_swallows_helper_exception(

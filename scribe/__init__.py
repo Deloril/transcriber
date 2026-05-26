@@ -13,6 +13,8 @@ from .engine import (
     needs_hsa_override,
     patch_pyannote_lstm_dropout,
     recommended_hsa_override_value,
+    rocm_lstm_dropout_patch_active,
+    rocm_lstm_dropout_patch_explanation,
 )
 
 __version__ = "0.1.0"
@@ -31,4 +33,6 @@ __all__ = [
     "needs_hsa_override",
     "patch_pyannote_lstm_dropout",
     "recommended_hsa_override_value",
+    "rocm_lstm_dropout_patch_active",
+    "rocm_lstm_dropout_patch_explanation",
 ]

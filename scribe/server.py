@@ -951,9 +951,31 @@ async def capabilities() -> JSONResponse:
     the sub-line so a researcher pasting their machine info into a
     support thread can see at a glance whether AMD officially supports
     their distro for ROCm.
+
+    G3.1: ``gpu.rocm_lstm_patch`` (``True`` when the pyannote LSTM
+    dropout MIOpen workaround applies on this machine) and
+    ``gpu.rocm_lstm_patch_explanation`` (one-line rationale) carry the
+    user-facing fingerprint of the patch shipped in commit ``6371fe8``.
+    Both are ``None`` on every non-ROCm backend — the patch helper is
+    a no-op outside ROCm, so reporting "patch applies" elsewhere would
+    be misleading. The patch fires automatically from
+    ``run_diarize`` / ``parakeet`` whenever a pyannote Pipeline loads;
+    surfacing the boolean lets a ROCm user confirm the workaround is
+    in their install before they hit a diarization run. The home page
+    Backend tile appends ``"LSTM patched"`` to the sub-line on ROCm
+    when ``rocm_lstm_patch`` is truthy; the CLI surface
+    (``python -m scribe.devices``) prints the same line under
+    ``LSTM dropout patch:``.
     """
     from .parakeet import nemo_available
-    from .engine import gpu_backend, _gpu_device_name, _cuda_vram_gb, gpu_arch_name
+    from .engine import (
+        gpu_backend,
+        _gpu_device_name,
+        _cuda_vram_gb,
+        gpu_arch_name,
+        rocm_lstm_dropout_patch_active,
+        rocm_lstm_dropout_patch_explanation,
+    )
     from .devices import _linux_distro, _rocm_distro_tier
     from .rocm_distro import tier_explanation
     from .rocm_install import (
@@ -1005,6 +1027,15 @@ async def capabilities() -> JSONResponse:
     # user doesn't care about AMD's distro matrix.
     distro_tier: str | None = None
     distro_tier_explanation_text: str | None = None
+    # G3.1: ROCm-only pyannote LSTM dropout patch state. The patch
+    # fires automatically when pyannote's diarization Pipeline loads
+    # (workaround for MIOpen issue pyannote-audio #1995); surfacing it
+    # in /api/capabilities lets a ROCm user verify the helper is in
+    # their build before a diarization run. Both fields are ``None``
+    # on every non-ROCm backend (the patch is a no-op outside ROCm,
+    # so reporting "applies" elsewhere would be misleading).
+    rocm_lstm_patch: bool | None = None
+    rocm_lstm_patch_explanation_text: str | None = None
     if backend == "rocm":
         try:
             ct2_rocm_pin = pinned_ct2_rocm_version()
@@ -1035,6 +1066,19 @@ async def capabilities() -> JSONResponse:
         except Exception:  # noqa: BLE001
             distro_tier = None
             distro_tier_explanation_text = None
+        # G3.1: report whether the pyannote LSTM dropout patch applies
+        # on this machine. The helper short-circuits on non-ROCm so we
+        # could in theory call it unconditionally, but we keep it inside
+        # the ``backend == "rocm"`` guard so the JSON shape on
+        # CUDA/MPS/CPU stays cleanly nullable (matches the established
+        # ``ct2_*`` / ``distro_tier`` pattern). Defensive against helper
+        # exceptions — collapse to None rather than 500.
+        try:
+            rocm_lstm_patch = bool(rocm_lstm_dropout_patch_active())
+            rocm_lstm_patch_explanation_text = rocm_lstm_dropout_patch_explanation()
+        except Exception:  # noqa: BLE001
+            rocm_lstm_patch = None
+            rocm_lstm_patch_explanation_text = None
     return JSONResponse({
         "parakeet": {
             "available": parakeet_runtime_ok,
@@ -1054,6 +1098,8 @@ async def capabilities() -> JSONResponse:
             "ct2_rocm_fallback_urls": ct2_rocm_fallback_urls,
             "distro_tier": distro_tier,
             "distro_tier_explanation": distro_tier_explanation_text,
+            "rocm_lstm_patch": rocm_lstm_patch,
+            "rocm_lstm_patch_explanation": rocm_lstm_patch_explanation_text,
         },
     })
 

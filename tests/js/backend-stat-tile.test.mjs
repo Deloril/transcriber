@@ -755,3 +755,181 @@ describe("backendStatTile (G2.3 distro support tier)", () => {
     expect(segments[segments.length - 1]).toBe("first-class distro");
   });
 });
+
+// ---------- G3.1: pyannote LSTM dropout MIOpen workaround state ----------
+//
+// G3.1 added ``gpu.rocm_lstm_patch`` to the /api/capabilities payload —
+// a boolean that is ``true`` on ROCm (the pyannote LSTM dropout patch
+// will fire when diarization loads, working around pyannote-audio
+// #1995) and ``null`` on every non-ROCm backend (the patch is a no-op
+// outside ROCm so reporting it elsewhere would be misleading). The
+// home page Recording details card surfaces the boolean as a
+// "LSTM patched" sub-line segment so a researcher pasting their
+// machine info into a pyannote-audio #1995 support thread can
+// confirm the workaround is in their install.
+//
+// Contract:
+//   - non-ROCm backends:   ``rocm_lstm_patch`` is null; tile sub-line
+//                          omits the segment.
+//   - ROCm + true:         segment renders as "LSTM patched".
+//   - ROCm + false:        segment omitted (defensive — should never
+//                          happen on ROCm in practice but the helper
+//                          must not render "LSTM patched" if the
+//                          server reports false).
+//   - missing field:       segment omitted (older API version).
+
+describe("backendStatTile (G3.1 LSTM dropout patch)", () => {
+  it("appends 'LSTM patched' on a ROCm tile with patch active", () => {
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      gfx_target: "gfx1100",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.7.2",
+      ct2_drift_message: null,
+      ct2_rocm_fallback_urls: [],
+      distro_tier: "first-class",
+      rocm_lstm_patch: true,
+      rocm_lstm_patch_explanation:
+        "pyannote LSTM dropout forced to 0.0 to avoid MIOpen " +
+        "missing-header bug (pyannote-audio #1995) on ROCm ≥ 6.1.1; " +
+        "inference behaviour is unchanged",
+    });
+    expect(tile.sub).toBe(
+      "AMD Radeon RX 7900 XTX · 24 GB VRAM · gfx1100 · " +
+      "Ubuntu 24.04.4 LTS · CT2 v4.7.2 · first-class distro · LSTM patched"
+    );
+  });
+
+  it("omits LSTM segment when rocm_lstm_patch is null (non-ROCm backend)", () => {
+    // CUDA box on Ubuntu 24.04 — patch field is null because the
+    // pyannote-audio #1995 workaround is irrelevant on NVIDIA.
+    const tile = backendStatTile({
+      backend: "cuda",
+      device_name: "NVIDIA GeForce RTX 4090",
+      vram_gb: 24.0,
+      distro: "Ubuntu 24.04.4 LTS",
+      rocm_lstm_patch: null,
+    });
+    expect(tile.sub).toBe(
+      "NVIDIA GeForce RTX 4090 · 24 GB VRAM · Ubuntu 24.04.4 LTS"
+    );
+    expect(tile.sub).not.toContain("LSTM");
+  });
+
+  it("omits LSTM segment when rocm_lstm_patch field is missing entirely", () => {
+    // Defensive: an older API version that doesn't carry the field
+    // shouldn't make the tile blow up.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+    });
+    expect(tile.sub).toBe("AMD Radeon RX 7900 XTX · 24 GB VRAM");
+    expect(tile.sub).not.toContain("LSTM");
+  });
+
+  it("omits LSTM segment when rocm_lstm_patch is false", () => {
+    // Defensive: server reporting false should not render the segment.
+    // In practice this can't happen on ROCm (the patch is always
+    // present), but the helper must not render "LSTM patched" against
+    // an explicit false.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      rocm_lstm_patch: false,
+    });
+    expect(tile.sub).toBe("AMD Radeon RX 7900 XTX · 24 GB VRAM");
+    expect(tile.sub).not.toContain("LSTM");
+  });
+
+  it("omits LSTM segment for truthy non-true values (defensive)", () => {
+    // The helper checks ``=== true`` so a stray string / number / object
+    // doesn't accidentally render the segment. Belt-and-braces against
+    // an external proxy munging the JSON shape.
+    for (const stray of ["true", "yes", 1, {}, []]) {
+      const tile = backendStatTile({
+        backend: "rocm",
+        device_name: "AMD Radeon RX 7900 XTX",
+        rocm_lstm_patch: stray,
+      });
+      expect(tile.sub).not.toContain("LSTM");
+    }
+  });
+
+  it("LSTM segment appears after distro tier (last sub-line segment)", () => {
+    // Order pin: device → VRAM → gfx → distro → CT2 pin → mirrors →
+    // tier → LSTM patch. LSTM patch is last because it's the most
+    // specific-to-pyannote bit; the distro tier is the highest-level
+    // meta-classification and stays as the second-to-last segment.
+    // The tier was previously last (G2.3); G3.1 demotes it by one.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      gfx_target: "gfx1100",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_rocm_fallback_urls: ["https://m1/a.zip"],
+      distro_tier: "first-class",
+      rocm_lstm_patch: true,
+    });
+    const segments = tile.sub.split(" · ");
+    expect(segments[segments.length - 1]).toBe("LSTM patched");
+    expect(segments[segments.length - 2]).toBe("first-class distro");
+  });
+
+  it("preserves the GPU tile shape (label / value / sub / warning)", () => {
+    // Pin the contract: G3.1 is additive — the four-key tile shape
+    // is unchanged, only the sub-line composition gains a segment.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      vram_gb: 24.0,
+      rocm_lstm_patch: true,
+    });
+    expect(Object.keys(tile).sort()).toEqual(
+      ["label", "sub", "value", "warning"]
+    );
+  });
+
+  it("renders LSTM segment alongside drift warning (worst-case ROCm)", () => {
+    // Realistic worst case: RDNA 3 box with CT2 wheel drift + the
+    // LSTM patch active. The tile must surface both clearly.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 9070 XT",
+      vram_gb: 16.0,
+      gfx_target: "gfx1201",
+      distro: "Fedora Linux 43 (Workstation Edition)",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.6.0",
+      ct2_drift_message:
+        "ctranslate2 v4.6.0 installed; pinned ROCm wheel is v4.7.2",
+      ct2_rocm_fallback_urls: ["https://lab-mirror.internal/a.zip"],
+      distro_tier: "best-effort",
+      rocm_lstm_patch: true,
+    });
+    expect(tile.sub).toContain("LSTM patched");
+    expect(tile.sub).toContain("CT2 v4.7.2");
+    expect(tile.sub).toContain("best-effort distro");
+    expect(tile.warning).toContain("v4.6.0");
+  });
+
+  it("LSTM segment is the literal string 'LSTM patched' (no localisation)", () => {
+    // The string is what a researcher copy-pastes into a support
+    // thread; it has to be greppable upstream. Pin the spelling so
+    // a future helpers refactor can't quietly change it to
+    // "LSTM dropout patched" or similar — that would break grep
+    // continuity with the CLI line and the upstream issue tracker.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 7900 XTX",
+      rocm_lstm_patch: true,
+    });
+    expect(tile.sub.split(" · ")).toContain("LSTM patched");
+  });
+});

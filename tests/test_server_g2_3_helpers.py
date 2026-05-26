@@ -374,6 +374,8 @@ class TestG2_3ApiCapabilitiesCarriesDistroTier:
             "ct2_rocm_fallback_urls",
             "distro_tier",
             "distro_tier_explanation",
+            "rocm_lstm_patch",
+            "rocm_lstm_patch_explanation",
         }
 
 

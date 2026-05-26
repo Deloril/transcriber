@@ -137,6 +137,17 @@ export function formatBackendLabel(backend) {
  *     Debian are best-effort. Suppressed on CUDA / MPS / CPU (the
  *     field is null there) and on ROCm where classification failed
  *     (e.g. sandboxed FS without ``/etc/os-release``).
+ *   - **G3.1** pyannote LSTM dropout MIOpen-workaround state (only
+ *     on ROCm; ``LSTM patched``). Read from
+ *     ``gpu.rocm_lstm_patch`` on the API payload — ``true`` on ROCm
+ *     when ``scribe.engine.rocm_lstm_dropout_patch_active()`` returns
+ *     truthy, ``null`` on every non-ROCm backend (the patch is a
+ *     no-op outside ROCm so reporting it elsewhere would be
+ *     misleading). Surfacing the boolean lets a ROCm user paste
+ *     "LSTM patched" into a pyannote-audio #1995 support thread to
+ *     prove the workaround is in their install. Suppressed when the
+ *     field is null / false / missing — the segment renders only on
+ *     an explicit ``true``.
  *
  * The sub line collapses to ``null`` when every component is missing
  * (e.g. CPU backend on a Mac with no discrete GPU), so the renderer
@@ -192,6 +203,21 @@ export function backendStatTile(gpu) {
   // what a researcher pasting into a bug report wants to copy).
   if (gpu.distro_tier) {
     parts.push(`${String(gpu.distro_tier)} distro`);
+  }
+  // G3.1: surface the pyannote LSTM dropout MIOpen-workaround state
+  // as the final sub-line segment. ``rocm_lstm_patch`` is null on
+  // every non-ROCm backend (the patch is a no-op outside ROCm so
+  // reporting it elsewhere would be misleading); on ROCm it's
+  // ``true`` whenever the helper is present in the install.
+  // Rendered as ``"LSTM patched"`` so the segment is short, terse,
+  // and identifiable as the pyannote-audio #1995 workaround when
+  // copy-pasted into a support thread alongside the gfx target /
+  // distro / CT2 pin / tier already on the same line. Suppressed
+  // when the field is null, false, undefined, or any other non-
+  // ``true`` value so an older API or a non-ROCm payload doesn't
+  // leak the segment.
+  if (gpu.rocm_lstm_patch === true) {
+    parts.push("LSTM patched");
   }
   // G2.1 drift warning. Falsy ``ct2_drift_message`` (null / undefined /
   // empty string) means no drift — the tile renders without a warning

@@ -900,6 +900,56 @@ patch_pyannote_lstm_dropout = _patch_pyannote_lstm_dropout
 
 
 # --------------------------------------------------------------------------- #
+# G3.1 — pyannote LSTM dropout patch user-facing surface
+# --------------------------------------------------------------------------- #
+#
+# The patch itself (``_patch_pyannote_lstm_dropout`` above) fires whenever
+# pyannote's diarization Pipeline loads on ROCm; it works around the
+# upstream MIOpen header bug (pyannote-audio #1995) by zeroing the
+# segmentation LSTM's dropout. The patch's correctness has deep unit
+# coverage in ``tests/test_engine_devices.py`` and runs automatically
+# from ``run_diarize`` / ``parakeet`` paths — but until G3.1 was wired,
+# a researcher had no way to *confirm* the workaround was in their
+# install. The two helpers below project the patch's runtime state into
+# the same /api/capabilities → ``backendStatTile`` surface that G1.3 /
+# G2.1 / G2.2 / G2.3 use, so a ROCm user pasting their machine info
+# into a support thread can show "yes, I have the LSTM patch enabled"
+# alongside their gfx target / distro / CT2 pin.
+
+
+def rocm_lstm_dropout_patch_active() -> bool:
+    """Whether the pyannote LSTM dropout patch will fire on diarization load.
+
+    Returns ``True`` when the active backend is ROCm (the patch helper
+    short-circuits on every other backend so there's nothing to do
+    there). The patch is registered + idempotent + runs automatically
+    from the engine and parakeet paths; this helper just answers "is
+    the workaround relevant on this machine" so the UI can show an
+    affirmative state instead of leaving ROCm users guessing.
+
+    G3.1 — ``patch_pyannote_lstm_dropout`` covers the MIOpen header
+    bug (pyannote-audio #1995) on ROCm ≥ 6.1.1. Inference behaviour is
+    unchanged because dropout is a no-op outside training.
+    """
+    return is_rocm()
+
+
+def rocm_lstm_dropout_patch_explanation() -> str:
+    """One-line human-readable rationale for the LSTM dropout patch.
+
+    The string is what the home page Backend tile / CLI / support
+    bundle quote verbatim — keep it short, terse, and identifying
+    the upstream bug so a researcher pasting it into a thread has
+    the searchable keywords (MIOpen, hiprand_xorwow, pyannote-audio
+    #1995) immediately."""
+    return (
+        "pyannote LSTM dropout forced to 0.0 to avoid MIOpen "
+        "missing-header bug (pyannote-audio #1995) on ROCm ≥ 6.1.1; "
+        "inference behaviour is unchanged"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # WhisperX wrappers
 # --------------------------------------------------------------------------- #
 
