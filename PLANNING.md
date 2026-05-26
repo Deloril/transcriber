@@ -233,6 +233,9 @@ Feature IDs match the deep-research report (`docs/research/coding-engine-researc
 - **F8.10** First-N-transcripts AI-off mode. Configurable threshold (default: AI suggestions disabled until codebook has ≥ 8 codes AND ≥ 2 transcripts hand-coded). Rationale: protects the inductive opening of grounded theory.
 - **F8.11** Model-tier picker with hardware autodetection. Tiers: small (3B / laptop / 8GB GPU or CPU), mid (8–14B / 16GB GPU), large (32–70B / 24GB GPU). Includes a download manager.
 - **F8.12** Model recommendations baked in: laptop default Llama 3.2 3B or Phi-3.5 3.8B; mid-tier Phi-4 14B or Mistral Nemo 12B; large-tier Qwen 2.5 32B or Llama 3.3 70B. Embedding default `bge-m3` (multilingual) or `nomic-embed-text-v1.5`.
+- **F8.13** Investigate + fix `POST /api/projects/<pid>/ai/suggestions` returning 412 in real use. The endpoint already returns the F8.10 gate status as JSON when blocked, but a real user (Luke, 2026-05-26) hit 412 from the coding view and had no way to act on it. Two parts:
+  - **Diagnose:** add a small `GET /api/projects/<pid>/ai/gate/diagnose` (or extend the existing `GET /ai/gate` body) so the UI can show counts: "you have 3 codes, need 8" / "you have 0 hand-coded transcripts, need 2" / "override is `auto`, set `force_on` to bypass". The status dataclass already carries these fields (`code_count`, `hand_coded_source_count`, `min_codes`, `min_hand_coded_sources`, `override`). What's missing is surfacing them in the UI.
+  - **Act:** the source-coding popover's AI panel should render an inline gate-status block with a one-click "Override (force_on)" button on 412 responses. Currently the JS reads `gate.message` and shows it as plain text; users can't act on it without leaving the page. Acceptance: hitting ✨ Suggest with AI on a fresh project shows the gate status + an override button; clicking the button PUTs `{"override": "force_on"}` to `/ai/gate` and re-tries the suggestion.
 
 ### Trust & reproducibility (§9)
 
