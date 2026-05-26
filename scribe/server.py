@@ -3751,6 +3751,299 @@ async def put_transcript(job_id: str, request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "saved_at": datetime.utcnow().isoformat() + "Z"})
 
 
+# --------------------------------------------------------------------------- #
+# Transcript tidy-up (grammar bot)
+#
+# Three endpoints that wrap :mod:`scribe.transcript_tidy` for the
+# editor's "✨ Tidy speech with AI" feature:
+#
+#   GET  /api/job/{id}/tidy/runs                  — list candidate runs
+#   POST /api/job/{id}/tidy/preview               — call LLM, return proposal
+#   POST /api/job/{id}/tidy/apply                 — splice accepted text
+#
+# The grammar bot uses the *global* AI backend config (see
+# :mod:`scribe.global_ai_backend`) rather than a per-project config,
+# because the editor isn't bound to a project. The F8.10 AI gate also
+# does not apply here — that gate is about hand-coding before AI
+# coding, irrelevant to transcript cleanup.
+# --------------------------------------------------------------------------- #
+
+from . import transcript_tidy as _transcript_tidy  # noqa: E402
+from . import global_ai_backend as _global_ai_backend  # noqa: E402
+
+
+# Test injection point — when set, takes precedence over the global
+# config + real backend. Production code never sets this.
+_tidy_backend_override: Any = None
+
+
+def _resolve_tidy_backend() -> tuple["_ai_backend.BackendConfig", Any]:
+    """Pick the AI backend the tidy endpoints will talk to."""
+    if _tidy_backend_override is not None:
+        return _tidy_backend_override
+    cfg = _global_ai_backend.load_global_config()
+    backend = _ai_backend.backend_for_config(cfg)
+    return cfg, backend
+
+
+def _persist_edited_transcript(job: "Job", payload: dict[str, Any]) -> None:
+    """Save the edited transcript to disk and regenerate sidecars.
+
+    Same write path as :func:`put_transcript`; factored out so the
+    tidy-apply endpoint can reuse it without duplicating the sidecar
+    + ``_persist_job`` dance.
+    """
+    out_dir = job.output_dir.resolve()
+    input_stem = job.input_path.stem
+    if not _is_under(out_dir, OUTPUT_DIR):
+        raise HTTPException(403, "Forbidden")
+    edited = _edited_path(out_dir)
+    edited.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    try:
+        result = _result_from_payload(payload, input_path=Path("dummy"))
+        base = out_dir / input_stem
+        write_txt(result, base.with_suffix(".txt"))
+        write_srt(result, base.with_suffix(".srt"))
+        write_vtt(result, base.with_suffix(".vtt"))
+        write_json(result, base.with_suffix(".json"))
+        with JOBS_LOCK:
+            job.result = payload
+            job.output_paths = {
+                "json": str((base.with_suffix(".json")).relative_to(ROOT)),
+                "txt": str((base.with_suffix(".txt")).relative_to(ROOT)),
+                "srt": str((base.with_suffix(".srt")).relative_to(ROOT)),
+                "vtt": str((base.with_suffix(".vtt")).relative_to(ROOT)),
+            }
+        _persist_job(job)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Saved JSON but failed to regenerate sidecars: {e}")
+
+
+def _load_job_transcript(job: "Job") -> dict[str, Any]:
+    """Return the latest transcript payload for ``job`` (edited
+    overrides the original result if it exists)."""
+    edited = _edited_path(job.output_dir)
+    if edited.exists():
+        try:
+            return json.loads(edited.read_text())
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(500, f"Could not read edited transcript: {e}")
+    if job.result:
+        return job.result
+    raise HTTPException(404, "No transcript available")
+
+
+@app.get("/api/job/{job_id}/tidy/runs")
+async def list_tidy_runs_endpoint(job_id: str) -> JSONResponse:
+    """List candidate runs the grammar bot can act on.
+
+    Each run is a maximal block of consecutive same-speaker segments
+    that's long enough to merit cleanup (see ``MIN_RUN_SEGMENTS``)
+    and short enough not to blow the model's context window.
+    """
+    _check_job_id(job_id)
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+    payload = _load_job_transcript(job)
+    runs = _transcript_tidy.group_runs(payload.get("segments") or [])
+    return JSONResponse({"runs": [r.to_dict() for r in runs]})
+
+
+@app.post("/api/job/{job_id}/tidy/preview")
+async def preview_tidy_run_endpoint(job_id: str, request: Request) -> JSONResponse:
+    """Run the LLM on one run; return proposed paragraphs + segments.
+
+    Body:
+        {"segment_indices": [int, ...]}
+
+    The indices must match a run :func:`group_runs` returned (we
+    don't trust an arbitrary range — guarantees the speaker is
+    consistent and the wall-clock window is sane).
+
+    Returns:
+        {
+          "raw_text": "...",                    # the run as one string
+          "paragraphs": ["para1", "para2", ...],
+          "segments": [TidiedSegment.to_dict, ...],
+          "model": "<model name>",
+        }
+    """
+    _check_job_id(job_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    raw_indices = body.get("segment_indices")
+    if not isinstance(raw_indices, list) or not raw_indices:
+        raise HTTPException(400, "segment_indices must be a non-empty list")
+    try:
+        indices = tuple(int(i) for i in raw_indices)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "segment_indices entries must be integers")
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+    payload = _load_job_transcript(job)
+    segments = payload.get("segments") or []
+    runs = _transcript_tidy.group_runs(segments)
+    matching = next((r for r in runs if r.segment_indices == indices), None)
+    if matching is None:
+        raise HTTPException(
+            400,
+            "segment_indices does not match any candidate run; "
+            "fetch /tidy/runs first.",
+        )
+
+    # Resolve the backend.
+    try:
+        cfg, backend = _resolve_tidy_backend()
+    except _ai_backend.BackendValidationError as e:
+        raise HTTPException(400, str(e))
+    if not cfg.default_model:
+        raise HTTPException(
+            400,
+            "Global AI backend has no default_model configured. "
+            "Set one in ~/.scribe/ai_backend.json.",
+        )
+
+    transport = _ai_backend_transport_override or _ai_backend.urllib_transport
+    prompt = _transcript_tidy.build_tidy_prompt(matching.text)
+    req = _ai_backend.GenerationRequest(model=cfg.default_model, prompt=prompt)
+    try:
+        resp = backend.generate(cfg, req, transport=transport)
+    except _ai_backend.BackendUnavailable as e:
+        raise HTTPException(502, f"AI backend unavailable: {e}")
+    except _ai_backend.BackendError as e:
+        raise HTTPException(500, str(e))
+
+    paragraphs = _transcript_tidy.parse_tidied_paragraphs(resp.text)
+    if not paragraphs:
+        raise HTTPException(
+            502,
+            "AI backend returned no usable paragraphs. "
+            "Try again or pick a different run.",
+        )
+
+    old_words = _transcript_tidy._flatten_old_words(matching, segments)
+    para_words = _transcript_tidy.realign_words(
+        old_words, paragraphs,
+        fallback_start=matching.start,
+        fallback_end=matching.end,
+    )
+    new_segs = _transcript_tidy.assemble_tidied_segments(
+        paragraphs=paragraphs,
+        paragraph_words=para_words,
+        speaker=matching.speaker,
+        fallback_start=matching.start,
+        fallback_end=matching.end,
+    )
+    return JSONResponse({
+        "raw_text": matching.text,
+        "paragraphs": paragraphs,
+        "segments": [s.to_dict() for s in new_segs],
+        "model": resp.model,
+        "speaker": matching.speaker,
+        "segment_indices": list(matching.segment_indices),
+    })
+
+
+@app.post("/api/job/{job_id}/tidy/apply")
+async def apply_tidy_run_endpoint(job_id: str, request: Request) -> JSONResponse:
+    """Splice the user-approved paragraphs into the transcript.
+
+    Body:
+        {
+          "segment_indices": [int, ...],           # the run that was tidied
+          "paragraphs": ["para1", ...],            # potentially edited by the user
+          "speaker": "SPEAKER_00"                  # for the new segments
+        }
+
+    The server re-runs realignment on the (possibly edited) paragraphs
+    so word timestamps reflect what the user actually accepted, then
+    persists via the same path as ``PUT /transcript``.
+    """
+    _check_job_id(job_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    raw_indices = body.get("segment_indices")
+    paragraphs_raw = body.get("paragraphs")
+    speaker = body.get("speaker")
+    if (
+        not isinstance(raw_indices, list)
+        or not raw_indices
+        or not isinstance(paragraphs_raw, list)
+        or not paragraphs_raw
+        or not isinstance(speaker, str)
+        or not speaker.strip()
+    ):
+        raise HTTPException(
+            400,
+            "segment_indices (list[int]), paragraphs (list[str]), and "
+            "speaker (str) are required.",
+        )
+    try:
+        indices = tuple(int(i) for i in raw_indices)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "segment_indices entries must be integers")
+    paragraphs = [str(p).strip() for p in paragraphs_raw if str(p).strip()]
+    if not paragraphs:
+        raise HTTPException(400, "paragraphs must contain at least one non-empty entry")
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+    payload = _load_job_transcript(job)
+    segments = payload.get("segments") or []
+    runs = _transcript_tidy.group_runs(segments)
+    matching = next((r for r in runs if r.segment_indices == indices), None)
+    if matching is None:
+        raise HTTPException(
+            400,
+            "segment_indices does not match any candidate run; "
+            "the transcript may have changed since preview.",
+        )
+
+    old_words = _transcript_tidy._flatten_old_words(matching, segments)
+    para_words = _transcript_tidy.realign_words(
+        old_words, paragraphs,
+        fallback_start=matching.start,
+        fallback_end=matching.end,
+    )
+    new_segs = _transcript_tidy.assemble_tidied_segments(
+        paragraphs=paragraphs,
+        paragraph_words=para_words,
+        speaker=speaker.strip(),
+        fallback_start=matching.start,
+        fallback_end=matching.end,
+    )
+    if not new_segs:
+        raise HTTPException(400, "No usable segments after assembling tidy output.")
+
+    new_payload = _transcript_tidy.splice_run(
+        payload,
+        segment_indices=matching.segment_indices,
+        new_segments=[s.to_dict() for s in new_segs],
+    )
+    _persist_edited_transcript(job, new_payload)
+    return JSONResponse({
+        "ok": True,
+        "applied_indices": list(matching.segment_indices),
+        "new_segment_count": len(new_segs),
+        "saved_at": datetime.utcnow().isoformat() + "Z",
+    })
+
+
 def _result_from_payload(payload: dict[str, Any], *, input_path: Path) -> TranscriptionResult:
     segs: list[Segment] = []
     speakers_seen: list[str] = []

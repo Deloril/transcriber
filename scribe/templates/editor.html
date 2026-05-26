@@ -345,6 +345,38 @@
       padding: 8px 10px;
       font: inherit;
     }
+    .modal.wide { width: min(960px, 96vw); }
+    .modal .tidy-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-bottom: 8px;
+    }
+    .modal .tidy-grid .col { display: flex; flex-direction: column; }
+    .modal .tidy-grid h4 { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
+    .modal .tidy-grid .raw, .modal .tidy-grid textarea {
+      flex: 1;
+      min-height: 280px;
+      max-height: 50vh;
+      overflow-y: auto;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 10px 12px;
+      font: inherit;
+      font-size: 13px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+    .modal .tidy-grid .raw { color: var(--muted); }
+    .modal .tidy-status {
+      font-size: 12px;
+      color: var(--muted);
+      min-height: 18px;
+      margin-bottom: 6px;
+    }
+    .modal .tidy-status.error { color: var(--err); }
     .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
     .modal .actions button {
       background: var(--panel-2); color: var(--text);
@@ -443,6 +475,7 @@
     <button id="undoBtn" title="Undo (⌘Z)">↶</button>
     <button id="redoBtn" title="Redo (⇧⌘Z)">↷</button>
     <button id="exportBtn" title="Export">Export ▾</button>
+    <button id="tidyBtn" title="Run the local AI to tidy a run of speech (grammar, capitalisation, paragraphs)">✨ Tidy</button>
     <button id="discardMediaBtn" title="Discard the source media file (keeps the transcript)">🗑 Source</button>
     <button id="helpBtn" title="Keyboard shortcuts (?)">?</button>
   </div>
@@ -585,6 +618,7 @@
       <tr><td>Click word</td><td>Jump playback</td></tr>
       <tr><td>Click timestamp</td><td>Jump to start of segment</td></tr>
       <tr><td>Click speaker label</td><td>Reassign segment speaker</td></tr>
+      <tr><td><strong>✨ Tidy</strong> button</td><td>Run the local AI on a run of speech (joins consecutive same-speaker segments, fixes grammar, splits into paragraphs). Side-by-side preview; word timestamps preserved.</td></tr>
     </table>
     <div class="actions">
       <button id="helpClose" class="primary">Close</button>
@@ -605,6 +639,32 @@
     </div>
     <div class="actions">
       <button id="exportCloseBtn" class="primary">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Tidy speech modal — side-by-side raw vs LLM-proposed text. The user
+     can accept (replaces the run with one segment per paragraph), edit the
+     proposed text first, skip to the next run, or reject the whole pass. -->
+<div id="tidyModal" class="modal-overlay">
+  <div class="modal wide">
+    <h3 id="tidyTitle">Tidy speech with AI</h3>
+    <div id="tidyStatus" class="tidy-status">Looking for runs to tidy…</div>
+    <div class="tidy-grid">
+      <div class="col">
+        <h4>Original (<span id="tidyRunMeta">—</span>)</h4>
+        <div id="tidyRaw" class="raw"></div>
+      </div>
+      <div class="col">
+        <h4>Proposed (editable — paragraphs separated by a blank line)</h4>
+        <textarea id="tidyProposed" rows="12" placeholder="Click 'Suggest' to ask the local AI for a clean version."></textarea>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="tidyClose">Close</button>
+      <button id="tidySkip">Skip this run</button>
+      <button id="tidySuggest">Suggest</button>
+      <button id="tidyAccept" class="primary">Accept &amp; replace</button>
     </div>
   </div>
 </div>
@@ -1924,6 +1984,194 @@ import {
     $("exportModal").classList.add("open");
   });
   $("exportCloseBtn").addEventListener("click", () => $("exportModal").classList.remove("open"));
+
+  // ---- Grammar bot: tidy speech with the local AI ----
+  //
+  // The flow:
+  //   1. Open the modal → fetch /tidy/runs.
+  //   2. Park on the first run; user clicks "Suggest" to call the LLM.
+  //   3. The proposed text is editable; user can accept (POST /apply) or
+  //      skip to the next run.
+  //   4. On accept, reload the transcript so the editor sees the splice.
+  //
+  // We always save pending edits before calling /apply — the apply path
+  // splices indices that are computed against on-disk content.
+  let TIDY_RUNS = [];
+  let TIDY_IDX = 0;
+  let TIDY_CURRENT = null;   // the run object currently shown
+  let TIDY_LAST_PREVIEW = null;  // {paragraphs, raw_text, model, ...}
+
+  function setTidyStatus(msg, isError = false) {
+    const el = $("tidyStatus");
+    el.textContent = msg || "";
+    el.classList.toggle("error", !!isError);
+  }
+  function fmtRunMeta(run) {
+    if (!run) return "—";
+    const dur = (run.end - run.start);
+    return `${speakerLabel(run.speaker)} · ${fmtClock(run.start)}–${fmtClock(run.end)} · ${run.word_count} words · ${dur.toFixed(1)}s`;
+  }
+  function showCurrentRun() {
+    const run = TIDY_RUNS[TIDY_IDX] || null;
+    TIDY_CURRENT = run;
+    TIDY_LAST_PREVIEW = null;
+    $("tidyProposed").value = "";
+    $("tidyAccept").disabled = true;
+    if (!run) {
+      $("tidyRaw").textContent = "";
+      $("tidyRunMeta").textContent = "—";
+      setTidyStatus("No more runs to tidy.");
+      $("tidySuggest").disabled = true;
+      $("tidySkip").disabled = true;
+      return;
+    }
+    $("tidyRaw").textContent = run.text;
+    $("tidyRunMeta").textContent = fmtRunMeta(run);
+    $("tidySuggest").disabled = false;
+    $("tidySkip").disabled = (TIDY_IDX >= TIDY_RUNS.length - 1);
+    setTidyStatus(`Run ${TIDY_IDX + 1} of ${TIDY_RUNS.length}. Click Suggest to ask the local AI.`);
+  }
+  async function openTidy() {
+    if (dirty) {
+      try { await save(); } catch (e) {
+        toast("Could not save before tidy: " + (e.message || e));
+        return;
+      }
+    }
+    $("tidyModal").classList.add("open");
+    setTidyStatus("Looking for runs to tidy…");
+    $("tidyRaw").textContent = "";
+    $("tidyProposed").value = "";
+    $("tidySuggest").disabled = true;
+    $("tidySkip").disabled = true;
+    $("tidyAccept").disabled = true;
+    try {
+      const r = await fetch(`/api/job/${JOB_ID}/tidy/runs`);
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      const body = await r.json();
+      TIDY_RUNS = body.runs || [];
+      TIDY_IDX = 0;
+      if (!TIDY_RUNS.length) {
+        setTidyStatus("Nothing to tidy: no runs of the same speaker span more than one segment.");
+        return;
+      }
+      showCurrentRun();
+    } catch (e) {
+      setTidyStatus(`Couldn't load runs: ${e.message || e}`, true);
+    }
+  }
+  async function suggestTidy() {
+    if (!TIDY_CURRENT) return;
+    setTidyStatus("Asking the local AI… this can take a few seconds.");
+    $("tidySuggest").disabled = true;
+    $("tidyAccept").disabled = true;
+    try {
+      const r = await fetch(`/api/job/${JOB_ID}/tidy/preview`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({segment_indices: TIDY_CURRENT.segment_indices}),
+      });
+      if (!r.ok) {
+        let detail = {};
+        try { detail = await r.json(); } catch (e) {}
+        const msg = (detail && detail.detail) ||
+                    (typeof detail === "string" ? detail : `HTTP ${r.status}`);
+        throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+      }
+      const body = await r.json();
+      TIDY_LAST_PREVIEW = body;
+      // Render paragraphs separated by blank lines so the user can edit
+      // them like prose. The Accept button re-splits on blank lines server-side.
+      $("tidyProposed").value = (body.paragraphs || []).join("\n\n");
+      $("tidyAccept").disabled = false;
+      setTidyStatus(`Suggested by ${body.model || "model"}. Edit if needed, then Accept.`);
+    } catch (e) {
+      setTidyStatus(`Couldn't get a suggestion: ${e.message || e}`, true);
+    } finally {
+      $("tidySuggest").disabled = false;
+    }
+  }
+  async function acceptTidy() {
+    if (!TIDY_CURRENT) return;
+    const text = $("tidyProposed").value || "";
+    // Re-split paragraphs locally so the server gets exactly what the user
+    // sees. Empty trailing/leading blank lines are dropped.
+    const paragraphs = text.split(/\n\s*\n/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (!paragraphs.length) {
+      setTidyStatus("Type at least one paragraph before accepting.", true);
+      return;
+    }
+    $("tidyAccept").disabled = true;
+    setTidyStatus("Applying…");
+    try {
+      const r = await fetch(`/api/job/${JOB_ID}/tidy/apply`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          segment_indices: TIDY_CURRENT.segment_indices,
+          paragraphs,
+          speaker: TIDY_CURRENT.speaker,
+        }),
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      // The apply endpoint already wrote sidecars + persisted the job;
+      // reload the transcript so the editor renders the spliced version.
+      const tr = await fetch(`/api/job/${JOB_ID}/transcript`);
+      if (!tr.ok) throw new Error("Saved, but couldn't reload transcript");
+      const fresh = await tr.json();
+      // Match the load path used by bootstrap(): mirror state + render.
+      pushUndo();
+      state = fresh;
+      // Sync derived speaker list (the original load path does this).
+      if (!Array.isArray(state.speakers) || !state.speakers.length) {
+        const seen = [];
+        for (const s of state.segments || []) if (!seen.includes(s.speaker)) seen.push(s.speaker);
+        state.speakers = seen;
+      }
+      lastSavedSnapshot = snapshot();
+      dirty = false;
+      setSaveStatus("saved", "Saved");
+      render();
+      // Drop the run we just applied; refresh the candidate list because
+      // segment indices have shifted.
+      try {
+        const fresher = await fetch(`/api/job/${JOB_ID}/tidy/runs`);
+        const runsBody = await fresher.json();
+        TIDY_RUNS = runsBody.runs || [];
+        TIDY_IDX = 0;
+      } catch (e) {
+        TIDY_RUNS = [];
+      }
+      if (!TIDY_RUNS.length) {
+        showCurrentRun();
+        toast("Tidy applied. No more runs to tidy.");
+      } else {
+        showCurrentRun();
+        toast("Tidy applied — moved to the next run.");
+      }
+    } catch (e) {
+      setTidyStatus(`Couldn't apply: ${e.message || e}`, true);
+      $("tidyAccept").disabled = false;
+    }
+  }
+  function skipTidy() {
+    if (TIDY_IDX >= TIDY_RUNS.length - 1) return;
+    TIDY_IDX += 1;
+    showCurrentRun();
+  }
+  $("tidyBtn").addEventListener("click", openTidy);
+  $("tidyClose").addEventListener("click", () => $("tidyModal").classList.remove("open"));
+  $("tidySuggest").addEventListener("click", suggestTidy);
+  $("tidyAccept").addEventListener("click", acceptTidy);
+  $("tidySkip").addEventListener("click", skipTidy);
 
   // Click outside modal closes it
   document.querySelectorAll(".modal-overlay").forEach(m => {
