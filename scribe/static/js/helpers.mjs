@@ -2579,6 +2579,120 @@ export function buildMatrixPayload({
 }
 
 
+// Build the GET URL for the F6.3 matrix-export endpoint
+//   GET /api/projects/<projectId>/matrices/<kind>/export?format=...&...
+//
+// Mirrors `buildMatrixPayload` so the form on the queries page can
+// drive both endpoints without re-deriving its state. The kind goes
+// into the path; everything else is a query-string parameter so a
+// browser can navigate to the URL directly (or assign it to an
+// `<a download>` href).
+//
+// Inputs (all optional unless flagged):
+//   * projectId      — REQUIRED.
+//   * kind           — REQUIRED. One of code-by-source / code-by-code /
+//                      code-by-attribute.
+//   * format         — REQUIRED. csv | xlsx (case-insensitive; aliases
+//                      excel / spreadsheet / xls accepted by the
+//                      server but we don't pre-translate them here).
+//   * scope          — only emitted when kind === "code-by-code".
+//   * maxGap         — only emitted when kind === "code-by-code"
+//                      AND scope === "paragraph" AND a finite > 0.
+//   * attributeKey   — REQUIRED for kind === "code-by-attribute".
+//   * attributeKind  — defaults to "source" for code-by-attribute.
+//   * includeMissing — defaults to true for code-by-attribute.
+//   * compact        — defaults to true on the server; emitted only
+//                      when explicitly false.
+//   * useTitles      — defaults to true on the server; emitted only
+//                      when explicitly false.
+//   * includeTotals  — defaults to true on the server; emitted only
+//                      when explicitly false.
+//
+// Returns the full path-and-query URL as a string. Throws
+// `Error` for missing or unknown kind / format / projectId, and for
+// missing attributeKey when kind === "code-by-attribute".
+export function buildMatrixExportUrl({
+  projectId,
+  kind,
+  format,
+  scope = "",
+  maxGap = 0,
+  attributeKey = "",
+  attributeKind = "source",
+  includeMissing = true,
+  compact = true,
+  useTitles = true,
+  includeTotals = true,
+} = {}) {
+  if (!projectId || typeof projectId !== "string") {
+    throw new Error("buildMatrixExportUrl: projectId is required");
+  }
+  if (!kind) {
+    throw new Error("buildMatrixExportUrl: kind is required");
+  }
+  const allowedKinds = new Set([
+    "code-by-source", "code-by-code", "code-by-attribute",
+  ]);
+  if (!allowedKinds.has(kind)) {
+    throw new Error(`buildMatrixExportUrl: unknown kind ${kind}`);
+  }
+  const fmt = String(format || "").trim().toLowerCase();
+  if (!fmt) {
+    throw new Error("buildMatrixExportUrl: format is required");
+  }
+  // Mirror the server-side alias set in
+  // scribe.matrix_export.normalise_format so the JS layer can fail
+  // fast on a typo without round-tripping to the network.
+  const allowedFormats = new Set([
+    "csv", "xlsx", "xls", "excel", "spreadsheet",
+  ]);
+  if (!allowedFormats.has(fmt)) {
+    throw new Error(`buildMatrixExportUrl: unknown format ${format}`);
+  }
+
+  const params = new URLSearchParams();
+  params.set("format", fmt);
+
+  if (kind === "code-by-code") {
+    if (scope) params.set("scope", scope);
+    if (scope === "paragraph"
+        && typeof maxGap === "number"
+        && maxGap > 0
+        && Number.isFinite(maxGap)) {
+      params.set("max_gap", String(maxGap));
+    }
+  }
+
+  if (kind === "code-by-attribute") {
+    const k = String(attributeKey || "").trim();
+    if (!k) {
+      throw new Error(
+        "buildMatrixExportUrl: attributeKey is required for code-by-attribute",
+      );
+    }
+    params.set("attribute_key", k);
+    params.set("attribute_kind", attributeKind || "source");
+    params.set("include_missing", includeMissing ? "1" : "0");
+  }
+
+  if (compact === false) {
+    params.set("compact", "0");
+  }
+  if (useTitles === false) {
+    params.set("use_titles", "0");
+  }
+  if (includeTotals === false) {
+    params.set("include_totals", "0");
+  }
+
+  return (
+    `/api/projects/${encodeURIComponent(projectId)}`
+    + `/matrices/${encodeURIComponent(kind)}/export?`
+    + params.toString()
+  );
+}
+
+
 // Render a Matrix.to_dict() payload as a 2-D array suitable for the
 // queries page's <table> render. Pure logic so the row/column shape
 // is testable without a DOM.

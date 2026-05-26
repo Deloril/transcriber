@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildMatrixExportUrl,
   buildMatrixPayload,
   matrixToTable,
 } from "../../scribe/static/js/helpers.mjs";
@@ -202,5 +203,155 @@ describe("matrixToTable", () => {
     const t = matrixToTable(m);
     expect(t.body[0]).toEqual(["Code one", 7, 0]);
     expect(t.body[1]).toEqual(["Code two", 0, 0]);
+  });
+});
+
+
+// --------------------------------------------------------------------------- //
+// buildMatrixExportUrl (F6.3) — turns the same form state into the GET URL
+// for the matrix export endpoint.
+// --------------------------------------------------------------------------- //
+
+describe("buildMatrixExportUrl", () => {
+  it("requires a projectId", () => {
+    expect(() => buildMatrixExportUrl({ kind: "code-by-source", format: "csv" }))
+      .toThrow(/projectId/);
+  });
+
+  it("requires a kind", () => {
+    expect(() => buildMatrixExportUrl({ projectId: PID, format: "csv" }))
+      .toThrow(/kind/);
+  });
+
+  it("rejects unknown kinds", () => {
+    expect(() => buildMatrixExportUrl({
+      projectId: PID, kind: "bogus", format: "csv",
+    })).toThrow(/unknown kind/);
+  });
+
+  it("requires a format", () => {
+    expect(() => buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-source",
+    })).toThrow(/format/);
+  });
+
+  it("rejects unknown formats", () => {
+    expect(() => buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-source", format: "pdf",
+    })).toThrow(/unknown format/);
+  });
+
+  it("accepts the documented format aliases", () => {
+    for (const fmt of ["csv", "xlsx", "xls", "excel", "spreadsheet"]) {
+      const url = buildMatrixExportUrl({
+        projectId: PID, kind: "code-by-source", format: fmt,
+      });
+      expect(url).toContain(`format=${fmt}`);
+    }
+  });
+
+  it("normalises format to lowercase", () => {
+    const url = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-source", format: "XLSX",
+    });
+    expect(url).toContain("format=xlsx");
+  });
+
+  it("encodes the project id and kind into the path", () => {
+    const url = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-code", format: "csv",
+    });
+    expect(url).toBe(
+      `/api/projects/${PID}/matrices/code-by-code/export?format=csv`,
+    );
+  });
+
+  it("emits scope only for code-by-code", () => {
+    const cbc = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-code", format: "csv", scope: "segment",
+    });
+    expect(cbc).toContain("scope=segment");
+    const cbs = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-source", format: "csv", scope: "segment",
+    });
+    expect(cbs).not.toContain("scope=");
+  });
+
+  it("emits max_gap only when scope is paragraph and value > 0", () => {
+    const url = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-code", format: "csv",
+      scope: "paragraph", maxGap: 1.5,
+    });
+    expect(url).toContain("scope=paragraph");
+    expect(url).toContain("max_gap=1.5");
+
+    const noGap = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-code", format: "csv",
+      scope: "paragraph", maxGap: 0,
+    });
+    expect(noGap).not.toContain("max_gap=");
+
+    const segGap = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-code", format: "csv",
+      scope: "segment", maxGap: 5,
+    });
+    expect(segGap).not.toContain("max_gap=");
+  });
+
+  it("requires attributeKey for code-by-attribute", () => {
+    expect(() => buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-attribute", format: "csv",
+    })).toThrow(/attributeKey/);
+    expect(() => buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-attribute", format: "csv", attributeKey: "  ",
+    })).toThrow(/attributeKey/);
+  });
+
+  it("emits attribute fields for code-by-attribute", () => {
+    const url = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-attribute", format: "csv",
+      attributeKey: "setting",
+      attributeKind: "participant",
+      includeMissing: false,
+    });
+    expect(url).toContain("attribute_key=setting");
+    expect(url).toContain("attribute_kind=participant");
+    expect(url).toContain("include_missing=0");
+  });
+
+  it("URL-encodes attribute keys with special characters", () => {
+    const url = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-attribute", format: "csv",
+      attributeKey: "year of study",
+    });
+    // URLSearchParams uses + for spaces; that's also valid for query strings.
+    expect(url).toMatch(/attribute_key=year(\+|%20)of(\+|%20)study/);
+  });
+
+  it("emits compact only when explicitly false", () => {
+    const def = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-source", format: "csv",
+    });
+    expect(def).not.toContain("compact=");
+
+    const off = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-source", format: "csv", compact: false,
+    });
+    expect(off).toContain("compact=0");
+  });
+
+  it("emits use_titles / include_totals only when explicitly false", () => {
+    const def = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-source", format: "csv",
+    });
+    expect(def).not.toContain("use_titles=");
+    expect(def).not.toContain("include_totals=");
+
+    const off = buildMatrixExportUrl({
+      projectId: PID, kind: "code-by-source", format: "csv",
+      useTitles: false, includeTotals: false,
+    });
+    expect(off).toContain("use_titles=0");
+    expect(off).toContain("include_totals=0");
   });
 });

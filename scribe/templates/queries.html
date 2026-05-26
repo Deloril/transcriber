@@ -365,6 +365,36 @@
     display: block; font-size: 11.5px; color: var(--muted);
     margin-top: 1px;
   }
+
+  /* F6.3: matrix-export dropdown (sits inside the matrix panel's
+     control row). Same visual contract as the rr-export menu but
+     left-aligned because it lives inline with the form fields and
+     opening rightward would clip on narrow viewports. */
+  .mx-export-wrap { position: relative; display: inline-block; }
+  .mx-export-menu {
+    display: none;
+    position: absolute; top: 100%; left: 0;
+    margin-top: 4px; min-width: 280px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.18);
+    padding: 4px; z-index: 50;
+  }
+  .mx-export-menu.open { display: block; }
+  .mx-export-item {
+    display: block; padding: 8px 10px;
+    border-radius: 6px;
+    color: var(--text); text-decoration: none;
+    font-size: 13px;
+  }
+  .mx-export-item:hover, .mx-export-item:focus {
+    background: var(--panel-2); outline: none;
+  }
+  .mx-export-item .mx-export-hint {
+    display: block; font-size: 11.5px; color: var(--muted);
+    margin-top: 1px;
+  }
 {% endblock %}
 
 {% block body %}
@@ -493,6 +523,58 @@
       <label>&nbsp;</label>
       <button id="mxRun" class="btn" data-test-id="mx-run">Show matrix</button>
     </div>
+
+    {#
+      F6.3 — Matrix download dropdown.
+
+      Two direct download targets — CSV / Excel (XLSX) — both pointing
+      at /api/projects/<pid>/matrices/<kind>/export?format=...&...
+      The hrefs are rebuilt by JS whenever the form changes (via
+      ``buildMatrixExportUrl``) so the URL always reflects the current
+      kind / scope / attribute settings. The links carry ``download``
+      so the browser saves rather than rendering inline. Same open /
+      close / outside-click / Escape pattern as the F6.2 retrieval
+      report menu, namespaced ``mx-export-`` so the two can co-exist.
+    #}
+    <div class="field">
+      <label>&nbsp;</label>
+      <span class="mx-export-wrap" data-test-feature="F6.3">
+        <button
+          type="button"
+          class="btn secondary"
+          id="mx-export-btn"
+          data-test-id="mx-export-btn"
+          title="Download the matrix as CSV / Excel"
+          aria-haspopup="menu"
+          aria-expanded="false"
+        >📥 Download ▾</button>
+        <div
+          class="mx-export-menu"
+          id="mx-export-menu"
+          role="menu"
+          aria-label="Export matrix"
+        >
+          <a
+            role="menuitem"
+            class="mx-export-item"
+            id="mx-export-csv"
+            data-test-id="mx-export-csv"
+            data-fmt="csv"
+            href="#"
+            download
+          >CSV <span class="mx-export-hint">spreadsheet — RFC 4180</span></a>
+          <a
+            role="menuitem"
+            class="mx-export-item"
+            id="mx-export-xlsx"
+            data-test-id="mx-export-xlsx"
+            data-fmt="xlsx"
+            href="#"
+            download
+          >Excel (XLSX) <span class="mx-export-hint">opens in Excel / LibreOffice</span></a>
+        </div>
+      </span>
+    </div>
   </div>
 
   <div class="mx-results" id="mxResults">
@@ -536,6 +618,7 @@
 // between the runtime path and the test path.
 import {
   buildQueryPayload,
+  buildMatrixExportUrl,
   buildMatrixPayload,
   buildSavedQueryPayload,
   formatSavedQueryRunSummary,
@@ -896,6 +979,123 @@ document.getElementById("mxKind").addEventListener("change", refreshMatrixContro
 document.getElementById("mxScope").addEventListener("change", refreshMatrixControls);
 document.getElementById("mxRun").addEventListener("click", runMatrix);
 refreshMatrixControls();
+
+
+// ============================================================ //
+// F6.3 — Matrix download dropdown wiring                       //
+// ============================================================ //
+//
+// Rebuilds the CSV / XLSX <a download> hrefs whenever the matrix form
+// state changes so a click always fetches the matrix the user can
+// see in the panel above. The kind / scope / attribute fields are
+// the only inputs that affect the URL — Use-current-query is *not*
+// wired through to the export endpoint (the GET URL surface omits
+// the F3.5 pre-filter; documented on the endpoint).
+
+function readMatrixExportOpts() {
+  const kind = document.getElementById("mxKind").value;
+  const scope = document.getElementById("mxScope").value;
+  const maxGap = Number(document.getElementById("mxMaxGap").value || 0);
+  const attrKind = document.getElementById("mxAttrKind").value;
+  const attrKey = document.getElementById("mxAttrKey").value;
+  const compact = document.getElementById("mxCompact").checked;
+  return {
+    projectId: PROJECT_ID,
+    kind, scope, maxGap,
+    attributeKey: attrKey,
+    attributeKind: attrKind,
+    compact,
+  };
+}
+
+function refreshMatrixExportLinks() {
+  const csvA = document.getElementById("mx-export-csv");
+  const xlsxA = document.getElementById("mx-export-xlsx");
+  if (!csvA || !xlsxA) return;
+  const base = readMatrixExportOpts();
+  // code-by-attribute requires an attribute_key; when the user hasn't
+  // typed one yet the helper would throw. Disable the menu items
+  // instead of crashing — the click handler stays inert.
+  const disabled = (
+    base.kind === "code-by-attribute"
+    && !String(base.attributeKey || "").trim()
+  );
+  for (const a of [csvA, xlsxA]) {
+    if (disabled) {
+      a.setAttribute("aria-disabled", "true");
+      a.setAttribute("href", "#");
+      a.dataset.disabled = "1";
+    } else {
+      a.removeAttribute("aria-disabled");
+      delete a.dataset.disabled;
+    }
+  }
+  if (disabled) return;
+  try {
+    csvA.href = buildMatrixExportUrl({ ...base, format: "csv" });
+    xlsxA.href = buildMatrixExportUrl({ ...base, format: "xlsx" });
+  } catch (_e) {
+    // Bad form state — leave the hrefs at "#" and surface no error;
+    // the helper's exception is the contract for "user hasn't picked
+    // enough yet".
+    csvA.href = "#";
+    xlsxA.href = "#";
+  }
+}
+
+function setupMatrixExportMenu() {
+  const wrap = document.querySelector(".mx-export-wrap");
+  if (!wrap) return;
+  const btn = document.getElementById("mx-export-btn");
+  const menu = document.getElementById("mx-export-menu");
+  if (!btn || !menu) return;
+
+  function close() {
+    menu.classList.remove("open");
+    btn.setAttribute("aria-expanded", "false");
+  }
+  function open() {
+    refreshMatrixExportLinks();
+    menu.classList.add("open");
+    btn.setAttribute("aria-expanded", "true");
+  }
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (menu.classList.contains("open")) close(); else open();
+  });
+  document.addEventListener("click", (e) => {
+    if (!wrap.contains(e.target)) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+  });
+  // Block disabled clicks (no attribute_key for code-by-attribute).
+  for (const a of menu.querySelectorAll(".mx-export-item")) {
+    a.addEventListener("click", (e) => {
+      if (a.dataset.disabled === "1" || a.getAttribute("href") === "#") {
+        e.preventDefault();
+      }
+    });
+  }
+}
+
+// Live-refresh the export URLs whenever any input that influences
+// them changes. The menu rebuilds on open as a belt-and-braces
+// guard, but doing it eagerly keeps the URLs hover-readable for
+// power users who copy the link.
+const _mxExportInputs = [
+  "mxKind", "mxScope", "mxMaxGap",
+  "mxAttrKind", "mxAttrKey", "mxCompact",
+];
+for (const id of _mxExportInputs) {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener("change", refreshMatrixExportLinks);
+    el.addEventListener("input", refreshMatrixExportLinks);
+  }
+}
+setupMatrixExportMenu();
+refreshMatrixExportLinks();
 
 
 // ============================================================ //

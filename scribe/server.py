@@ -2421,6 +2421,306 @@ async def run_project_matrix_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Matrix exports (F6.3) — CSV / XLSX download surface.
+#
+# F3.6 ships the pure builders + the JSON /matrices/run endpoint above
+# that powers the queries page's matrix panel. F6.3's pure module
+# (:mod:`scribe.matrix_export`) ships CSV + XLSX renderers. This
+# endpoint wires the two together as a download URL the browser can
+# follow directly — assigned to the F6.3 download menu in
+# ``queries.html``:
+#
+#   GET /api/projects/<pid>/matrices/<kind>/export?format=csv|xlsx&...
+#
+# Path: ``kind`` is one of ``code-by-source`` / ``code-by-code`` /
+# ``code-by-attribute`` (aliases like ``frequency`` / ``cooccurrence`` /
+# ``cross-tab`` are accepted via ``normalise_matrix_kind``).
+#
+# Query params:
+#
+#   format         csv | xlsx | xls | excel | spreadsheet  (default csv)
+#   scope          source | segment | paragraph             (code-by-code)
+#   max_gap        float                                    (code-by-code, paragraph)
+#   attribute_key  str                                      (code-by-attribute, required)
+#   attribute_kind source | participant                     (code-by-attribute)
+#   include_missing 0 | 1 | true | false                    (code-by-attribute)
+#   compact         0 | 1                                   (drop empty rows / cols)
+#   use_titles      0 | 1                                   (use display titles)
+#   include_totals  0 | 1                                   (footer / right-edge totals)
+#
+# This surface deliberately does **not** support the F3.5 ``query``
+# pre-filter (the JSON endpoint above does). The reasoning: a download
+# URL has to be navigable from a browser address bar / ``<a download>``
+# anchor, and serialising a multi-clause Query into a query string is
+# fiddly. Researchers who want a filtered export run the query first,
+# then export the resulting Matrix from the panel. If we ever need
+# server-side filtering for export we can add ``query_id`` referencing
+# a saved query (F3.7).
+# --------------------------------------------------------------------------- #
+
+
+from . import matrix_export as _matrix_export  # noqa: E402
+
+
+def _matrix_query_bool(value: object, default: bool) -> bool:
+    """Coerce a query-string boolean (``"1"`` / ``"true"`` / ``"on"``
+    / ``"yes"``) into a Python ``bool``.
+
+    Treats ``None`` and empty strings as "use the default". Mirrors
+    :func:`_matrix_payload_bool` but for the GET URL surface where
+    everything arrives as a string.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if not s:
+        return default
+    if s in {"1", "true", "yes", "on"}:
+        return True
+    if s in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _build_matrix_for_export(
+    project_id: str,
+    *,
+    kind: str,
+    scope: str,
+    max_gap: float,
+    attribute_key: str,
+    attribute_kind: str,
+    include_missing: bool,
+    compact: bool,
+):
+    """Compute a matrix for the F6.3 export endpoint.
+
+    Mirrors the project / codes / sources / applications hydration
+    chain that ``run_project_matrix_endpoint`` uses, minus the
+    optional F3.5 query pre-filter. Caller must hold ``PROJECTS_LOCK``.
+
+    Returns the :class:`scribe.matrix.Matrix` (already compacted if
+    requested). Raises :class:`HTTPException` 400 / 404 for the same
+    failure modes the JSON endpoint exposes so the export surface
+    speaks the same dialect.
+    """
+    _project_must_exist(project_id)
+    codes = _codes.list_codes(_projects_root(), project_id)
+    sources = _sources.list_sources(_projects_root(), project_id)
+    all_apps = _applications.list_applications(
+        _projects_root(), project_id
+    )
+
+    # Same speaker-map / segments cache the run endpoint binds, so
+    # speaker / start / end resolve consistently across the two
+    # paths.
+    sources_by_id = {s.id: s for s in sources}
+    smap_cache: dict[str, _speaker_map.SpeakerMap] = {}
+    seg_cache: dict[str, "list[dict] | None"] = {}
+
+    def _segments_loader(sid: str):
+        if sid in seg_cache:
+            return seg_cache[sid]
+        src = sources_by_id.get(sid)
+        if src is None:
+            try:
+                src = _sources.load_source(
+                    _projects_root(), project_id, sid
+                )
+                sources_by_id[sid] = src
+            except FileNotFoundError:
+                seg_cache[sid] = None
+                return None
+            except _projects.ProjectValidationError:
+                seg_cache[sid] = None
+                return None
+        segs = _load_segments_for_source_speaker_map(src)
+        seg_cache[sid] = segs
+        return segs
+
+    def _smap_for(sid: str) -> _speaker_map.SpeakerMap:
+        if sid not in smap_cache:
+            try:
+                smap_cache[sid] = _speaker_map.load_or_empty_speaker_map(
+                    _projects_root(), project_id, sid
+                )
+            except Exception:
+                smap_cache[sid] = _speaker_map.SpeakerMap.new(
+                    project_id=project_id, source_id=sid
+                )
+        return smap_cache[sid]
+
+    # Project Application objects → matrix-builder dict shape.
+    app_dicts: list[dict] = []
+    for a in all_apps:
+        segs = _segments_loader(a.source_id)
+        d = _query_runtime.application_to_query_dict(a, segs)
+        if attribute_kind == "participant":
+            smap = _smap_for(a.source_id)
+            pid = smap.participant_for(d.get("speaker", "") or "")
+            if pid:
+                d["participant_id"] = pid
+        app_dicts.append(d)
+
+    try:
+        if kind == "code-by-source":
+            m = _matrix.code_by_source_matrix(
+                applications=app_dicts,
+                codes=codes,
+                sources=sources,
+            )
+        elif kind == "code-by-code":
+            m = _matrix.code_by_code_matrix(
+                applications=app_dicts,
+                codes=codes,
+                scope=scope,
+                max_gap=max_gap,
+            )
+        else:  # code-by-attribute
+            if attribute_kind == "source":
+                m = _matrix.code_by_attribute_matrix(
+                    applications=app_dicts,
+                    codes=codes,
+                    attribute_key=attribute_key,
+                    attribute_kind="source",
+                    sources=sources,
+                    include_missing=include_missing,
+                )
+            else:
+                participants = _participants.list_participants(
+                    _projects_root(), project_id
+                )
+                m = _matrix.code_by_attribute_matrix(
+                    applications=app_dicts,
+                    codes=codes,
+                    attribute_key=attribute_key,
+                    attribute_kind="participant",
+                    participants=participants,
+                    speaker_maps=smap_cache,
+                    include_missing=include_missing,
+                )
+    except _matrix.MatrixError as e:
+        raise HTTPException(400, str(e))
+    except _projects.ProjectValidationError as e:
+        raise HTTPException(400, str(e))
+
+    if compact:
+        m = m.compact()
+
+    return m
+
+
+@app.get(
+    "/api/projects/{project_id}/matrices/{kind}/export"
+)
+async def export_project_matrix_endpoint(
+    project_id: str,
+    kind: str,
+    format: str = "csv",
+    scope: str = "source",
+    max_gap: float = 0.0,
+    attribute_key: str = "",
+    attribute_kind: str = "source",
+    include_missing: str | None = None,
+    compact: str | None = None,
+    use_titles: str | None = None,
+    include_totals: str | None = None,
+) -> Response:
+    """Download a matrix view as CSV / XLSX (F6.3).
+
+    See the section comment above for the full URL contract. Errors:
+
+      * 400 — unknown ``kind`` / ``format`` / ``scope`` / ``attribute_kind``,
+              missing ``attribute_key`` for ``code-by-attribute``, or
+              any :class:`scribe.matrix.MatrixError` from the builder.
+      * 404 — project does not exist.
+      * 200 — matrix exported (including the empty-matrix case; the
+              renderers produce a header-only CSV / a one-cell XLSX
+              shell).
+    """
+    _check_project_id(project_id)
+    try:
+        canonical_kind = _matrix_export.normalise_matrix_kind(kind)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    try:
+        fmt = _matrix_export.normalise_format(format)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    scope_norm = (scope or "source").strip().lower() or "source"
+    attribute_kind_norm = (
+        (attribute_kind or "source").strip().lower() or "source"
+    )
+    if attribute_kind_norm not in ("source", "participant"):
+        raise HTTPException(
+            400, "'attribute_kind' must be 'source' or 'participant'"
+        )
+
+    attribute_key_norm = (attribute_key or "").strip()
+    if (
+        canonical_kind == "code-by-attribute"
+        and not attribute_key_norm
+    ):
+        raise HTTPException(
+            400, "'attribute_key' is required for 'code-by-attribute'"
+        )
+
+    include_missing_b = _matrix_query_bool(include_missing, True)
+    compact_b = _matrix_query_bool(compact, True)
+    use_titles_b = _matrix_query_bool(use_titles, True)
+    include_totals_b = _matrix_query_bool(include_totals, True)
+
+    try:
+        max_gap_f = float(max_gap or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "'max_gap' must be a number")
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(
+                _projects_root(), project_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+
+        m = _build_matrix_for_export(
+            project_id,
+            kind=canonical_kind,
+            scope=scope_norm,
+            max_gap=max_gap_f,
+            attribute_key=attribute_key_norm,
+            attribute_kind=attribute_kind_norm,
+            include_missing=include_missing_b,
+            compact=compact_b,
+        )
+
+    payload = _matrix_export.render_matrix(
+        fmt, m,
+        use_titles=use_titles_b,
+        include_totals=include_totals_b,
+    )
+    spec = _matrix_export.EXPORT_FORMATS[fmt]
+    filename = _matrix_export.slugify_matrix_filename(
+        project, fmt, canonical_kind
+    )
+    headers = {
+        # Quote the filename so spaces / non-ASCII never break the
+        # header. We slugify to ASCII upstream, so the simple quoted
+        # form is sufficient — same convention as the F6.1 codebook
+        # export and the F6.2 retrieval report.
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(
+        content=payload,
+        media_type=spec.media_type,
+        headers=headers,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Saved queries (F3.7) — named, re-runnable queries.
 #
 # scribe.saved_queries shipped the pure SavedQuery dataclass + on-disk
