@@ -14,3 +14,4 @@ htmlcov/
 .coverage
 logs/
 .loop-abort
+.loop-pid
