@@ -176,7 +176,10 @@ class TestG1_1ApiCapabilitiesUsesHelperChain:
     ) -> None:
         """Pin the field shape the ``backendStatTile`` JS helper consumes.
         If a future refactor renames any of these the home page tile
-        breaks silently."""
+        breaks silently. ``gfx_target`` and ``distro`` were added by
+        G1.3 to the same payload (ROCm-only / Linux-only respectively);
+        ``backendStatTile`` reads them too, so the pinned key set
+        includes them here."""
         from scribe import engine
         srv, client, _ = server_env
         monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
@@ -185,7 +188,11 @@ class TestG1_1ApiCapabilitiesUsesHelperChain:
 
         body = client.get("/api/capabilities").json()
         gpu = body["gpu"]
-        assert set(gpu.keys()) == {"backend", "device_name", "vram_gb"}
+        # G1.4 fields + G1.3 fields. The G1.4-only subset is still
+        # backwards compatible — the new fields are nullable.
+        assert set(gpu.keys()) == {
+            "backend", "device_name", "vram_gb", "gfx_target", "distro",
+        }
         assert gpu["backend"] == "rocm"
         assert gpu["device_name"] == "Radeon RX 7900 XTX"
         assert gpu["vram_gb"] == 24.0

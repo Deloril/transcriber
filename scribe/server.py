@@ -908,13 +908,38 @@ def _normalise_profile(p: dict[str, Any]) -> dict[str, Any]:
 async def capabilities() -> JSONResponse:
     """Report which optional engines are installed and which GPU backend is
     active. The UI uses this to gate model options (e.g. Parakeet/NeMo
-    isn't supported on AMD ROCm) and to surface backend info."""
+    isn't supported on AMD ROCm) and to surface backend info.
+
+    G1.3: ``gpu.gfx_target`` (only populated when backend == "rocm") and
+    ``gpu.distro`` (populated on Linux regardless of backend) carry the
+    extra triage context support tickets ask for. The CLI surface
+    (``python -m scribe.devices``) prints the same fields; the home page
+    Recording details card surfaces them through ``backendStatTile()``.
+    """
     from .parakeet import nemo_available
-    from .engine import gpu_backend, _gpu_device_name, _cuda_vram_gb
+    from .engine import gpu_backend, _gpu_device_name, _cuda_vram_gb, gpu_arch_name
+    from .devices import _linux_distro
     parakeet_ok, parakeet_err = nemo_available()
     backend = gpu_backend()
     # Parakeet is NVIDIA-only at runtime even if NeMo imports successfully.
     parakeet_runtime_ok = parakeet_ok and backend in ("cuda", "cpu")
+    # G1.3: ROCm-only triage fingerprint. CUDA cards normally have
+    # ``gcnArchName`` empty so this collapses to None there; on MPS / CPU
+    # it's also None. Defensive against any probe failure — never raise.
+    gfx_target: str | None = None
+    if backend == "rocm":
+        try:
+            gfx_target = gpu_arch_name()
+        except Exception:  # noqa: BLE001
+            gfx_target = None
+    # G1.3: Linux distribution pretty-name. Populated on every Linux box
+    # because driver / kernel context matters even on CUDA support tickets;
+    # collapses to None on macOS / Windows / sandboxed FS where
+    # ``/etc/os-release`` is missing.
+    try:
+        distro = _linux_distro()
+    except Exception:  # noqa: BLE001
+        distro = None
     return JSONResponse({
         "parakeet": {
             "available": parakeet_runtime_ok,
@@ -926,6 +951,8 @@ async def capabilities() -> JSONResponse:
             "backend": backend,
             "device_name": _gpu_device_name() or None,
             "vram_gb": round(_cuda_vram_gb(), 1) if backend in ("cuda", "rocm") else None,
+            "gfx_target": gfx_target,
+            "distro": distro,
         },
     })
 

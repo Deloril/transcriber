@@ -91,17 +91,23 @@ export function formatBackendLabel(backend) {
 /**
  * Build the {label, value, sub} stat-tile dict for the active GPU
  * backend. ``gpu`` is the ``capabilities.gpu`` object returned by the
- * server: ``{ backend, device_name, vram_gb }``. Returns ``null`` when
- * ``gpu`` is missing — the renderer should then skip the tile entirely
- * rather than show a placeholder.
+ * server: ``{ backend, device_name, vram_gb, gfx_target?, distro? }``.
+ * Returns ``null`` when ``gpu`` is missing — the renderer should then
+ * skip the tile entirely rather than show a placeholder.
  *
- * Sub-line composition:
+ * Sub-line composition (G1.3 extends G1.4):
  *   - device name (when present)
  *   - VRAM in GB (when reported; only CUDA / ROCm carry this)
+ *   - gfx target (when reported; only ROCm carries this — gfx1100,
+ *     gfx1030, etc. — the canonical identifier in CT2 / ROCm bug
+ *     reports)
+ *   - Linux distro pretty-name (when reported; populated on Linux
+ *     across every backend so support tickets always show the kernel
+ *     / driver context)
  *
- * The sub line collapses to ``null`` when both components are missing
- * (e.g. CPU backend on a machine with no discrete GPU), so the
- * renderer doesn't print an empty " · ".
+ * The sub line collapses to ``null`` when every component is missing
+ * (e.g. CPU backend on a Mac with no discrete GPU), so the renderer
+ * doesn't print an empty " · ".
  *
  * @param {object|null|undefined} gpu
  * @returns {{label: string, value: string, sub: string|null}|null}
@@ -114,6 +120,8 @@ export function backendStatTile(gpu) {
   if (typeof gpu.vram_gb === "number" && isFinite(gpu.vram_gb) && gpu.vram_gb > 0) {
     parts.push(`${gpu.vram_gb} GB VRAM`);
   }
+  if (gpu.gfx_target) parts.push(String(gpu.gfx_target));
+  if (gpu.distro) parts.push(String(gpu.distro));
   return {
     label: "Backend",
     value,
