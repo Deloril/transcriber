@@ -424,8 +424,9 @@ class TestPatchPyannoteLstmDropout:
         # Build a fake module with a fake LSTM child that has dropout > 0.
         import torch.nn as nn
         lstm = nn.LSTM(input_size=8, hidden_size=8, num_layers=2, dropout=0.5)
-        engine._patch_pyannote_lstm_dropout(lstm)
+        n = engine._patch_pyannote_lstm_dropout(lstm)
         assert lstm.dropout == 0.5  # untouched
+        assert n == 0  # G3.1: returns count of patched modules
 
     def test_zeroes_dropout_on_rocm(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
@@ -439,15 +440,179 @@ class TestPatchPyannoteLstmDropout:
                 self.b = nn.LSTM(8, 8, num_layers=3, dropout=0.3)
 
         p = Parent()
-        engine._patch_pyannote_lstm_dropout(p)
+        n = engine._patch_pyannote_lstm_dropout(p)
         assert p.a.dropout == 0.0
         assert p.b.dropout == 0.0
+        assert n == 2  # G3.1: counts the LSTMs that were actually changed
 
     def test_safe_when_pipeline_has_no_modules(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # If the duck-typing fails, the function should swallow the error.
         monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
-        engine._patch_pyannote_lstm_dropout(object())
+        n = engine._patch_pyannote_lstm_dropout(object())
+        assert n == 0
         # No exception = pass.
+
+    def test_walks_pyannote_pipeline_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """G3.1: pyannote.audio Pipelines are *not* nn.Module — they hold
+        the segmentation/embedding sub-models in ``_segmentation`` /
+        ``_embedding`` instance attributes. The patch must recurse into
+        those attributes; otherwise the LSTMs go un-patched and the
+        ROCm MIOpen bug still bites.
+        """
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        import torch.nn as nn
+
+        class _SegModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lstm = nn.LSTM(8, 8, num_layers=2, dropout=0.5)
+
+        class _EmbModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lstm = nn.LSTM(8, 8, num_layers=2, dropout=0.4)
+
+        class _FakePipeline:
+            """Mimics pyannote.audio.core.pipeline.Pipeline: not an nn.Module."""
+            def __init__(self) -> None:
+                self._segmentation = _SegModel()
+                self._embedding = _EmbModel()
+                self._scratch = "unrelated"
+
+        fake = _FakePipeline()
+        # Sanity: the pipeline is NOT an nn.Module — proves the old
+        # ``pipeline.modules()`` walk would have missed both LSTMs.
+        assert not isinstance(fake, nn.Module)
+        n = engine._patch_pyannote_lstm_dropout(fake)
+        assert n == 2
+        assert fake._segmentation.lstm.dropout == 0.0
+        assert fake._embedding.lstm.dropout == 0.0
+
+    def test_walks_dicts_and_lists_of_sub_pipelines(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Some pyannote pipelines stash sub-pipelines in a ``_models`` dict
+        or a list of inferences. The patch should descend into both."""
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        import torch.nn as nn
+
+        class _Inner(nn.Module):
+            def __init__(self, dr: float) -> None:
+                super().__init__()
+                self.lstm = nn.LSTM(8, 8, num_layers=2, dropout=dr)
+
+        class _Outer:
+            def __init__(self) -> None:
+                self._models = {"seg": _Inner(0.5), "emb": _Inner(0.3)}
+                self._inferences = [_Inner(0.2)]
+
+        outer = _Outer()
+        n = engine._patch_pyannote_lstm_dropout(outer)
+        assert n == 3
+        assert outer._models["seg"].lstm.dropout == 0.0
+        assert outer._models["emb"].lstm.dropout == 0.0
+        assert outer._inferences[0].lstm.dropout == 0.0
+
+    def test_idempotent_on_already_patched(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Re-running the patch on an already-zeroed pipeline should
+        report 0 newly-patched modules (otherwise the count is meaningless
+        for triage)."""
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        import torch.nn as nn
+
+        class Parent(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lstm = nn.LSTM(8, 8, num_layers=2, dropout=0.5)
+
+        p = Parent()
+        first = engine._patch_pyannote_lstm_dropout(p)
+        second = engine._patch_pyannote_lstm_dropout(p)
+        assert first == 1
+        assert second == 0
+        assert p.lstm.dropout == 0.0
+
+    def test_handles_cycles(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Don't recurse forever if a pipeline has a back-pointer to itself."""
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        import torch.nn as nn
+
+        class Cycle:
+            def __init__(self) -> None:
+                self.lstm = nn.LSTM(8, 8, num_layers=2, dropout=0.5)
+                self.self_ref: Any = None
+
+        c = Cycle()
+        c.self_ref = c  # cycle
+        n = engine._patch_pyannote_lstm_dropout(c)
+        assert n == 1  # found exactly one LSTM, didn't loop forever
+        assert c.lstm.dropout == 0.0
+
+    def test_does_not_invoke_property_descriptors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """pyannote.audio.Pipeline defines @property accessors that *load*
+        models lazily on access. Walking ``dir(obj)`` would trigger them.
+        We must walk only ``__dict__`` (instance attributes) so a triage
+        helper never has the side effect of force-loading an embedding net.
+        """
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        import torch.nn as nn
+
+        side_effects: list[str] = []
+
+        class WithProperty:
+            def __init__(self) -> None:
+                self.lstm = nn.LSTM(8, 8, num_layers=2, dropout=0.5)
+
+            @property
+            def lazy_embedding(self) -> Any:  # pragma: no cover - test fails if hit
+                side_effects.append("LOAD")
+                return None
+
+        w = WithProperty()
+        engine._patch_pyannote_lstm_dropout(w)
+        assert side_effects == []  # property never invoked
+        assert w.lstm.dropout == 0.0
+
+    def test_logs_patched_count_to_stderr(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Support tickets need to see whether the patch fired. Log to
+        stderr so it appears alongside engine startup output."""
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        import torch.nn as nn
+
+        class Parent(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lstm = nn.LSTM(8, 8, num_layers=2, dropout=0.5)
+
+        engine._patch_pyannote_lstm_dropout(Parent())
+        captured = capsys.readouterr()
+        assert "patched 1 pyannote LSTM dropout" in captured.err
+        # Stays out of stdout (which is parsed for whisperx progress lines).
+        assert "patched" not in captured.out
+
+    def test_no_log_when_nothing_to_patch(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        engine._patch_pyannote_lstm_dropout(object())
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out == ""
+
+    def test_public_alias_same_function(self) -> None:
+        """G3.1: a non-underscore alias is exported so external callers
+        (smoke-test, third-party integrations) don't reach into the
+        private API."""
+        assert engine.patch_pyannote_lstm_dropout is engine._patch_pyannote_lstm_dropout
+
+    def test_public_alias_top_level_import(self) -> None:
+        import scribe
+        assert scribe.patch_pyannote_lstm_dropout is engine._patch_pyannote_lstm_dropout
+        assert "patch_pyannote_lstm_dropout" in scribe.__all__
 
 
 class TestProgressCapture:

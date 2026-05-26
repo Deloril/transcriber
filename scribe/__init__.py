@@ -8,6 +8,7 @@ from .engine import (
     is_cuda,
     is_mps,
     is_rocm,
+    patch_pyannote_lstm_dropout,
 )
 
 __version__ = "0.1.0"
@@ -21,4 +22,5 @@ __all__ = [
     "is_cuda",
     "is_mps",
     "is_rocm",
+    "patch_pyannote_lstm_dropout",
 ]

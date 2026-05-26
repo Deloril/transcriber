@@ -564,25 +564,96 @@ def _apply_rocm_runtime_workarounds() -> None:
 _apply_rocm_runtime_workarounds()
 
 
-def _patch_pyannote_lstm_dropout(pipeline: Any) -> None:
+def _iter_lstm_modules(obj: Any, _visited: set[int] | None = None) -> Any:
     """
-    pyannote-audio 3.4's segmentation model uses nn.LSTM(dropout=0.5,...).
+    Yield every ``torch.nn.LSTM`` reachable from ``obj``.
+
+    Why this isn't just ``obj.modules()``: pyannote's ``SpeakerDiarization``
+    is a ``pyannote.audio.core.pipeline.Pipeline`` — *not* a ``torch.nn.Module``.
+    The segmentation and embedding networks live in instance attributes
+    (``_segmentation``, ``_embedding``, ``_models`` …) which a plain
+    ``modules()`` walk on the outer Pipeline silently skips, leaving the
+    LSTM dropouts un-patched on ROCm. We instead recurse through the
+    pipeline's ``__dict__``, descending into ``nn.Module`` subtrees and
+    list/dict/tuple containers of sub-pipelines.
+
+    Cycle-safe; only touches *instance* attributes (so ``@property``
+    descriptors with side effects are never invoked).
+    """
+    import torch.nn as nn
+
+    if _visited is None:
+        _visited = set()
+    if obj is None or id(obj) in _visited:
+        return
+    _visited.add(id(obj))
+
+    # nn.Module: trust .modules(); it already covers the full sub-tree.
+    if isinstance(obj, nn.Module):
+        for sub in obj.modules():
+            if isinstance(sub, nn.LSTM):
+                yield sub
+        return
+
+    # Pipeline-shaped object (or any plain Python container). Walk only
+    # the instance __dict__ so we don't trigger property side effects.
+    inst_dict = getattr(obj, "__dict__", None)
+    if isinstance(inst_dict, dict):
+        for value in inst_dict.values():
+            yield from _iter_lstm_modules(value, _visited)
+        return
+
+    # Generic containers — pyannote sometimes stashes models in dicts/lists.
+    if isinstance(obj, dict):
+        for value in obj.values():
+            yield from _iter_lstm_modules(value, _visited)
+        return
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        for value in obj:
+            yield from _iter_lstm_modules(value, _visited)
+        return
+
+
+def _patch_pyannote_lstm_dropout(pipeline: Any) -> int:
+    """
+    pyannote-audio 3.4's segmentation model uses ``nn.LSTM(dropout=0.5,...)``.
     On ROCm ≥ 6.1.1, MIOpen can't compile the dropout kernel because the
-    hiprand_xorwow.h header was removed (pyannote-audio issue #1995).
-    Workaround: force dropout=0.0 after loading. Inference behaviour is
+    ``hiprand_xorwow.h`` header was removed (pyannote-audio issue #1995).
+    Workaround: force ``dropout=0.0`` after loading. Inference behaviour is
     unchanged (dropout is a no-op outside training).
 
-    Idempotent. No-op on non-ROCm machines.
+    Accepts both a raw ``nn.Module`` and a pyannote ``Pipeline`` (which is
+    not an ``nn.Module``); recurses through instance attributes to find
+    every LSTM. Returns the number of LSTM modules whose dropout was
+    actually changed (i.e. excludes those already at 0.0).
+
+    Idempotent. No-op on non-ROCm machines (returns 0).
     """
     if not is_rocm():
-        return
+        return 0
+    patched = 0
     try:
-        import torch.nn as nn
-        for module in pipeline.modules() if hasattr(pipeline, "modules") else []:
-            if isinstance(module, nn.LSTM) and module.dropout:
-                module.dropout = 0.0
+        for lstm in _iter_lstm_modules(pipeline):
+            if lstm.dropout:
+                lstm.dropout = 0.0
+                patched += 1
     except Exception as e:  # noqa: BLE001
-        print(f"[scribe] could not patch pyannote LSTM dropout: {e}")
+        # Don't let a triage helper crash a real transcription. Surface to
+        # stderr so support output picks it up.
+        print(f"[scribe] could not patch pyannote LSTM dropout: {e}", file=sys.stderr)
+        return patched
+    if patched:
+        print(
+            f"[scribe] patched {patched} pyannote LSTM dropout(s) → 0.0 "
+            "(ROCm MIOpen workaround; inference unchanged)",
+            file=sys.stderr,
+        )
+    return patched
+
+
+# Public alias — external callers (smoke-test script, third-party
+# integrations) shouldn't have to import a leading-underscore name.
+patch_pyannote_lstm_dropout = _patch_pyannote_lstm_dropout
 
 
 # --------------------------------------------------------------------------- #
