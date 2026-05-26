@@ -417,6 +417,30 @@ async def project_participant_detail_page(
         "page_title": "Participant",
     })
 
+@app.get("/projects/{project_id}/sampling-log", response_class=HTMLResponse)
+async def project_sampling_log_page(
+    request: Request, project_id: str
+) -> HTMLResponse:
+    """List + append the project's theoretical-sampling log (F1.4).
+
+    The log is project-wide append-only evidence; the page shows the
+    chronological entries (newest first in the rendered table) and
+    surfaces a small inline form to append a new entry. The form is
+    on the same page rather than a separate /new route because the
+    individual entries are tiny (rationale, optional ids, decision
+    type) and the researcher mostly comes here to scan the trail.
+    """
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(
+        request,
+        "sampling_log.html",
+        {
+            "project_id": pid,
+            "page_title": "Sampling log",
+        },
+    )
+
+
 @app.get("/projects/{project_id}/queries", response_class=HTMLResponse)
 async def project_queries_page(request: Request, project_id: str) -> HTMLResponse:
     return _render_subpage(
@@ -1058,6 +1082,94 @@ async def delete_participant_endpoint(
     if not ok:
         raise HTTPException(404, "Participant not found")
     return JSONResponse({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
+# Sampling log (F1.4) — methodologically-transparent record of which
+# source / participant was added (or planned, or removed, or just
+# noted) at what time, under what sampling strategy, with what
+# rationale, and aimed at filling which emerging category.
+#
+# The pure module + persistence shipped in f553954 (scribe/sampling_log.py)
+# with 42 unit tests in tests/test_sampling_log.py. This block wires the
+# user-facing surface so a researcher can record "why was this source
+# added?" at attach-time and re-read the chronological log later — the
+# core requirement of theoretical sampling for a credible GT audit
+# trail (PLANNING.md W3.2).
+#
+# Append-only: the API is GET (list/count) + POST (append). Corrections
+# are a fresh POST referencing the prior entry's id in ``notes``; we
+# never expose PATCH/DELETE for individual entries. This mirrors the
+# F9.1 event-log stance: the log is evidence, not editable state.
+# --------------------------------------------------------------------------- #
+
+from . import sampling_log as _sampling_log  # noqa: E402
+
+
+def _check_sampling_entry_id(entry_id: str) -> None:
+    if not _sampling_log.SAMPLING_ENTRY_ID_RE.match(entry_id):
+        raise HTTPException(400, "Invalid sampling entry id")
+
+
+@app.get("/api/projects/{project_id}/sampling_log")
+async def list_sampling_log_endpoint(project_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        entries = _sampling_log.read_sampling_log(_projects_root(), project_id)
+    return JSONResponse(
+        {
+            "entries": [e.to_dict() for e in entries],
+            "actions": list(_sampling_log.SAMPLING_ACTIONS),
+            "decision_types": list(_sampling_log.SAMPLING_DECISION_TYPES),
+        }
+    )
+
+
+@app.post("/api/projects/{project_id}/sampling_log")
+async def append_sampling_log_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    # Optional source / participant references — empty strings are
+    # treated as "not linked" because that's how HTML forms submit
+    # blank fields. The dataclass validator rejects malformed shapes.
+    source_id = body.get("source_id") or None
+    if isinstance(source_id, str) and not source_id.strip():
+        source_id = None
+    participant_id = body.get("participant_id") or None
+    if isinstance(participant_id, str) and not participant_id.strip():
+        participant_id = None
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            entry = _sampling_log.SamplingEntry.new(
+                project_id=project_id,
+                action=str(body.get("action", "added") or "added"),
+                decision_type=str(body.get("decision_type", "") or ""),
+                source_id=source_id,
+                participant_id=participant_id,
+                target_category=str(body.get("target_category", "") or ""),
+                rationale=str(body.get("rationale", "") or ""),
+                notes=str(body.get("notes", "") or ""),
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid sampling-log payload: {e}")
+        try:
+            _sampling_log.append_sampling_entry(_projects_root(), entry)
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+    return JSONResponse(entry.to_dict(), status_code=201)
 
 
 # --------------------------------------------------------------------------- #

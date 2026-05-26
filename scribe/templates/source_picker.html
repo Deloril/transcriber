@@ -27,6 +27,56 @@
   .upload-options {
     display: grid; grid-template-columns: 1fr; gap: 14px;
   }
+
+  /* "Why was this source added?" attach modal — F1.4 sampling log
+     prompt at attach-time. The dialog is purely UI; it backs onto
+     /api/projects/<pid>/sampling_log POST after the source POST
+     succeeds. The sampling fields are all optional so a researcher
+     who doesn't yet have a strategy can still attach. */
+  #attachDialog {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px 24px;
+    max-width: 540px;
+    width: calc(100vw - 64px);
+    background: var(--panel);
+    color: var(--text);
+    box-shadow: var(--shadow-soft);
+  }
+  #attachDialog::backdrop {
+    background: rgba(0,0,0,.45);
+    backdrop-filter: blur(4px);
+  }
+  #attachDialog h3 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-variation-settings: var(--serif-vary-h3);
+    font-size: 20px;
+    margin: 0 0 6px;
+    color: var(--text-strong);
+    letter-spacing: -.01em;
+  }
+  #attachDialog .why-hint {
+    color: var(--muted);
+    font-size: 12.5px;
+    margin: 0 0 14px;
+  }
+  #attachDialog .field-label {
+    display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px;
+  }
+  #attachDialog .field-input, #attachDialog .field-select {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+    font: inherit; font-size: 13.5px;
+  }
+  #attachDialog textarea.field-input { resize: vertical; min-height: 60px; }
+  #attachDialog .row {
+    display: grid; gap: 10px; margin-bottom: 10px;
+    grid-template-columns: 1fr 1fr;
+  }
+  #attachDialog .actions {
+    display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;
+  }
 {% endblock %}
 
 {% block body %}
@@ -47,6 +97,52 @@
   <div id="libEmpty" class="hint" style="display:none">No completed transcriptions in the library yet. <a href="/">Upload a new recording</a> first.</div>
   <div id="libError" class="hint" style="color:var(--err);display:none"></div>
 </div>
+
+<!-- F1.4 — sampling-log prompt at attach-time. The dialog is hidden by
+     default and opened from the per-row "Attach" button. The "Why was
+     this source added?" memo is the methodological transparency the
+     theoretical-sampling audit trail relies on. -->
+<dialog id="attachDialog" aria-labelledby="attachDialogTitle">
+  <h3 id="attachDialogTitle">Why was this source added?</h3>
+  <p class="why-hint">
+    Optional but encouraged. A short note here lands as a sampling-log
+    entry alongside the new source — your audit trail thanks you.
+  </p>
+  <form id="attachForm" method="dialog">
+    <div class="row">
+      <div>
+        <label for="att-action" class="field-label">Action</label>
+        <select id="att-action" class="field-select"></select>
+      </div>
+      <div>
+        <label for="att-decision-type" class="field-label">
+          Sampling strategy
+        </label>
+        <select id="att-decision-type" class="field-select"></select>
+      </div>
+    </div>
+    <div style="margin-bottom:10px">
+      <label for="att-target-category" class="field-label">
+        Target category
+        <span class="hint">(what category this sample fills, if any)</span>
+      </label>
+      <input id="att-target-category" type="text" maxlength="200"
+             class="field-input"
+             placeholder="e.g. negative cases of trust">
+    </div>
+    <div style="margin-bottom:6px">
+      <label for="att-rationale" class="field-label">Rationale</label>
+      <textarea id="att-rationale" class="field-input" rows="3" maxlength="4000"
+                placeholder="Why this source, why now? Leave blank if you'd rather not."></textarea>
+    </div>
+    <div class="actions">
+      <button id="att-skip" type="button" class="btn secondary">
+        Attach without logging
+      </button>
+      <button id="att-confirm" type="submit" class="btn">Attach + log</button>
+    </div>
+  </form>
+</dialog>
 
 <div class="card" id="alsoCard">
   <h2 style="margin-top:0">Other ways to add sources</h2>
@@ -71,28 +167,161 @@ function escapeHtml(s) {
   }[c]));
 }
 
-async function attach(jobId, filename) {
-  if (!confirm(`Attach "${filename || jobId}" to this project as a source?`)) return;
+// --- Attach + sampling-log (F1.4) ---------------------------------
+//
+// Two-step UX: open a small dialog to capture an optional sampling
+// rationale, then POST the source, then (if anything was filled in)
+// POST a matching sampling-log entry. The user can skip the log
+// entirely; sampling fields are optional all the way down so the
+// attach flow never gets in the way.
+
+const dlg = document.getElementById("attachDialog");
+let pendingAttach = null;  // { jobId, filename }
+
+const ACTION_LABELS = {
+  added: "Added",
+  planned: "Planned",
+  removed: "Removed",
+  noted: "Noted",
+};
+const DECISION_LABELS = {
+  "": "— unspecified —",
+  theoretical: "Theoretical sampling",
+  purposive: "Purposive",
+  convenience: "Convenience",
+  snowball: "Snowball",
+  criterion: "Criterion",
+  extreme_case: "Extreme case",
+  typical_case: "Typical case",
+  negative_case: "Negative case",
+  deviant_case: "Deviant case",
+  opportunistic: "Opportunistic",
+  maximum_variation: "Maximum variation",
+  other: "Other",
+};
+
+function fillAttachSelects() {
+  const actionSel = document.getElementById("att-action");
+  const decisionSel = document.getElementById("att-decision-type");
+  const ACTIONS = ["added", "planned", "removed", "noted"];
+  const DECISION_TYPES = [
+    "", "theoretical", "purposive", "convenience", "snowball", "criterion",
+    "extreme_case", "typical_case", "negative_case", "deviant_case",
+    "opportunistic", "maximum_variation", "other",
+  ];
+  actionSel.innerHTML = "";
+  ACTIONS.forEach(a => {
+    const o = document.createElement("option");
+    o.value = a; o.textContent = ACTION_LABELS[a]; actionSel.appendChild(o);
+  });
+  decisionSel.innerHTML = "";
+  DECISION_TYPES.forEach(d => {
+    const o = document.createElement("option");
+    o.value = d; o.textContent = DECISION_LABELS[d]; decisionSel.appendChild(o);
+  });
+}
+fillAttachSelects();
+
+async function postSource(jobId, filename) {
+  const r = await fetch(`/api/projects/${PROJECT_ID}/sources`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      name: filename || jobId,
+      source_type: "transcript",
+      transcript_job_id: jobId,
+    }),
+  });
+  if (!r.ok) {
+    const detail = await r.json().catch(() => ({}));
+    throw new Error(detail.detail || `HTTP ${r.status}`);
+  }
+  return await r.json();
+}
+
+async function postSamplingEntry(sourceId, payload) {
+  // F1.4 — append-only. Best-effort: if the log POST fails we don't
+  // tear down the already-created source, just surface a non-blocking
+  // alert. The source is the primary commitment.
+  const body = {
+    action: payload.action || "added",
+    decision_type: payload.decision_type || "",
+    source_id: sourceId,
+    target_category: payload.target_category || "",
+    rationale: payload.rationale || "",
+  };
+  const r = await fetch(`/api/projects/${PROJECT_ID}/sampling_log`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const detail = await r.json().catch(() => ({}));
+    throw new Error(detail.detail || `HTTP ${r.status}`);
+  }
+  return await r.json();
+}
+
+function openAttachDialog(jobId, filename) {
+  pendingAttach = { jobId, filename };
+  document.getElementById("attachDialogTitle").textContent =
+    `Why was "${filename || jobId}" added?`;
+  document.getElementById("att-action").value = "added";
+  document.getElementById("att-decision-type").value = "";
+  document.getElementById("att-target-category").value = "";
+  document.getElementById("att-rationale").value = "";
+  if (typeof dlg.showModal === "function") {
+    dlg.showModal();
+  } else {
+    // <dialog> not supported — fall back to the legacy confirm flow.
+    attach(jobId, filename, /* skipLog */ true);
+  }
+}
+
+async function attach(jobId, filename, skipLog) {
   try {
-    const r = await fetch(`/api/projects/${PROJECT_ID}/sources`, {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        name: filename || jobId,
-        source_type: "transcript",
-        transcript_job_id: jobId,
-      }),
-    });
-    if (!r.ok) {
-      const detail = await r.json().catch(() => ({}));
-      throw new Error(detail.detail || `HTTP ${r.status}`);
+    const src = await postSource(jobId, filename);
+    if (!skipLog) {
+      const payload = {
+        action: document.getElementById("att-action").value,
+        decision_type: document.getElementById("att-decision-type").value,
+        target_category: document.getElementById("att-target-category").value.trim(),
+        rationale: document.getElementById("att-rationale").value.trim(),
+      };
+      // Only append a log entry if the user actually filled something
+      // beyond the default "added"/empty — silence is opt-out.
+      const hasContent = payload.target_category || payload.rationale ||
+        (payload.decision_type && payload.decision_type !== "") ||
+        (payload.action && payload.action !== "added");
+      if (hasContent) {
+        try {
+          await postSamplingEntry(src.id, payload);
+        } catch (logErr) {
+          // Source is already created; warn but proceed.
+          console.warn("Sampling log entry failed:", logErr);
+        }
+      }
     }
-    const src = await r.json();
     window.location.href = `/projects/${PROJECT_ID}/sources/${src.id}`;
   } catch (e) {
     alert(`Couldn't attach: ${e.message}`);
   }
 }
+
+document.getElementById("attachForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  if (!pendingAttach) return;
+  dlg.close();
+  attach(pendingAttach.jobId, pendingAttach.filename, /* skipLog */ false);
+  pendingAttach = null;
+});
+
+document.getElementById("att-skip").addEventListener("click", () => {
+  if (!pendingAttach) return;
+  dlg.close();
+  attach(pendingAttach.jobId, pendingAttach.filename, /* skipLog */ true);
+  pendingAttach = null;
+});
 
 async function load() {
   const loading = document.getElementById("loading");
@@ -125,7 +354,7 @@ async function load() {
     });
     table.addEventListener("click", (e) => {
       const btn = e.target.closest("button[data-attach]");
-      if (btn) attach(btn.getAttribute("data-attach"), btn.getAttribute("data-name"));
+      if (btn) openAttachDialog(btn.getAttribute("data-attach"), btn.getAttribute("data-name"));
     });
     table.style.display = "";
   } catch (e) {

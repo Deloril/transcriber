@@ -1,0 +1,328 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Sampling log{% endblock %}
+
+{% block subtitle_block %}
+  <span class="sub">
+    Theoretical-sampling justification: which source / participant was
+    added, planned, removed, or noted — and why.
+  </span>
+{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+{% endblock %}
+
+{% block extra_styles %}
+  /* ------------------------------------------------------------ */
+  /*  Sampling log — append-only journal of sampling decisions.   */
+  /*  Two regions: top form for the next entry, bottom table of   */
+  /*  prior entries (newest first).                                */
+  /* ------------------------------------------------------------ */
+  .field-label {
+    display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px;
+  }
+  .field-input, .field-select {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+    font: inherit; font-size: 14px;
+  }
+  .field-row {
+    display: grid; gap: 12px; margin-bottom: 12px;
+    grid-template-columns: 1fr 1fr;
+  }
+  @media (max-width: 720px) { .field-row { grid-template-columns: 1fr; } }
+
+  table.sl {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  table.sl thead th {
+    text-align: left; font-weight: 600; font-size: 11px;
+    color: var(--muted); text-transform: uppercase;
+    letter-spacing: .04em; padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+  table.sl tbody td {
+    padding: 11px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  table.sl tbody tr:hover { background: var(--accent-soft); }
+  table.sl .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; background: var(--panel-2);
+    border: 1px solid var(--border); color: var(--muted);
+    font-family: var(--mono); letter-spacing: .04em;
+  }
+  table.sl .pill.added { color: var(--ok); border-color: var(--ok); }
+  table.sl .pill.planned { color: var(--accent); border-color: var(--accent); }
+  table.sl .pill.removed { color: var(--err); border-color: var(--err); }
+  table.sl .pill.noted { color: var(--muted); }
+  table.sl .rationale {
+    font-family: var(--serif); color: var(--text);
+    line-height: 1.45; max-width: 50ch;
+  }
+  table.sl .meta {
+    color: var(--muted-2); font-size: 11.5px; font-family: var(--mono);
+  }
+{% endblock %}
+
+{% block body %}
+<!-- Append form -->
+<div class="card">
+  <h2 style="margin-top:0">Log a sampling decision</h2>
+  <p class="hint" style="margin:0 0 14px">
+    Append-only evidence. To correct a prior entry, append a new one
+    that references its id in the notes — the log is your audit trail.
+  </p>
+
+  <form id="newEntryForm" style="margin-top:4px">
+    <div class="field-row">
+      <div>
+        <label for="sl-action" class="field-label">Action</label>
+        <select id="sl-action" class="field-select"></select>
+      </div>
+      <div>
+        <label for="sl-decision-type" class="field-label">
+          Sampling strategy <span class="hint">(optional)</span>
+        </label>
+        <select id="sl-decision-type" class="field-select"></select>
+      </div>
+    </div>
+
+    <div class="field-row">
+      <div>
+        <label for="sl-source-id" class="field-label">
+          Source id <span class="hint">(optional — 12 hex chars)</span>
+        </label>
+        <input id="sl-source-id" type="text" maxlength="12"
+               class="field-input"
+               placeholder="abc123def456">
+      </div>
+      <div>
+        <label for="sl-participant-id" class="field-label">
+          Participant id <span class="hint">(optional — 12 hex chars)</span>
+        </label>
+        <input id="sl-participant-id" type="text" maxlength="12"
+               class="field-input"
+               placeholder="abc123def456">
+      </div>
+    </div>
+
+    <div style="margin-bottom:12px">
+      <label for="sl-target-category" class="field-label">
+        Target category
+        <span class="hint">(what category this sample was meant to fill)</span>
+      </label>
+      <input id="sl-target-category" type="text" maxlength="200"
+             class="field-input"
+             placeholder="e.g. negative cases of trust">
+    </div>
+
+    <div style="margin-bottom:12px">
+      <label for="sl-rationale" class="field-label">
+        Rationale <span class="hint">(why this one, why now)</span>
+      </label>
+      <textarea id="sl-rationale" rows="3" maxlength="4000"
+                class="field-input"
+                placeholder="A short note explaining the sampling decision."></textarea>
+    </div>
+
+    <div style="margin-bottom:14px">
+      <label for="sl-notes" class="field-label">
+        Notes <span class="hint">(optional)</span>
+      </label>
+      <textarea id="sl-notes" rows="2" maxlength="4000"
+                class="field-input"
+                placeholder="Anything else worth recording. To amend a prior entry, reference its id here."></textarea>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px">
+      <button id="sl-submit" class="btn" type="submit">Append entry</button>
+      <span id="sl-msg" class="hint" role="alert" aria-live="polite"></span>
+    </div>
+  </form>
+</div>
+
+<!-- Existing entries -->
+<div id="entriesCard" class="card" style="display:none">
+  <h2 style="margin-top:0">Sampling decisions <span id="entriesCount" class="hint" style="font-weight:400"></span></h2>
+  <p class="hint" style="margin:0 0 12px">
+    Most recent first. Order on disk is append order — clock skew or
+    backfilled entries stay visible as the researcher wrote them.
+  </p>
+  <table class="sl">
+    <thead><tr>
+      <th>When</th>
+      <th>Action</th>
+      <th>Strategy</th>
+      <th>Target</th>
+      <th>Rationale</th>
+      <th>Refs</th>
+    </tr></thead>
+    <tbody id="entriesBody"></tbody>
+  </table>
+</div>
+
+<div id="loadingCard" class="card hint">Loading sampling log…</div>
+
+<div id="emptyState" class="empty card" style="display:none">
+  <h3>No sampling decisions logged yet</h3>
+  <p>
+    Once you start adding sources or making sampling moves, log them
+    here. A solid theoretical-sampling trail is what turns a
+    grounded-theory study into a credible one.
+  </p>
+</div>
+
+<div id="errorState" class="card" style="display:none;color:var(--err)"></div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+function fmtDate(s) {
+  if (!s) return "—";
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    return d.toLocaleString(undefined, {
+      year: "numeric", month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit",
+    });
+  } catch (_) { return s; }
+}
+function setMsg(text, isError) {
+  const msg = document.getElementById("sl-msg");
+  msg.textContent = text;
+  msg.style.color = isError ? "var(--err)" : "var(--ok)";
+}
+
+// Decision-type vocabulary labels — chosen to match standard
+// qualitative-methods textbooks (Charmaz, Patton). Empty string is
+// "unspecified".
+const DECISION_LABELS = {
+  "": "— unspecified —",
+  "theoretical": "Theoretical sampling",
+  "purposive": "Purposive",
+  "convenience": "Convenience",
+  "snowball": "Snowball",
+  "criterion": "Criterion",
+  "extreme_case": "Extreme case",
+  "typical_case": "Typical case",
+  "negative_case": "Negative case",
+  "deviant_case": "Deviant case",
+  "opportunistic": "Opportunistic",
+  "maximum_variation": "Maximum variation",
+  "other": "Other",
+};
+const ACTION_LABELS = {
+  "added": "Added",
+  "planned": "Planned",
+  "removed": "Removed",
+  "noted": "Noted",
+};
+
+function fillSelect(el, values, labels) {
+  el.innerHTML = "";
+  for (const v of values) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = labels[v] !== undefined ? labels[v] : v;
+    el.appendChild(opt);
+  }
+}
+
+async function load() {
+  const loading = document.getElementById("loadingCard");
+  const card = document.getElementById("entriesCard");
+  const empty = document.getElementById("emptyState");
+  const error = document.getElementById("errorState");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/sampling_log`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    fillSelect(document.getElementById("sl-action"), data.actions || ["added","planned","removed","noted"], ACTION_LABELS);
+    fillSelect(document.getElementById("sl-decision-type"), data.decision_types || [""], DECISION_LABELS);
+    const entries = (data.entries || []).slice().reverse();  // newest first in UI
+    loading.style.display = "none";
+    document.getElementById("entriesCount").textContent =
+      entries.length ? `(${entries.length})` : "";
+    if (!entries.length) { empty.style.display = ""; return; }
+    const body = document.getElementById("entriesBody");
+    body.innerHTML = "";
+    entries.forEach(e => {
+      const tr = document.createElement("tr");
+      const refs = [];
+      if (e.source_id) {
+        refs.push(`<a class="meta" href="/projects/${PROJECT_ID}/sources/${escapeHtml(e.source_id)}">src ${escapeHtml(e.source_id.slice(0,8))}</a>`);
+      }
+      if (e.participant_id) {
+        refs.push(`<a class="meta" href="/projects/${PROJECT_ID}/participants/${escapeHtml(e.participant_id)}">part ${escapeHtml(e.participant_id.slice(0,8))}</a>`);
+      }
+      tr.innerHTML = `
+        <td class="meta">${escapeHtml(fmtDate(e.created_at))}</td>
+        <td><span class="pill ${escapeHtml(e.action)}">${escapeHtml(ACTION_LABELS[e.action] || e.action)}</span></td>
+        <td>${escapeHtml(DECISION_LABELS[e.decision_type] || e.decision_type || "—")}</td>
+        <td>${escapeHtml(e.target_category || "—")}</td>
+        <td class="rationale">${escapeHtml(e.rationale || "—")}</td>
+        <td>${refs.join("<br>") || '<span class="meta">—</span>'}</td>
+      `;
+      body.appendChild(tr);
+    });
+    card.style.display = "";
+  } catch (err) {
+    loading.style.display = "none";
+    error.textContent = `Couldn't load sampling log: ${err.message}`;
+    error.style.display = "";
+  }
+}
+
+document.getElementById("newEntryForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const submit = document.getElementById("sl-submit");
+  submit.disabled = true;
+  setMsg("Appending…", false);
+  const payload = {
+    action: document.getElementById("sl-action").value,
+    decision_type: document.getElementById("sl-decision-type").value,
+    source_id: document.getElementById("sl-source-id").value.trim(),
+    participant_id: document.getElementById("sl-participant-id").value.trim(),
+    target_category: document.getElementById("sl-target-category").value.trim(),
+    rationale: document.getElementById("sl-rationale").value.trim(),
+    notes: document.getElementById("sl-notes").value.trim(),
+  };
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/sampling_log`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    setMsg("Appended.", false);
+    // Reset the most-volatile fields, keep the strategy / action so the
+    // next entry can re-use them.
+    document.getElementById("sl-source-id").value = "";
+    document.getElementById("sl-participant-id").value = "";
+    document.getElementById("sl-target-category").value = "";
+    document.getElementById("sl-rationale").value = "";
+    document.getElementById("sl-notes").value = "";
+    await load();
+  } catch (err) {
+    setMsg(`Couldn't append: ${err.message}`, true);
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+load();
+</script>
+{% endblock %}

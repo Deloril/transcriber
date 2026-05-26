@@ -396,6 +396,15 @@
       <div class="ph-empty">Coming soon — once the memos UI graduates.</div>
     </div>
   </div>
+
+  <div class="card ph-card">
+    <h3>Sampling log <span class="count" id="samplingCount">…</span></h3>
+    <div id="samplingList"><div class="ph-empty">Loading…</div></div>
+    <div class="ph-actions">
+      <a class="btn" href="/projects/{{ project_id }}/sampling-log">+ Log a decision</a>
+      <a class="btn secondary" href="/projects/{{ project_id }}/sampling-log">View log</a>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
@@ -513,6 +522,35 @@ async function loadParticipants() {
     }).join("");
     if (arr.length > 4) {
       list.innerHTML += `<div class="more"><a href="/projects/${PROJECT_ID}/participants">+ ${arr.length - 4} more →</a></div>`;
+    }
+  } catch (e) {
+    list.innerHTML = `<div class="ph-empty" style="color:var(--err)">Error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function loadSamplingLog() {
+  const list = document.getElementById("samplingList");
+  const count = document.getElementById("samplingCount");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/sampling_log`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const arr = data.entries || [];
+    count.textContent = arr.length;
+    if (!arr.length) {
+      list.innerHTML = `<div class="ph-empty">No sampling decisions logged yet. <a href="/projects/${PROJECT_ID}/sampling-log">Log one →</a></div>`;
+      return;
+    }
+    // Show the most recent four entries — newest first.
+    const top = arr.slice(-4).reverse();
+    const ACTION_LABELS = { added: "Added", planned: "Planned", removed: "Removed", noted: "Noted" };
+    list.innerHTML = top.map(e => {
+      const label = ACTION_LABELS[e.action] || e.action;
+      const summary = (e.target_category || e.rationale || e.notes || "(no rationale)").slice(0, 64);
+      return `<div class="item"><a href="/projects/${PROJECT_ID}/sampling-log">${escapeHtml(label)} — ${escapeHtml(summary)}</a><span class="meta">${escapeHtml(e.decision_type || "")}</span></div>`;
+    }).join("");
+    if (arr.length > 4) {
+      list.innerHTML += `<div class="more"><a href="/projects/${PROJECT_ID}/sampling-log">+ ${arr.length - 4} more →</a></div>`;
     }
   } catch (e) {
     list.innerHTML = `<div class="ph-empty" style="color:var(--err)">Error: ${escapeHtml(e.message)}</div>`;
@@ -684,5 +722,6 @@ loadSources();
 loadCodebook();
 loadApplications();
 loadParticipants();
+loadSamplingLog();
 </script>
 {% endblock %}
