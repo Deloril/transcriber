@@ -3565,6 +3565,7 @@ from . import code_versions as _code_versions  # noqa: E402
 from . import code_lifecycle as _code_lifecycle  # noqa: E402
 from . import coders as _coders  # noqa: E402
 from . import codebook_lock as _codebook_lock  # noqa: E402
+from . import codebook_lock_audit as _codebook_lock_audit  # noqa: E402
 
 
 def _check_code_id(code_id: str) -> None:
@@ -4108,12 +4109,23 @@ async def get_codebook_lock_state_endpoint(project_id: str) -> JSONResponse:
 async def lock_codebook_endpoint(
     project_id: str, request: Request
 ) -> JSONResponse:
-    """Lock the codebook (F2.4).
+    """Lock the codebook (F2.4 + F9.5 audit integration).
 
-    Body: ``{"reason": "..."}``. ``reason`` is required and non-empty.
+    Body: ``{"reason": "...", "actor_coder_id"?: "..."}``. ``reason``
+    is required and non-empty. ``actor_coder_id`` is optional but
+    recorded on the F9.1 event when supplied so the audit timeline
+    shows who flipped the lock.
+
     Returns 409 if the codebook is already locked (no-op locks would
     pollute the audit log without changing state — re-locking is the
     "wait, did I already?" footgun the spec deliberately rejects).
+
+    F9.5 wires this through ``codebook_lock_audit.lock_codebook_with_audit``
+    so every lock toggle additionally lands in the F9.1 event log
+    (``events/<id>.json``) and surfaces in the audit timeline. The
+    response retains the original ``project`` + ``event`` (F2.4
+    LockEvent) shape for backwards compatibility, with the new F9.1
+    audit ``audit_event`` field appended.
     """
     _check_project_id(project_id)
     try:
@@ -4123,11 +4135,15 @@ async def lock_codebook_endpoint(
     if not isinstance(body, dict):
         raise HTTPException(400, "Expected JSON object")
     reason = str(body.get("reason", "") or "").strip()
+    actor_coder_id = str(body.get("actor_coder_id", "") or "").strip()
     with PROJECTS_LOCK:
         _project_must_exist(project_id)
         try:
-            project, event = _codebook_lock.lock_codebook(
-                _projects_root(), project_id, reason=reason
+            result = _codebook_lock_audit.lock_codebook_with_audit(
+                _projects_root(),
+                project_id,
+                reason=reason,
+                actor_coder_id=actor_coder_id,
             )
         except _codebook_lock.LockedCodebookError as e:
             # Already-locked is a state conflict, not a bad request.
@@ -4135,8 +4151,9 @@ async def lock_codebook_endpoint(
         except _projects.ProjectValidationError as e:
             raise HTTPException(400, str(e))
     return JSONResponse({
-        "project": project.to_dict(),
-        "event": asdict(event),
+        "project": result.project.to_dict(),
+        "event": asdict(result.lock_event),
+        "audit_event": result.event.to_dict(),
     })
 
 
@@ -4144,19 +4161,41 @@ async def lock_codebook_endpoint(
 async def unlock_codebook_endpoint(
     project_id: str, request: Request
 ) -> JSONResponse:
-    """Unlock the codebook (F2.4).
+    """Unlock the codebook (F2.4 + F9.5 audit integration).
 
     Body: ``{"reason": "...", "methodological_memo": "...",
-    "new_stage": "..." (optional)}``. Both ``reason`` and
-    ``methodological_memo`` are required and non-empty — the "breaking
-    the seal" invariant from the spec.
+    "new_stage": "..." (optional), "actor_coder_id"?: "...",
+    "author_coder_id"?: "..."}``.
+
+    Both ``reason`` and ``methodological_memo`` are required and
+    non-empty — the "breaking the seal" invariant from the spec.
 
     ``new_stage`` defaults to the most recent prior stage from the
     lock log (or ``"theoretical"`` if no history). Pass an explicit
     stage to land in a specific phase (initial / focused / axial /
     theoretical). Passing ``"locked"`` is rejected.
 
+    ``actor_coder_id`` lands on the F9.1 event; ``author_coder_id``
+    lands on the F5.1 methodological memo. The two are deliberately
+    separate so a system-triggered unlock can have an empty actor
+    while still attributing the human researcher behind the memo.
+
     Returns 409 if the codebook is not currently locked.
+
+    F9.5 wires this through
+    ``codebook_lock_audit.unlock_codebook_with_memo`` so every unlock
+    additionally creates:
+
+      * An F5.1 methodological :class:`Memo` (type=methodological,
+        role=codebook_unlock) carrying the memo body, visible to
+        memo exports, REFI-QDA bundles, and the memos UI.
+      * An F9.1 :class:`Event` (action=unlock, entity_type=codebook),
+        cross-referencing both the F2.4 lock-log entry and the new
+        memo via its ``after`` payload.
+
+    The response retains the original ``project`` + ``event`` (F2.4
+    LockEvent) shape for backwards compatibility, with the new
+    ``audit_event`` (F9.1) and ``memo`` (F5.1) fields appended.
     """
     _check_project_id(project_id)
     try:
@@ -4173,6 +4212,11 @@ async def unlock_codebook_endpoint(
         if raw_new_stage is not None and str(raw_new_stage).strip()
         else None
     )
+    actor_coder_id = str(body.get("actor_coder_id", "") or "").strip()
+    raw_author = body.get("author_coder_id")
+    author_coder_id = (
+        str(raw_author).strip() if raw_author is not None else ""
+    )
     with PROJECTS_LOCK:
         _project_must_exist(project_id)
         # The pure helper raises ProjectValidationError when the project
@@ -4181,11 +4225,14 @@ async def unlock_codebook_endpoint(
         # 409 vs 400; clean separation matches the lock-already-set
         # branch above.
         try:
-            project, event = _codebook_lock.unlock_codebook(
-                _projects_root(), project_id,
+            result = _codebook_lock_audit.unlock_codebook_with_memo(
+                _projects_root(),
+                project_id,
                 reason=reason,
                 methodological_memo=memo,
                 new_stage=new_stage,
+                actor_coder_id=actor_coder_id,
+                author_coder_id=author_coder_id or None,
             )
         except _projects.ProjectValidationError as e:
             msg = str(e)
@@ -4193,8 +4240,105 @@ async def unlock_codebook_endpoint(
                 raise HTTPException(409, msg)
             raise HTTPException(400, msg)
     return JSONResponse({
-        "project": project.to_dict(),
-        "event": asdict(event),
+        "project": result.project.to_dict(),
+        "event": asdict(result.lock_event),
+        "audit_event": result.event.to_dict(),
+        "memo": result.memo.to_dict(),
+    })
+
+
+# --------------------------------------------------------------------------- #
+# F9.5 — Codebook lock audit cross-reference
+#
+# Surfaces the reconciled view of every codebook lock toggle: the F2.4
+# lock-log entry, the F9.1 event, and (for unlocks) the F5.1
+# methodological memo, joined together so a researcher can answer
+# "show me every time the codebook was reopened, what justified it,
+# and where the audit trail lives" in one round trip.
+#
+#   GET /api/projects/<pid>/codebook/lock/audit
+#     Returns:
+#       {
+#         "project_id": str,
+#         "locked": bool,
+#         "stage": str,          # current codebook_stage
+#         "rows": [               # one row per F2.4 lock-log entry
+#           {
+#             "lock_event_id": str,
+#             "action": "lock" | "unlock",
+#             "memo_id": str,    # populated for unlocks with an F5.1 memo
+#             "event_id": str,   # populated when an F9.1 event exists
+#             "created_at": str, # ISO timestamp from the F2.4 entry
+#             "prior_stage": str,
+#             "new_stage": str,
+#             "reason": str,
+#             "methodological_memo": str,  # truncated for list-shape
+#           },
+#           ...
+#         ],
+#         "memos": [<full Memo dicts for unlock memos>],
+#         "events": [<full Event dicts for lock+unlock>],
+#       }
+#
+# The audit page renders this as a "Codebook lock history" panel that
+# sits alongside the F9.3 snapshots and F9.4 checkpoints panels.
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/api/projects/{project_id}/codebook/lock/audit")
+async def get_codebook_lock_audit_endpoint(
+    project_id: str,
+) -> JSONResponse:
+    """Return the cross-referenced lock log / events / memos (F9.5).
+
+    Empty projects return ``rows: []``, ``memos: []``, ``events: []``
+    — never a 404 for a never-locked project; the panel renders an
+    empty-state nudge in that case.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        project = _projects.load_project(_projects_root(), project_id)
+        log = _codebook_lock.read_lock_log(_projects_root(), project_id)
+        memos = _codebook_lock_audit.find_unlock_memos(
+            _projects_root(), project_id
+        )
+        events = _codebook_lock_audit.find_codebook_lock_events(
+            _projects_root(), project_id
+        )
+        reconciled = _codebook_lock_audit.reconcile_unlock_artefacts(
+            _projects_root(), project_id
+        )
+    # The reconcile helper returns lock_event_id / action / memo_id /
+    # event_id; stitch in the per-entry timestamp + reason so the UI
+    # can render rows without a second fetch.
+    log_by_id = {ev.id: ev for ev in log}
+    rows: list[dict] = []
+    for r in reconciled:
+        log_ev = log_by_id.get(r["lock_event_id"])
+        if log_ev is None:
+            # The reconcile output is built from the lock-log, so this
+            # branch should be unreachable; defensively skip rather
+            # than 500.
+            continue
+        rows.append({
+            "lock_event_id": r["lock_event_id"],
+            "action": r["action"],
+            "memo_id": r.get("memo_id", ""),
+            "event_id": r.get("event_id", ""),
+            "created_at": log_ev.created_at,
+            "prior_stage": log_ev.prior_stage,
+            "new_stage": log_ev.new_stage,
+            "reason": log_ev.reason,
+            "methodological_memo": log_ev.methodological_memo,
+        })
+    return JSONResponse({
+        "project_id": project_id,
+        "locked": project.codebook_stage == _codebook_lock.LOCKED_STAGE,
+        "stage": project.codebook_stage,
+        "rows": rows,
+        "memos": [m.to_dict() for m in memos],
+        "events": [ev.to_dict() for ev in events],
     })
 
 

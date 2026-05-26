@@ -363,6 +363,66 @@
   .ck-row .ck-dl a:hover { background: var(--panel); }
   .ck-empty { color: var(--muted); font-style: italic; padding: 8px 4px; }
   .ck-error { color: var(--err); margin-top: 6px; }
+
+  /* F9.5: Codebook lock history panel.
+     One row per F2.4 lock-log entry, with cross-references to the
+     F9.1 event id and (for unlocks) the F5.1 memo id. The action
+     pill colours match the events-list lock/unlock pills above so
+     the eye lands in the same place. */
+  .lock-audit-row {
+    border-top: 1px solid var(--border);
+    padding: 10px 4px;
+    display: grid;
+    grid-template-columns: 150px auto 1fr;
+    gap: 12px;
+    align-items: start;
+  }
+  .lock-audit-row:first-child { border-top: 0; }
+  .lock-audit-row .when {
+    color: var(--muted); font-size: 12px; font-family: var(--mono);
+  }
+  .lock-audit-row .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border: 1px solid var(--border);
+    color: var(--accent);
+  }
+  .lock-audit-row .pill.lock,
+  .lock-audit-row .pill.unlock {
+    color: var(--accent-2, var(--accent));
+    border-color: var(--accent-2, var(--accent));
+  }
+  .lock-audit-row .summary {
+    color: var(--text); font-size: 13px; line-height: 1.45;
+  }
+  .lock-audit-row .summary .stages {
+    color: var(--muted); font-family: var(--mono); font-size: 11.5px;
+  }
+  .lock-audit-row .summary .reason {
+    display: block; margin-top: 4px;
+  }
+  .lock-audit-row .summary .memo-body {
+    display: block; margin-top: 4px;
+    font-style: italic; color: var(--text);
+    font-family: var(--serif);
+    line-height: 1.45;
+    max-width: 60ch;
+  }
+  .lock-audit-row .summary .xref {
+    display: block; margin-top: 6px;
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+  }
+  .lock-audit-row .summary .xref .xref-id {
+    color: var(--text);
+  }
+  .lock-audit-row .summary .xref .xref-missing {
+    color: var(--err);
+    font-style: italic;
+  }
 {% endblock %}
 
 {% block body %}
@@ -541,6 +601,62 @@
   </div>
   <ul id="ck-list" class="ck-list"
       data-test-id="ck-list"></ul>
+</div>
+
+{#
+  F9.5 — Codebook lock history panel.
+
+  F2.4 ships the lock primitive and the codebook editor's "🔒 Lock"
+  toggle (banner on /projects/<pid>/codebook). What F9.5 wires here
+  is the *audit-integrated* read view: every lock toggle's F2.4
+  log entry joined to its F9.1 event id and (for unlocks) its F5.1
+  methodological-memo id, so a researcher can verify that each
+  unlock was justified, recorded in the unified events feed, and
+  surfaced as a memo for memo-export workflows.
+
+  The pure module ``scribe.codebook_lock_audit`` shipped in 0cc18b0
+  (lock_codebook_with_audit / unlock_codebook_with_memo /
+  reconcile_unlock_artefacts). Until this panel + the
+  /api/projects/<pid>/codebook/lock/audit route landed, the
+  cross-referenced view existed only in Python.
+
+  Reads:
+    GET /api/projects/<pid>/codebook/lock/audit
+       — returns rows with lock_event_id × event_id × memo_id +
+         created_at + reason + methodological_memo, plus current
+         locked / stage state for the panel header.
+#}
+<div class="card" data-test-feature="F9.5" data-test-id="lock-audit-panel"
+     style="margin-top:16px">
+  <h2 style="margin-top:0">Codebook lock history</h2>
+  <p class="hint" style="margin-top:0">
+    Every lock and unlock of the codebook lands here, joined to the
+    unified F9.1 event log and (for unlocks) the F5.1 methodological
+    memo that justified reopening. The data layer is append-only;
+    use the codebook editor's "🔒 Lock codebook" / "🔓 Unlock with
+    reason…" controls to record a new toggle.
+  </p>
+  <div class="lock-audit-status hint" id="la-status"
+       data-test-id="la-status"
+       style="margin-top:8px; font-family: var(--mono); font-size: 12px">
+    Loading lock state…
+  </div>
+  <h3 style="margin:18px 0 6px 0; font-size: 14px;">
+    Toggles <span id="la-count" class="hint" style="font-weight:400"></span>
+  </h3>
+  <div id="la-empty" class="lock-audit-empty"
+       data-test-id="la-empty"
+       style="display:none; color: var(--muted); font-style: italic; padding: 8px 4px">
+    No lock toggles recorded yet. Lock the codebook from the
+    <a href="/projects/{{ project_id }}/codebook">codebook editor</a>
+    when a methodological milestone makes the structure final.
+  </div>
+  <ul id="la-list" class="lock-audit-list"
+      data-test-id="la-list"
+      style="list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column"></ul>
+  <div id="la-error" class="lock-audit-error"
+       data-test-id="la-error"
+       style="display:none; color: var(--err); margin-top: 8px"></div>
 </div>
 
 <div id="loadingCard" class="card hint" style="margin-top:16px">Loading audit timeline…</div>
@@ -1012,6 +1128,131 @@ if (ckForm) {
 }
 
 loadCheckpoints();
+
+// ---------------------------------------------------------------- //
+// F9.5 — Codebook lock history panel                               //
+// ---------------------------------------------------------------- //
+// Loads /api/projects/<pid>/codebook/lock/audit and renders one
+// row per F2.4 lock-log entry with cross-references to the F9.1
+// event id and (for unlocks) the F5.1 memo id. The panel is
+// read-only here — flipping the lock happens on the codebook
+// editor banner; this view exists for audit-trail review.
+
+const laStatus = document.getElementById("la-status");
+const laList = document.getElementById("la-list");
+const laEmpty = document.getElementById("la-empty");
+const laCount = document.getElementById("la-count");
+const laError = document.getElementById("la-error");
+
+function setLaError(msg) {
+  if (!laError) return;
+  if (!msg) {
+    laError.style.display = "none";
+    laError.textContent = "";
+    return;
+  }
+  laError.style.display = "";
+  laError.textContent = msg;
+}
+
+function renderLockAuditRow(row) {
+  const li = document.createElement("li");
+  li.className = "lock-audit-row";
+  li.setAttribute("data-test-id", "la-row");
+
+  const when = document.createElement("div");
+  when.className = "when";
+  when.textContent = fmtDate(row.created_at);
+
+  const pill = document.createElement("div");
+  pill.innerHTML = `<span class="pill ${escapeHtml(row.action)}"
+    data-test-id="la-pill">${escapeHtml(row.action)}</span>`;
+
+  const summary = document.createElement("div");
+  summary.className = "summary";
+  const stages = document.createElement("div");
+  stages.className = "stages";
+  stages.textContent = `${row.prior_stage} → ${row.new_stage}`;
+  summary.appendChild(stages);
+
+  if (row.reason) {
+    const reason = document.createElement("span");
+    reason.className = "reason";
+    reason.textContent = row.reason;
+    summary.appendChild(reason);
+  }
+
+  if (row.action === "unlock" && row.methodological_memo) {
+    const memoBody = document.createElement("span");
+    memoBody.className = "memo-body";
+    const body = String(row.methodological_memo || "");
+    memoBody.textContent = body.length > 280
+      ? body.slice(0, 277) + "…" : body;
+    summary.appendChild(memoBody);
+  }
+
+  // Cross-reference line: lock-event id + (for unlocks) memo id +
+  // F9.1 event id. Missing F9.1 / memo ids surface explicitly so a
+  // legacy project that pre-dates F9.5 isn't silently glossed over.
+  const xref = document.createElement("span");
+  xref.className = "xref";
+  const lockShort = String(row.lock_event_id || "").slice(0, 12);
+  const eventShort = row.event_id
+    ? `<span class="xref-id" data-test-id="la-event-id">${escapeHtml(String(row.event_id).slice(0, 12))}</span>`
+    : `<span class="xref-missing" data-test-id="la-event-missing">no F9.1 event</span>`;
+  let memoSpan = "";
+  if (row.action === "unlock") {
+    memoSpan = row.memo_id
+      ? `· memo <span class="xref-id" data-test-id="la-memo-id">${escapeHtml(String(row.memo_id).slice(0, 12))}</span>`
+      : `· <span class="xref-missing" data-test-id="la-memo-missing">no F5.1 memo</span>`;
+  }
+  xref.innerHTML = `lock-event <span class="xref-id">${escapeHtml(lockShort)}</span> · F9.1 ${eventShort} ${memoSpan}`;
+  summary.appendChild(xref);
+
+  li.appendChild(when);
+  li.appendChild(pill);
+  li.appendChild(summary);
+  return li;
+}
+
+async function loadLockAudit() {
+  setLaError("");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/codebook/lock/audit`);
+    if (!r.ok) {
+      let detail = "";
+      try { detail = (await r.json()).detail || ""; } catch (_) {}
+      throw new Error(detail || `HTTP ${r.status}`);
+    }
+    const data = await r.json();
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    if (laStatus) {
+      const stage = escapeHtml(data.stage || "initial");
+      laStatus.textContent = data.locked
+        ? `🔒 Codebook is locked (stage: ${data.stage}).`
+        : `Codebook is unlocked (stage: ${data.stage}).`;
+    }
+    if (laCount) {
+      laCount.textContent = rows.length === 0
+        ? "" : `(${rows.length})`;
+    }
+    laList.replaceChildren();
+    if (rows.length === 0) {
+      laEmpty.style.display = "";
+      return;
+    }
+    laEmpty.style.display = "none";
+    // Newest first to match the events feed default.
+    const ordered = rows.slice().reverse();
+    for (const row of ordered) {
+      laList.appendChild(renderLockAuditRow(row));
+    }
+  } catch (e) {
+    setLaError(`Could not load lock history: ${e.message || e}`);
+  }
+}
+
+loadLockAudit();
 
 // ---------------------------------------------------------------- //
 // F9.2 — Definition-at-apply download dropdown                     //
