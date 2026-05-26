@@ -1,0 +1,74 @@
+{# Theme picker dropdown. Drop this into a page's header / appbar. #}
+<div class="theme-picker" id="themePicker">
+  <button id="themeBtn" class="theme-btn" aria-haspopup="true" aria-expanded="false" aria-label="Change theme" title="Change theme">◐ Theme</button>
+  <div id="themeMenu" class="theme-menu" role="menu" hidden>
+    <button data-theme="slate" role="menuitemradio" style="--sw-a:#4ec9a0;--sw-b:#11181d">
+      <span class="sw"></span>
+      <span class="label">Slate <span class="meta">+ emerald</span></span>
+    </button>
+    <button data-theme="ink" role="menuitemradio" style="--sw-a:#8b5cf6;--sw-b:#0a0a0c">
+      <span class="sw"></span>
+      <span class="label">Ink <span class="meta">+ violet</span></span>
+    </button>
+    <button data-theme="bone" role="menuitemradio" style="--sw-a:#2c3a8c;--sw-b:#f6f1e7">
+      <span class="sw"></span>
+      <span class="label">Bone <span class="meta">+ indigo</span></span>
+    </button>
+    <button data-theme="forest" role="menuitemradio" style="--sw-a:#6fae66;--sw-b:#131c19">
+      <span class="sw"></span>
+      <span class="label">Forest <span class="meta">+ linen</span></span>
+    </button>
+  </div>
+</div>
+
+<script>
+(function () {
+  var picker = document.getElementById("themePicker");
+  if (!picker) return;
+  var btn = document.getElementById("themeBtn");
+  var menu = document.getElementById("themeMenu");
+  var root = document.documentElement;
+
+  function current() { return root.dataset.theme || "slate"; }
+  function syncChecked() {
+    var c = current();
+    menu.querySelectorAll("button[data-theme]").forEach(function (b) {
+      b.setAttribute("aria-checked", b.dataset.theme === c ? "true" : "false");
+    });
+  }
+  function open() {
+    menu.hidden = false;
+    btn.setAttribute("aria-expanded", "true");
+    syncChecked();
+  }
+  function close() {
+    menu.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+  }
+  function toggle() { menu.hidden ? open() : close(); }
+
+  btn.addEventListener("click", function (e) { e.stopPropagation(); toggle(); });
+  document.addEventListener("click", function (e) {
+    if (!picker.contains(e.target)) close();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !menu.hidden) close();
+  });
+  menu.addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-theme]");
+    if (!b) return;
+    var t = b.dataset.theme;
+    if (t === "slate") {
+      // Slate is the default — clear the attribute so :root rules apply.
+      delete root.dataset.theme;
+    } else {
+      root.dataset.theme = t;
+    }
+    try { localStorage.setItem("scribe.theme", t); } catch (_) {}
+    syncChecked();
+    close();
+  });
+
+  syncChecked();
+})();
+</script>

@@ -4,39 +4,16 @@
   <meta charset="utf-8">
   <title>{{ input_filename }} — Scribe Editor</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,30..100,0..1&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&family=Lora:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+  {% include "_themes.html" %}
   <style>
     :root {
-      /* Editor reuses the field-journal palette but adds a Lora body
-         serif for transcript text — long-form reading deserves a face
-         designed for paragraphs. The current-word highlight stays warm
-         so it reads as ink-on-page rather than a hyperlink. */
-      --bg: #14110f;
-      --bg-2: #1a1614;
-      --panel: #1f1a17;
-      --panel-2: #2a2421;
-      --panel-3: #36302c;
-      --border: #3a322d;
-      --border-strong: #4a4039;
-      --text: #f1ead6;
-      --text-strong: #fbf6e6;
-      --muted: #a09587;
-      --muted-2: #756a5e;
-      --accent: #d99a3f;
-      --accent-2: #e8b864;
-      --accent-soft: rgba(217, 154, 63, .14);
-      --hl: #f5d68a;       /* current word — warm cream */
-      --hl-bg: rgba(245,214,138,.18);
-      --ok: #8db472;
-      --err: #d96a5a;
-      --warn: #e0a04a;
-      --shadow: 0 1px 0 rgba(255,235,200,.04) inset, 0 12px 38px rgba(0,0,0,.42);
-      --serif: "Fraunces", "Iowan Old Style", "Hoefler Text", Georgia, serif;
-      --reader: "Lora", "Iowan Old Style", "Hoefler Text", Georgia, serif;
-      --sans: "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-      --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      /* Editor-only extras layered over the theme. The reader font is
+         picked from the theme so transcript prose suits whichever
+         palette is active. The current-word highlight is the theme's
+         accent at low alpha so it reads as ink-on-page, not as a
+         hyperlink. --panel-3 covers a few darker editor surfaces. */
+      --hl: var(--accent-2);
+      --hl-bg: var(--accent-soft);
     }
     * { box-sizing: border-box; }
     html, body { color: var(--text); margin: 0; min-height: 100%; }
@@ -45,8 +22,8 @@
       font-size: 14px;
       letter-spacing: .002em;
       background:
-        radial-gradient(900px 520px at -8% -10%, rgba(217,154,63,.10), transparent 65%),
-        radial-gradient(720px 480px at 110% 110%, rgba(111,140,175,.08), transparent 60%),
+        radial-gradient(900px 520px at -8% -10%, var(--wash-1), transparent 65%),
+        radial-gradient(720px 480px at 110% 110%, var(--wash-2), transparent 60%),
         linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
       background-attachment: fixed;
       min-height: 100vh;
@@ -54,8 +31,9 @@
     body::before {
       content: "";
       position: fixed; inset: 0;
-      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.97  0 0 0 0 0.91  0 0 0 0 0.78  0 0 0 0.04 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
-      opacity: .3; mix-blend-mode: overlay; pointer-events: none; z-index: 0;
+      background-image: var(--grain-svg);
+      opacity: var(--grain-opacity); mix-blend-mode: var(--grain-blend);
+      pointer-events: none; z-index: 0;
     }
     body > * { position: relative; z-index: 1; }
     ::selection { background: var(--accent-soft); color: var(--text-strong); }
@@ -88,7 +66,7 @@
       color: var(--text-strong);
       font-family: var(--serif);
       font-weight: 500;
-      font-variation-settings: "opsz" 18, "SOFT" 30;
+      font-variation-settings: var(--serif-vary-h3);
       font-size: 15px;
       letter-spacing: -.005em;
     }
@@ -522,6 +500,7 @@
     <button id="tidyBtn" title="Run the local AI to tidy a run of speech (grammar, capitalisation, paragraphs)">✨ Tidy</button>
     <button id="discardMediaBtn" title="Discard the source media file (keeps the transcript)">🗑 Source</button>
     <button id="helpBtn" title="Keyboard shortcuts (?)">?</button>
+    {% include "_themes_picker.html" %}
   </div>
 
   <div id="mediaDiscardedNotice" class="media-discarded-notice" hidden>

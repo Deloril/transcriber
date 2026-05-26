@@ -1,0 +1,308 @@
+{#
+  Shared theme system for every Scribe page.
+
+  Includes:
+    1. A single Google Fonts request that covers every theme's
+       display + body + mono families.
+    2. CSS custom properties for four named themes:
+         slate   — slate + emerald (default; cool dark, archival)
+         ink     — ink + electric violet (modern editorial)
+         bone    — bone + indigo (light mode; printed-book feel)
+         forest  — forest + linen (botanical fieldwork)
+    3. The theme-picker button + dropdown markup.
+    4. The picker JS — early-apply (no flash) + click handlers.
+
+  Pages that include this partial get the variables + the picker for
+  free. Each page is responsible for placing the picker markup
+  somewhere appropriate (drop {% include "_themes_picker.html" %}
+  inside the page's header / appbar).
+
+  CSS variables every theme defines:
+    --bg, --bg-2, --panel, --panel-2, --panel-3
+    --border, --border-strong
+    --text, --text-strong, --muted, --muted-2
+    --accent, --accent-2, --accent-soft
+    --ink, --ink-soft
+    --ok, --warn, --err
+    --shadow, --shadow-soft
+    --serif, --reader, --sans, --mono
+    --wash-1, --wash-2          (radial-gradient stops on body bg)
+    --grain-svg                 (data: URL for the noise overlay)
+    --grain-opacity             (number, 0..1)
+    --grain-blend               (mix-blend-mode value)
+#}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,30..100,0..1&family=Instrument+Serif:ital@0;1&family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;1,8..60,400&family=Lora:ital,wght@0,400;0,500;1,400&family=Geist:wght@300;400;500;600;700&family=Inter+Tight:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+  /* ============================================================
+     SLATE + EMERALD — default theme
+     ============================================================ */
+  :root {
+    --bg: #0e1418;
+    --bg-2: #11181d;
+    --panel: #161e24;
+    --panel-2: #1d262d;
+    --panel-3: #25303a;
+    --border: #2a3640;
+    --border-strong: #3a4856;
+    --text: #e6ecef;
+    --text-strong: #f4f7f9;
+    --muted: #8a96a0;
+    --muted-2: #5e6970;
+
+    --accent: #4ec9a0;
+    --accent-2: #7ee0bd;
+    --accent-soft: rgba(78, 201, 160, .14);
+    --ink: #6aa3c2;
+    --ink-soft: rgba(106, 163, 194, .14);
+
+    --ok: #4ec9a0;
+    --warn: #e0b056;
+    --err: #e07a6e;
+
+    --shadow: 0 1px 0 rgba(220,240,235,.03) inset, 0 12px 38px rgba(0,0,0,.5);
+    --shadow-soft: 0 1px 0 rgba(220,240,235,.02) inset, 0 6px 20px rgba(0,0,0,.34);
+
+    --serif: "Newsreader", "Iowan Old Style", "Hoefler Text", Georgia, serif;
+    --reader: "Newsreader", "Iowan Old Style", "Hoefler Text", Georgia, serif;
+    --sans: "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+    --wash-1: rgba(78,201,160,.09);   /* emerald */
+    --wash-2: rgba(106,163,194,.07);  /* ink-cyan */
+    --grain-svg: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.83  0 0 0 0 0.90  0 0 0 0 0.94  0 0 0 0.035 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    --grain-opacity: .3;
+    --grain-blend: overlay;
+
+    --serif-vary-display: "opsz" 56;
+    --serif-vary-h2: "opsz" 32;
+    --serif-vary-h3: "opsz" 24;
+  }
+
+  /* ============================================================
+     INK + ELECTRIC VIOLET — modern editorial
+     ============================================================ */
+  [data-theme="ink"] {
+    --bg: #0a0a0c;
+    --bg-2: #0f0f12;
+    --panel: #131316;
+    --panel-2: #1a1a1f;
+    --panel-3: #232328;
+    --border: #2a2a32;
+    --border-strong: #3a3a45;
+    --text: #ededf0;
+    --text-strong: #ffffff;
+    --muted: #898996;
+    --muted-2: #5a5a66;
+
+    --accent: #8b5cf6;
+    --accent-2: #a78bfa;
+    --accent-soft: rgba(139,92,246,.16);
+    --ink: #67e8f9;
+    --ink-soft: rgba(103,232,249,.12);
+
+    --ok: #34d399;
+    --warn: #fbbf24;
+    --err: #f87171;
+
+    --shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 16px 44px rgba(0,0,0,.6);
+    --shadow-soft: 0 1px 0 rgba(255,255,255,.02) inset, 0 8px 24px rgba(0,0,0,.42);
+
+    --serif: "Instrument Serif", "Times New Roman", Times, serif;
+    --reader: "Instrument Serif", "Times New Roman", Times, serif;
+    --sans: "Inter Tight", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+
+    --wash-1: rgba(139,92,246,.10);
+    --wash-2: rgba(103,232,249,.06);
+    --grain-svg: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.04 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    --grain-opacity: .25;
+    --grain-blend: screen;
+
+    /* Instrument Serif has no opsz axis — clear the variation strings
+       so font-variation-settings doesn't apply nonsense. */
+    --serif-vary-display: "wght" 400;
+    --serif-vary-h2: "wght" 400;
+    --serif-vary-h3: "wght" 400;
+  }
+
+  /* ============================================================
+     BONE + INDIGO — printed-book light mode
+     ============================================================ */
+  [data-theme="bone"] {
+    --bg: #f6f1e7;
+    --bg-2: #efe9dc;
+    --panel: #ffffff;
+    --panel-2: #f3eee2;
+    --panel-3: #e8e1d0;
+    --border: #d8d2c2;
+    --border-strong: #b9b09b;
+    --text: #1a1f3a;
+    --text-strong: #0e1228;
+    --muted: #6b6f86;
+    --muted-2: #9097aa;
+
+    --accent: #2c3a8c;
+    --accent-2: #4453b3;
+    --accent-soft: rgba(44, 58, 140, .10);
+    --ink: #c84b3c;          /* vermilion margin */
+    --ink-soft: rgba(200, 75, 60, .10);
+
+    --ok: #2f7d4f;
+    --warn: #b07a14;
+    --err: #c84b3c;
+
+    --shadow: 0 1px 0 rgba(255,255,255,.7) inset, 0 6px 20px rgba(40, 30, 10, .08);
+    --shadow-soft: 0 1px 0 rgba(255,255,255,.6) inset, 0 3px 10px rgba(40, 30, 10, .05);
+
+    --serif: "EB Garamond", "Garamond", "Cormorant Garamond", "Hoefler Text", Georgia, serif;
+    --reader: "Source Serif 4", "Source Serif Pro", "Iowan Old Style", Georgia, serif;
+    --sans: "Source Serif 4", "Source Serif Pro", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+
+    --wash-1: rgba(44,58,140,.05);
+    --wash-2: rgba(200,75,60,.04);
+    --grain-svg: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.10  0 0 0 0 0.07  0 0 0 0 0.18  0 0 0 0.06 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    --grain-opacity: .55;
+    --grain-blend: multiply;
+
+    /* EB Garamond has no opsz axis */
+    --serif-vary-display: "wght" 500;
+    --serif-vary-h2: "wght" 500;
+    --serif-vary-h3: "wght" 500;
+  }
+
+  /* ============================================================
+     FOREST + LINEN — botanical fieldwork
+     ============================================================ */
+  [data-theme="forest"] {
+    --bg: #0f1614;
+    --bg-2: #131c19;
+    --panel: #18211d;
+    --panel-2: #1f2a25;
+    --panel-3: #28342e;
+    --border: #2a3833;
+    --border-strong: #3c4d45;
+    --text: #ece6d4;
+    --text-strong: #fbf5e3;
+    --muted: #93a098;
+    --muted-2: #677169;
+
+    --accent: #6fae66;
+    --accent-2: #b9d49b;
+    --accent-soft: rgba(111,174,102,.14);
+    --ink: #d8a45a;
+    --ink-soft: rgba(216,164,90,.12);
+
+    --ok: #6fae66;
+    --warn: #d8a45a;
+    --err: #d96a5a;
+
+    --shadow: 0 1px 0 rgba(220,235,210,.03) inset, 0 12px 38px rgba(0,0,0,.5);
+    --shadow-soft: 0 1px 0 rgba(220,235,210,.02) inset, 0 6px 20px rgba(0,0,0,.34);
+
+    --serif: "Fraunces", "Iowan Old Style", "Hoefler Text", Georgia, serif;
+    --reader: "Lora", "Iowan Old Style", "Hoefler Text", Georgia, serif;
+
+    --wash-1: rgba(111,174,102,.10);
+    --wash-2: rgba(216,164,90,.06);
+    --grain-svg: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.92  0 0 0 0 0.88  0 0 0 0 0.78  0 0 0 0.04 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    --grain-opacity: .32;
+    --grain-blend: overlay;
+
+    --serif-vary-display: "opsz" 56, "SOFT" 50, "WONK" 1;
+    --serif-vary-h2: "opsz" 32, "SOFT" 50;
+    --serif-vary-h3: "opsz" 24, "SOFT" 50;
+  }
+
+  /* ============================================================
+     Theme picker — small dropdown that lives in the page header.
+     Markup pattern (page-side):
+       <div class="theme-picker" id="themePicker">
+         <button id="themeBtn" class="theme-btn" aria-haspopup="true">◐</button>
+         <div id="themeMenu" class="theme-menu" role="menu" hidden>
+           <button data-theme="slate"  role="menuitem">…</button>
+           <button data-theme="ink"    role="menuitem">…</button>
+           <button data-theme="bone"   role="menuitem">…</button>
+           <button data-theme="forest" role="menuitem">…</button>
+         </div>
+       </div>
+     ============================================================ */
+  .theme-picker { position: relative; display: inline-block; }
+  .theme-btn {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 6px 10px;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color .15s, background .15s, color .15s;
+  }
+  .theme-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .theme-menu {
+    position: absolute;
+    right: 0; top: calc(100% + 6px);
+    min-width: 220px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    padding: 6px;
+    z-index: 100;
+    display: flex; flex-direction: column;
+    gap: 2px;
+  }
+  .theme-menu button {
+    background: transparent;
+    color: var(--text);
+    border: 0;
+    border-radius: 6px;
+    padding: 8px 10px;
+    text-align: left;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    display: flex; align-items: center; gap: 10px;
+    transition: background .12s, color .12s;
+  }
+  .theme-menu button:hover { background: var(--panel-2); color: var(--text-strong); }
+  .theme-menu button[aria-checked="true"] {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .theme-menu .sw {
+    width: 14px; height: 14px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    box-shadow: 0 0 0 1px rgba(0,0,0,.2);
+    background: linear-gradient(135deg, var(--sw-a, #4ec9a0) 0%, var(--sw-a, #4ec9a0) 50%, var(--sw-b, #11181d) 50%, var(--sw-b, #11181d) 100%);
+  }
+  .theme-menu .label { flex: 1; min-width: 0; }
+  .theme-menu .meta {
+    color: var(--muted-2);
+    font-size: 11px;
+    font-family: var(--mono);
+    letter-spacing: .04em;
+  }
+</style>
+
+<script>
+  // Apply the saved theme as early as possible so the page renders
+  // in the right palette on first paint. This is intentionally inline
+  // and synchronous — keep it tiny.
+  (function () {
+    try {
+      var t = localStorage.getItem("scribe.theme");
+      if (t && ["slate","ink","bone","forest"].indexOf(t) !== -1) {
+        document.documentElement.dataset.theme = t;
+      }
+    } catch (e) { /* localStorage blocked — use default */ }
+  })();
+</script>
