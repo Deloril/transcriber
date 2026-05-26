@@ -607,25 +607,22 @@ async def project_memo_canvas_page(
 
 @app.get("/projects/{project_id}/ai", response_class=HTMLResponse)
 async def project_ai_page(request: Request, project_id: str) -> HTMLResponse:
-    return _render_subpage(
-        request, project_id,
-        page_kind="ai",
-        page_title="AI suggestions",
-        description="Locally-running model proposes codes / similar quotes / memo drafts. Never auto-applies.",
-        feature_refs=["F8.1", "F8.3", "F8.4", "F8.5", "F8.6", "F8.7", "F8.8", "F8.10"],
-        wireframe_blocks=[
-            {"heading": "Active model", "lines": [
-                "Show backend (ollama / llama.cpp / off), model name, status. Link to settings.",
-            ]},
-            {"heading": "Suggestion queue", "lines": [
-                "Pending whole-transcript review pass (F8.6) results · second-coder diff (F8.7) · per-span suggestions (F8.3, F8.4).",
-                "Each suggestion: accept / modify / reject. Provenance recorded either way (F9.6).",
-            ]},
-            {"heading": "AI-off gate", "lines": [
-                "F8.10 — AI suggestions disabled until the codebook has hand-coded shape (default ≥8 codes, ≥2 transcripts). Settings to override.",
-            ]},
-        ],
-    )
+    """AI dashboard / model picker (F8.1 user-facing surface).
+
+    Graduates the wireframe stub: ``project_ai.html`` renders the
+    Active-model card (F8.1 BackendConfig editor + Test connection +
+    List installed models) plus a read-only F8.10 AI-gate status row
+    and links to where each F8.x suggestion surface already lives.
+
+    The F8.6 review queue and F8.7 second-coder diff panels graduate
+    here in later iterations; the placeholders on this page link to
+    where the feature lives or note "queue UI pending".
+    """
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "project_ai.html", {
+        "project_id": pid,
+        "page_title": "AI suggestions",
+    })
 
 
 @app.get("/projects/{project_id}/audit", response_class=HTMLResponse)

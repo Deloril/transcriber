@@ -1,0 +1,461 @@
+{#
+  AI suggestions / model picker page (F8.1 user-facing surface).
+
+  PLANNING.md F8.1:
+    > Pluggable model backend abstraction (Ollama HTTP API first;
+    > llama.cpp / transformers later). User selects model from a list.
+
+  scribe/ai_backend.py shipped the data plane in 2182dab — the
+  ``BackendConfig`` entity, the ``ModelBackend`` ABC, the Ollama
+  concrete backend, and the four ``/api/projects/<pid>/ai/backend*``
+  HTTP routes. The commit explicitly deferred a UI surface to the
+  picker feature (F8.11), but F8.11 also deferred its UI. Until this
+  template landed, the only path from the user to "pick a model" was
+  curl. This page is that path.
+
+  Reads:
+    GET  /api/projects/<pid>/ai/backend             — current config + providers
+    GET  /api/projects/<pid>/ai/backend/health      — probe the daemon
+    GET  /api/projects/<pid>/ai/backend/models      — list installed models
+    GET  /api/projects/<pid>/ai/gate                — F8.10 gate status
+    GET  /api/system/model-recommendations          — F8.12 baked-in models
+
+  Writes:
+    PUT  /api/projects/<pid>/ai/backend             — replace config
+    POST /api/projects/<pid>/ai/backend/pull        — pull a model (F8.11)
+
+  This page is intentionally a *dashboard*: the per-span "Suggest with
+  AI" affordance lives on the source-coding view (F8.3 / F8.4 already
+  shipped there); the whole-transcript review queue (F8.6) and second-
+  coder diff (F8.7) will graduate onto this page in later iterations.
+  For now those panels link to where the feature lives or note "queue
+  coming soon".
+#}
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}AI suggestions{% endblock %}
+{% block heading %}AI suggestions{% endblock %}
+{% block subtitle_block %}
+  <span class="sub">Locally-running model proposes codes / similar quotes / memo drafts. Never auto-applies.</span>
+{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+{% endblock %}
+
+{% block extra_styles %}
+  .ai-card + .ai-card { margin-top: 16px; }
+  .ai-section { margin-top: 14px; }
+  .ai-field-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .ai-field-input, select.ai-field-input {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+    font: inherit; font-size: 14px;
+  }
+  .ai-field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 700px) { .ai-field-row { grid-template-columns: 1fr; } }
+  .ai-help { color: var(--muted); font-size: 12px; margin: 4px 0 0; line-height: 1.5; }
+  .ai-status-row {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--text); font-size: 13px;
+    padding: 6px 10px; border-radius: 8px;
+    background: var(--panel-2); border: 1px solid var(--border);
+  }
+  .ai-status-row .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted);
+    flex: 0 0 auto;
+  }
+  .ai-status-row.ok .dot { background: var(--ok); }
+  .ai-status-row.bad .dot { background: var(--err); }
+  .ai-models-list {
+    display: flex; flex-direction: column; gap: 4px;
+    margin-top: 10px;
+    max-height: 320px; overflow-y: auto;
+  }
+  .ai-model-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
+    padding: 7px 10px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel-2);
+    font-size: 13px;
+  }
+  .ai-model-row .meta { color: var(--muted); font-size: 12px; }
+  .ai-model-row code { font-size: 12px; }
+  .ai-model-row button { white-space: nowrap; }
+  .ai-pill {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--text-strong);
+    font-size: 11px;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+{% endblock %}
+
+{% block body %}
+<nav style="display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap">
+  <a class="btn secondary" href="/projects/{{ project_id }}">Overview</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/sources">Sources</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/codebook">Codebook</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/queries">Queries</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/memos">Memos</a>
+  <a class="btn secondary active" href="/projects/{{ project_id }}/ai">AI</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/audit">Audit</a>
+</nav>
+
+<div id="aiBackendCard" class="card ai-card" data-test-feature="F8.1">
+  <h2>Active model</h2>
+  <p class="ai-help">
+    Pick the local backend Scribe should ask when a code suggestion / similar-quote
+    / memo-draft action is invoked. Nothing here calls a model on its own; this is
+    just the wiring. Scribe is local-only — no cloud calls, ever.
+  </p>
+
+  <form id="aiBackendForm" class="ai-section" autocomplete="off">
+    <div class="ai-field-row">
+      <div>
+        <label for="ai-provider" class="ai-field-label">Backend provider</label>
+        <select id="ai-provider" class="ai-field-input"
+                data-test-id="ai-backend-provider">
+          {# populated from /api/projects/<pid>/ai/backend (available_providers) #}
+        </select>
+        <p class="ai-help">
+          Ollama ships first; <code>llama_cpp</code> / <code>transformers</code> are
+          reserved identifiers — no concrete backend yet.
+        </p>
+      </div>
+      <div>
+        <label for="ai-base-url" class="ai-field-label">Base URL</label>
+        <input id="ai-base-url" type="url" maxlength="1024" class="ai-field-input"
+               placeholder="http://127.0.0.1:11434"
+               data-test-id="ai-backend-base-url">
+        <p class="ai-help">
+          Where the daemon listens. Default is the Ollama localhost endpoint.
+        </p>
+      </div>
+    </div>
+
+    <div class="ai-field-row" style="margin-top:12px">
+      <div>
+        <label for="ai-default-model" class="ai-field-label">Default generative model</label>
+        <input id="ai-default-model" type="text" maxlength="256" class="ai-field-input"
+               placeholder="e.g. llama3.2:3b"
+               data-test-id="ai-backend-default-model">
+        <p class="ai-help">
+          Used by code-suggestion, new-code, memo-draft, and review-pass calls.
+        </p>
+      </div>
+      <div>
+        <label for="ai-default-embed" class="ai-field-label">Default embedding model</label>
+        <input id="ai-default-embed" type="text" maxlength="256" class="ai-field-input"
+               placeholder="e.g. bge-m3"
+               data-test-id="ai-backend-default-embedding">
+        <p class="ai-help">
+          Used to build the F8.2 embedding index over coded segments / paragraphs.
+        </p>
+      </div>
+    </div>
+
+    <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <button id="ai-save-btn" class="btn" type="submit"
+              data-test-id="ai-backend-save">Save backend</button>
+      <button id="ai-test-btn" class="btn secondary" type="button"
+              data-test-id="ai-backend-test">Test connection</button>
+      <button id="ai-list-btn" class="btn secondary" type="button"
+              data-test-id="ai-backend-list-models">List installed models</button>
+      <span id="ai-save-msg" class="hint" role="alert" aria-live="polite"></span>
+    </div>
+  </form>
+
+  <div id="ai-health" class="ai-section" hidden>
+    <div id="ai-health-row" class="ai-status-row" data-test-id="ai-backend-health-row">
+      <span class="dot"></span>
+      <span class="text"></span>
+    </div>
+  </div>
+
+  <div id="ai-models" class="ai-section" hidden>
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <strong>Installed models</strong>
+      <span id="ai-models-count" class="hint"></span>
+    </div>
+    <div id="ai-models-list" class="ai-models-list" data-test-id="ai-backend-models-list"></div>
+  </div>
+
+  <div id="ai-error" class="ai-section" hidden style="color:var(--err);font-size:13px"></div>
+</div>
+
+<div class="card ai-card" data-test-feature="F8.10">
+  <h2>AI gate status</h2>
+  <p class="ai-help">
+    F8.10 disables AI suggestions until the codebook has hand-coded shape (default
+    ≥8 codes, ≥2 transcripts). Edit the threshold or override on the
+    <a href="/projects/{{ project_id }}/settings">project settings</a> page.
+  </p>
+  <div id="ai-gate-status" class="ai-section ai-status-row" data-test-id="ai-gate-status">
+    <span class="dot"></span>
+    <span class="text">Loading…</span>
+  </div>
+</div>
+
+<div class="card ai-card">
+  <h2>Suggestion surfaces</h2>
+  <p class="ai-help">
+    These F-features are wired in their natural location. The dashboard view that
+    aggregates pending suggestions across the project will graduate here as F8.6 +
+    F8.7 land their UI.
+  </p>
+  <ul style="margin-top:10px;line-height:1.8">
+    <li>
+      <strong>Code suggestions on a span</strong>
+      (<code>F8.3</code> / <code>F8.4</code>) — open a transcript and use the
+      "✨ Suggest with AI" row in the apply-popover on a highlight.
+    </li>
+    <li>
+      <strong>Find similar quotes</strong> (<code>F8.5</code>) — per-application
+      action on the source-coding view.
+    </li>
+    <li>
+      <strong>Whole-transcript review pass</strong> (<code>F8.6</code>) —
+      background job; result list will surface here.
+      <span class="ai-pill">queue UI pending</span>
+    </li>
+    <li>
+      <strong>AI second coder</strong> (<code>F8.7</code>) — runs on a locked
+      codebook; ICR + diff will surface here.
+      <span class="ai-pill">queue UI pending</span>
+    </li>
+    <li>
+      <strong>Memo drafting</strong> (<code>F8.8</code>) — "✨ Draft with AI"
+      action on a memo (lands with the memos page graduations).
+    </li>
+  </ul>
+</div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+
+function $(id) { return document.getElementById(id); }
+function setMsg(el, text, kind) {
+  el.textContent = text;
+  el.style.color = kind === "err" ? "var(--err)" : (kind === "ok" ? "var(--ok)" : "var(--muted)");
+}
+
+function setStatusRow(row, kind, text) {
+  row.classList.remove("ok", "bad");
+  if (kind === "ok") row.classList.add("ok");
+  if (kind === "bad") row.classList.add("bad");
+  const t = row.querySelector(".text");
+  if (t) t.textContent = text;
+}
+
+function renderProviders(select, providers, current) {
+  select.innerHTML = "";
+  for (const p of providers) {
+    const opt = document.createElement("option");
+    opt.value = p;
+    opt.textContent = p;
+    if (p === current) opt.selected = true;
+    select.appendChild(opt);
+  }
+  // Make sure the saved provider is present even if the registry doesn't
+  // list it (forward-compat with on-disk values from a future build).
+  if (current && !Array.from(select.options).some(o => o.value === current)) {
+    const opt = document.createElement("option");
+    opt.value = current;
+    opt.textContent = current + " (saved)";
+    opt.selected = true;
+    select.appendChild(opt);
+  }
+}
+
+async function loadBackend() {
+  const errBox = $("ai-error");
+  errBox.hidden = true;
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/ai/backend`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const cfg = await r.json();
+    renderProviders($("ai-provider"),
+                    cfg.available_providers || [],
+                    cfg.provider || "ollama");
+    $("ai-base-url").value = cfg.base_url || "";
+    $("ai-default-model").value = cfg.default_model || "";
+    $("ai-default-embed").value = cfg.default_embedding_model || "";
+  } catch (e) {
+    errBox.hidden = false;
+    errBox.textContent = `Couldn't load backend config: ${e.message}`;
+  }
+}
+
+async function saveBackend(e) {
+  e.preventDefault();
+  const msg = $("ai-save-msg");
+  const btn = $("ai-save-btn");
+  btn.disabled = true;
+  setMsg(msg, "Saving…", "muted");
+  try {
+    const payload = {
+      provider: $("ai-provider").value,
+      base_url: $("ai-base-url").value.trim(),
+      default_model: $("ai-default-model").value.trim(),
+      default_embedding_model: $("ai-default-embed").value.trim(),
+    };
+    const r = await fetch(`/api/projects/${PROJECT_ID}/ai/backend`, {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    setMsg(msg, "Saved", "ok");
+  } catch (err) {
+    setMsg(msg, `Couldn't save: ${err.message}`, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function testConnection() {
+  const wrap = $("ai-health");
+  const row = $("ai-health-row");
+  const btn = $("ai-test-btn");
+  wrap.hidden = false;
+  setStatusRow(row, "muted", "Probing daemon…");
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/ai/backend/health`);
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.detail || `HTTP ${r.status}`);
+    }
+    const h = await r.json();
+    if (h.ok) {
+      const detail = h.detail || "";
+      setStatusRow(row, "ok",
+        `Reachable — ${h.provider} @ ${h.base_url}${detail ? " · " + detail : ""}`);
+    } else {
+      setStatusRow(row, "bad",
+        `Unreachable — ${h.error || "daemon did not respond"}`);
+    }
+  } catch (err) {
+    setStatusRow(row, "bad", `Probe failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderModels(list, models) {
+  list.innerHTML = "";
+  for (const m of models) {
+    const row = document.createElement("div");
+    row.className = "ai-model-row";
+    row.dataset.model = m.name;
+    const left = document.createElement("div");
+    const code = document.createElement("code");
+    code.textContent = m.name;
+    left.appendChild(code);
+    if (m.kind && m.kind !== "unknown") {
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const bits = [m.kind];
+      if (m.parameter_size) bits.push(m.parameter_size);
+      if (m.family) bits.push(m.family);
+      meta.textContent = bits.join(" · ");
+      left.appendChild(meta);
+    }
+    row.appendChild(left);
+    const right = document.createElement("div");
+    right.style.display = "flex";
+    right.style.gap = "6px";
+    if (m.kind === "embedding") {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "btn secondary";
+      b.textContent = "Use as embedding";
+      b.dataset.testId = "ai-backend-pick-embedding";
+      b.addEventListener("click", () => {
+        $("ai-default-embed").value = m.name;
+        $("ai-default-embed").focus();
+      });
+      right.appendChild(b);
+    } else {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "btn secondary";
+      b.textContent = "Use as default";
+      b.dataset.testId = "ai-backend-pick-default";
+      b.addEventListener("click", () => {
+        $("ai-default-model").value = m.name;
+        $("ai-default-model").focus();
+      });
+      right.appendChild(b);
+    }
+    row.appendChild(right);
+    list.appendChild(row);
+  }
+}
+
+async function listModels() {
+  const wrap = $("ai-models");
+  const list = $("ai-models-list");
+  const count = $("ai-models-count");
+  const btn = $("ai-list-btn");
+  wrap.hidden = false;
+  list.innerHTML = "";
+  count.textContent = "Loading…";
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/ai/backend/models`);
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      const detail = d.detail || `HTTP ${r.status}`;
+      list.innerHTML = "";
+      count.textContent = `Couldn't list — ${detail}`;
+      return;
+    }
+    const body = await r.json();
+    const models = Array.isArray(body.models) ? body.models : [];
+    renderModels(list, models);
+    count.textContent = `${models.length} model${models.length === 1 ? "" : "s"}`;
+  } catch (err) {
+    count.textContent = `Couldn't list — ${err.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function loadGate() {
+  const row = $("ai-gate-status");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/ai/gate`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const body = await r.json();
+    const s = body.status || {};
+    if (s.allowed) {
+      setStatusRow(row, "ok",
+        `Open — codes ${s.code_count || 0}/${s.min_codes || 0}, hand-coded ${s.hand_coded_source_count || 0}/${s.min_hand_coded_sources || 0}`);
+    } else {
+      setStatusRow(row, "bad",
+        `Closed — ${s.message || "AI suggestions disabled"}`);
+    }
+  } catch (e) {
+    setStatusRow(row, "bad", `Couldn't read gate: ${e.message}`);
+  }
+}
+
+document.getElementById("aiBackendForm").addEventListener("submit", saveBackend);
+document.getElementById("ai-test-btn").addEventListener("click", testConnection);
+document.getElementById("ai-list-btn").addEventListener("click", listModels);
+
+loadBackend();
+loadGate();
+</script>
+{% endblock %}
