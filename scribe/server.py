@@ -2693,6 +2693,7 @@ async def run_saved_query_endpoint(
 from . import coders as _coders  # noqa: E402
 from . import applications as _applications  # noqa: E402
 from . import application_spans as _application_spans  # noqa: E402  (F4.2)
+from . import application_gutter as _application_gutter  # noqa: E402  (F4.3)
 from . import codes as _codes  # noqa: E402
 
 
@@ -3970,6 +3971,78 @@ async def applications_spans_endpoint(
         "by_code": by_code,
         "duplicate_anchor_groups": duplicate_payload,
     })
+
+
+@app.get("/api/projects/{project_id}/applications/gutter")
+async def applications_gutter_endpoint(
+    project_id: str, source_id: str,
+) -> JSONResponse:
+    """Lane-assignment for the gutter renderer (F4.3).
+
+    Returns the deterministic lane layout for every application on
+    ``source_id``. The renderer (``source_coding.html``) paints
+    coloured bars in lane × anchor positions so a researcher can see
+    overlapping codes that don't fit cleanly as in-text highlights
+    (the F4.3 design point: "in-text highlights stop being readable
+    past ~3 layers; the gutter scales to many overlapping codes").
+
+    Defined **before** ``GET /applications/{application_id}`` so the
+    static ``gutter`` segment wins over the parametric capture: same
+    registration-order rule that protects ``/spans``.
+
+    Response shape mirrors :func:`scribe.application_gutter.serialise_layout`::
+
+        {
+          "source_id": "<sid>",
+          "lane_count": <int>,        # max simultaneous overlap on this source
+          "max_stack_depth": <int>,   # largest pairwise-overlap clique - 1
+          "placements": [
+            {
+              "application_id": "<aid>",
+              "lane": <int>,          # zero-indexed; 0 is closest to the text
+              "stack_depth": <int>,   # how many other apps overlap this one
+            },
+            ...
+          ]
+        }
+
+    Empty source returns the empty layout
+    (``lane_count == 0``, ``placements == []``) with the requested
+    ``source_id`` echoed back — clients shouldn't have to special-case
+    "no applications yet".
+
+    The JS renderer in ``source_coding.html`` is the canonical
+    consumer; ``scribe/static/js/helpers.mjs`` ships an in-browser
+    mirror of the algorithm so the page can re-lay-out without a
+    round-trip after a local apply / delete. Both implementations
+    agree byte-for-byte on lane indices (a Python and JS test pair
+    locks that down).
+    """
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            _sources.load_source(_projects_root(), project_id, source_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+        apps = _applications.list_applications(
+            _projects_root(), project_id, source_id=source_id,
+        )
+    layout = _application_gutter.assign_lanes(apps) if apps else None
+    if layout is None:
+        return JSONResponse({
+            "source_id": source_id,
+            "lane_count": 0,
+            "max_stack_depth": 0,
+            "placements": [],
+        })
+    payload = _application_gutter.serialise_layout(layout)
+    # The pure module returns ``source_id=""`` only on an empty input,
+    # which we've already short-circuited above. Echo the requested
+    # source_id either way to keep the contract simple.
+    payload["source_id"] = source_id
+    return JSONResponse(payload)
 
 
 @app.get("/api/projects/{project_id}/applications/{application_id}")

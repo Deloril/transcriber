@@ -22,7 +22,16 @@
     margin-bottom: 14px;
     line-height: 1.65;
     font-size: 14px;
+    /* F4.3 — two-column layout: text on the left, gutter on the
+       right. The gutter only takes width when the source has at
+       least one application (renderGutter() sets --gutter-width
+       on .seg-row to lane_count * 8px + 4px). */
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) var(--gutter-width, 0px);
+    column-gap: 10px;
+    align-items: start;
   }
+  .seg .seg-text { min-width: 0; }
   .seg .meta {
     color: var(--muted);
     font-size: 11px;
@@ -36,6 +45,46 @@
     cursor: text;
     padding: 1px 0;
     border-radius: 2px;
+  }
+  /* F4.3 — per-segment gutter column. One coloured bar per
+     application that overlaps this segment, painted in its
+     assigned lane. Lanes are vertical tracks (0 = closest to
+     text). A "deep" stack picks up a tooltip the user can hover
+     to see the per-code list. */
+  .seg .seg-gutter {
+    position: relative;
+    align-self: stretch;
+    min-height: 18px;
+    /* Lane bars are absolutely positioned children. The container
+       height is forced by .meta + .body height, so we don't need a
+       fixed value here. */
+  }
+  .seg .seg-gutter .lane-bar {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    border-radius: 2px;
+    background: var(--code-border, var(--accent-2));
+    opacity: .85;
+    cursor: pointer;
+  }
+  .seg .seg-gutter .lane-bar:hover { opacity: 1; }
+  /* Stack-depth badge — shown when the segment has 4+ overlapping
+     codes, the threshold past which in-text highlights become hard
+     to read (F4.3 design rationale). */
+  .seg .seg-gutter .stack-badge {
+    position: absolute;
+    top: -2px;
+    right: -4px;
+    font-size: 9px;
+    color: var(--muted);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0 4px;
+    line-height: 12px;
+    pointer-events: none;
   }
   /* Highlight backgrounds and underline come from a per-code colour
      set via inline style: --code-bg / --code-border. The CSS rule
@@ -928,12 +977,20 @@ function renderTranscript() {
     segEl.className = "seg";
     segEl.dataset.segIdx = segIdx;
 
+    // F4.3 — two-column layout: text on the left, gutter on the
+    // right. The text column hosts the meta header + the words; the
+    // gutter is painted by renderGutter() once APPS / lanes are
+    // known. Wrapping in .seg-text keeps the existing selection
+    // model intact (selection still lands inside the .word spans).
+    const textCol = document.createElement("div");
+    textCol.className = "seg-text";
+
     const meta = document.createElement("div");
     meta.className = "meta";
     const speaker = seg.speaker || "—";
     const start = formatTime(seg.start);
     meta.innerHTML = `<span class="speaker">${escapeHtml(speaker)}</span> · ${start}`;
-    segEl.appendChild(meta);
+    textCol.appendChild(meta);
 
     const body = document.createElement("div");
     body.className = "body";
@@ -960,10 +1017,21 @@ function renderTranscript() {
         body.appendChild(span);
       });
     }
-    segEl.appendChild(body);
+    textCol.appendChild(body);
+    segEl.appendChild(textCol);
+
+    // F4.3 — gutter container; populated by renderGutter() after
+    // APPS are loaded or mutated.
+    const gutter = document.createElement("div");
+    gutter.className = "seg-gutter";
+    gutter.dataset.segIdx = segIdx;
+    gutter.setAttribute("aria-label", "Code gutter");
+    segEl.appendChild(gutter);
+
     root.appendChild(segEl);
   });
   paintApplications();
+  renderGutter();
 }
 
 function formatTime(t) {
@@ -994,6 +1062,203 @@ function paintApplications() {
     paintRangeColoured(startId, endId, colours);
   });
 }
+
+// F4.3 — paint coloured lane bars in each segment's .seg-gutter.
+//
+// The lane assignment is the textbook interval-graph greedy colouring
+// from scribe.application_gutter (matched by assignLanes() in
+// helpers.mjs). Lane 0 is the column closest to the text; the highest
+// lane index used == the maximum simultaneous overlap on this source.
+//
+// We compute the layout client-side using assignLanesPure() — a tiny
+// inline mirror of helpers.mjs::assignLanes — to keep the page
+// dependency-free. The server route
+// (GET /api/projects/<pid>/applications/gutter?source_id=<sid>) is the
+// canonical API for callers that don't want to ship JS; both must
+// agree byte-for-byte on lane indices.
+function renderGutter() {
+  const root = document.getElementById("transcript");
+  if (!root) return;
+  // Clear every gutter first.
+  root.querySelectorAll(".seg-gutter").forEach(g => { g.innerHTML = ""; });
+
+  if (!APPS.length) {
+    root.style.setProperty("--gutter-width", "0px");
+    return;
+  }
+
+  // Decorate each application with the gutter inputs (sourceId,
+  // anchor word ids, optional sub-word offsets) before laying out.
+  const decorated = APPS.map(a => ({
+    id: a.id,
+    sourceId: a.source_id,
+    anchorStartWordId: a.anchor_start_word_id,
+    anchorEndWordId: a.anchor_end_word_id,
+    startCharOffset: a.start_char_offset == null ? null : a.start_char_offset,
+    endCharOffset: a.end_char_offset == null ? null : a.end_char_offset,
+  }));
+
+  let layout;
+  try {
+    layout = assignLanesPure(decorated);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn("F4.3 lane assignment failed:", e);
+    return;
+  }
+  GUTTER_LAYOUT = layout;
+
+  const laneCount = layout.laneCount || 0;
+  const widthPx = laneCount > 0 ? (laneCount * 8 + 4) : 0;
+  root.style.setProperty("--gutter-width", `${widthPx}px`);
+  if (!laneCount) return;
+
+  // Build a quick id → lane map so we can look up each app's lane
+  // without a linear scan during the per-segment paint loop.
+  const laneOf = new Map();
+  const stackOf = new Map();
+  for (const p of layout.placements) {
+    laneOf.set(p.applicationId, p.lane);
+    stackOf.set(p.applicationId, p.stackDepth);
+  }
+
+  // For each segment, find the applications that overlap that
+  // segment (any word-id with the segment index falls inside the
+  // app's [start, end] range) and paint a small bar in each.
+  const segs = TRANSCRIPT.segments || [];
+  segs.forEach((_seg, segIdx) => {
+    const gutter = root.querySelector(`.seg-gutter[data-seg-idx="${segIdx}"]`);
+    if (!gutter) return;
+    let maxStack = 0;
+    let painted = 0;
+    APPS.forEach(a => {
+      const startSeg = parseSegFromWordId(a.anchor_start_word_id);
+      const endSeg = parseSegFromWordId(a.anchor_end_word_id);
+      if (startSeg == null || endSeg == null) return;
+      const lo = Math.min(startSeg, endSeg);
+      const hi = Math.max(startSeg, endSeg);
+      if (segIdx < lo || segIdx > hi) return;
+      const lane = laneOf.get(a.id);
+      if (lane == null) return;
+      const code = CODES.find(c => c.id === a.code_id);
+      const colours = codeColours(code || { id: a.code_id });
+      const bar = document.createElement("div");
+      bar.className = "lane-bar";
+      bar.dataset.appId = a.id;
+      bar.dataset.lane = String(lane);
+      bar.style.left = `${lane * 8}px`;
+      bar.style.background = colours.border;
+      bar.title = code ? code.name : `(deleted code ${a.code_id.slice(0,8)})`;
+      gutter.appendChild(bar);
+      painted += 1;
+      const sd = stackOf.get(a.id) || 0;
+      if (sd > maxStack) maxStack = sd;
+    });
+    // Stack-depth badge — F4.3 design rationale: in-text highlights
+    // become hard to read past ~3 layers. Surface a count when this
+    // segment hits 4+ overlapping codes so the researcher knows the
+    // gutter is doing work the highlights can't.
+    if (painted >= 4) {
+      const badge = document.createElement("span");
+      badge.className = "stack-badge";
+      badge.textContent = String(painted);
+      badge.title = `${painted} overlapping codes on this segment`;
+      gutter.appendChild(badge);
+    }
+  });
+}
+
+// Inline mirror of helpers.mjs::assignLanes. Kept here so the page
+// stays drop-in (no module loader required for the coding view).
+// Algorithm + lane numbering match scribe.application_gutter and the
+// helpers.mjs version. ``apps`` is the decorated list built in
+// renderGutter().
+function assignLanesPure(apps) {
+  if (!apps || !apps.length) {
+    return { sourceId: "", placements: [], laneCount: 0, maxStackDepth: 0 };
+  }
+  const ids = new Set(apps.map(a => a.sourceId));
+  if (ids.size > 1) {
+    throw new Error("assignLanesPure requires single-source input");
+  }
+  const [sourceId] = ids;
+  const startPos = (a) => {
+    const p = parseWordIdLocal(a.anchorStartWordId);
+    if (!p) return null;
+    return [p[0], p[1], a.startCharOffset == null ? 0 : a.startCharOffset];
+  };
+  const endPos = (a) => {
+    const p = parseWordIdLocal(a.anchorEndWordId);
+    if (!p) return null;
+    return [p[0], p[1], a.endCharOffset == null ? Number.POSITIVE_INFINITY : a.endCharOffset];
+  };
+  const cmp = (a, b) => {
+    for (let i = 0; i < 3; i++) {
+      if (a[i] < b[i]) return -1;
+      if (a[i] > b[i]) return 1;
+    }
+    return 0;
+  };
+  // Decorate, sort.
+  const decorated = apps.map(a => ({ a, s: startPos(a), e: endPos(a) }));
+  decorated.sort((x, y) => {
+    const c1 = cmp(x.s, y.s);
+    if (c1 !== 0) return c1;
+    const c2 = cmp(x.e, y.e);
+    if (c2 !== 0) return c2;
+    return x.a.id < y.a.id ? -1 : x.a.id > y.a.id ? 1 : 0;
+  });
+  const ordered = decorated.map(d => d.a);
+
+  const laneEnds = [];
+  const laneOf = Object.create(null);
+  for (const a of ordered) {
+    const s = startPos(a);
+    const e = endPos(a);
+    let chosen = -1;
+    for (let i = 0; i < laneEnds.length; i++) {
+      if (cmp(laneEnds[i], s) <= 0) { chosen = i; break; }
+    }
+    if (chosen === -1) { chosen = laneEnds.length; laneEnds.push(e); }
+    else { laneEnds[chosen] = e; }
+    laneOf[a.id] = chosen;
+  }
+  // Stack depth (strict overlap).
+  const depths = Object.create(null);
+  for (const a of ordered) depths[a.id] = 0;
+  for (let i = 0; i < ordered.length; i++) {
+    const aLo = startPos(ordered[i]);
+    const aHi = endPos(ordered[i]);
+    for (let j = 0; j < ordered.length; j++) {
+      if (i === j) continue;
+      const bLo = startPos(ordered[j]);
+      const bHi = endPos(ordered[j]);
+      if (cmp(aLo, bHi) < 0 && cmp(bLo, aHi) < 0) depths[ordered[i].id] += 1;
+    }
+  }
+  const placements = ordered.map(a => ({
+    applicationId: a.id,
+    lane: laneOf[a.id],
+    stackDepth: depths[a.id],
+  }));
+  let maxDepth = 0;
+  for (const v of Object.values(depths)) if (v > maxDepth) maxDepth = v;
+  return { sourceId, placements, laneCount: laneEnds.length, maxStackDepth: maxDepth };
+}
+
+function parseWordIdLocal(wid) {
+  if (typeof wid !== "string") return null;
+  const m = /^s(\d+)w(\d+)$/.exec(wid);
+  if (!m) return null;
+  return [parseInt(m[1], 10), parseInt(m[2], 10)];
+}
+
+function parseSegFromWordId(wid) {
+  const p = parseWordIdLocal(wid);
+  return p ? p[0] : null;
+}
+
+let GUTTER_LAYOUT = { laneCount: 0, placements: [], maxStackDepth: 0 };
 
 function paintRangeColoured(startId, endId, colours) {
   const swap = compareWordIds(startId, endId) > 0;
@@ -1356,6 +1621,7 @@ async function acceptAiSuggestion(codeId) {
     paintApplications();
     renderApps();
     refreshSpans();
+    renderGutter();
     window.getSelection().removeAllRanges();
     hideAiPanel();
     hidePopover();
@@ -1479,6 +1745,7 @@ async function applyCode(codeId) {
     paintApplications();
     renderApps();
     refreshSpans();
+    renderGutter();
     // Clear browser selection so the popover doesn't immediately re-open.
     window.getSelection().removeAllRanges();
   } catch (e) {
@@ -1627,6 +1894,7 @@ document.getElementById("appList").addEventListener("click", async (e) => {
       paintApplications();
       renderApps();
       refreshSpans();
+      renderGutter();
     } catch (err) {
       alert(`Couldn't delete: ${err.message}`);
     }
