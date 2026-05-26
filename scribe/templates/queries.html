@@ -35,7 +35,7 @@
 {% endblock %}
 
 {% block subtitle_block %}
-  <span class="sub">F3.5 — code · source · participant · speaker · boolean · proximity. Saved queries (F3.7) and matrices (F3.6) graduate later.</span>
+  <span class="sub">F3.5 + F3.6 — code · source · participant · speaker · boolean · proximity, with matrix views over the matching subset. Saved queries (F3.7) graduate later.</span>
 {% endblock %}
 
 {% block extra_styles %}
@@ -152,6 +152,76 @@
     display: inline-flex; align-items: center; gap: 6px;
     color: var(--text); font-size: 13px;
   }
+
+  /* F3.6 matrix view panel */
+  .mx-panel {
+    margin-top: 20px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .mx-panel h2 { margin: 0 0 6px; font-size: 16px; }
+  .mx-panel .hint { color: var(--muted); font-size: 12.5px; margin: 0 0 12px; }
+  .mx-controls {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;
+    margin-bottom: 12px;
+  }
+  .mx-controls .field {
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .mx-controls label {
+    color: var(--muted); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .04em; font-weight: 600;
+  }
+  .mx-controls select.mx-single,
+  .mx-controls input.mx-text {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 10px; font: inherit; font-size: 13px;
+    min-width: 160px;
+  }
+  .mx-results {
+    margin-top: 10px;
+    overflow-x: auto;
+  }
+  .mx-summary {
+    color: var(--muted); font-size: 12.5px; margin-bottom: 8px;
+  }
+  .mx-table {
+    border-collapse: collapse; min-width: 100%;
+    font-size: 12.5px;
+  }
+  .mx-table th, .mx-table td {
+    border: 1px solid var(--border);
+    padding: 4px 8px; text-align: right;
+    white-space: nowrap;
+  }
+  .mx-table th:first-child,
+  .mx-table td:first-child {
+    text-align: left;
+    background: var(--panel-2);
+    position: sticky; left: 0;
+    font-weight: 600;
+  }
+  .mx-table thead th {
+    background: var(--panel-2);
+    position: sticky; top: 0;
+    font-weight: 600;
+  }
+  .mx-table tfoot td {
+    background: var(--panel-2);
+    font-weight: 600;
+  }
+  .mx-empty {
+    color: var(--muted); font-style: italic; padding: 12px 0;
+  }
+  .mx-error {
+    color: var(--err);
+    background: color-mix(in srgb, var(--err) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--err) 40%, var(--border));
+    padding: 8px 10px; border-radius: 6px;
+  }
 {% endblock %}
 
 {% block body %}
@@ -211,6 +281,84 @@
   </div>
 </div>
 
+{# ============================================================ #}
+{# F3.6 — Matrix views                                          #}
+{# ============================================================ #}
+<div class="card mx-panel" data-test-feature="F3.6">
+  <h2>📊 Matrix view</h2>
+  <p class="hint">Build one of three matrices over <strong>every</strong> coded segment in the project, or over the subset matched by the query above (tick "Use current query" first).</p>
+
+  <div class="mx-controls">
+    <div class="field">
+      <label for="mxKind">Matrix</label>
+      <select id="mxKind" class="mx-single" data-test-id="mx-kind-select">
+        <option value="code-by-source">Code × Source (frequency)</option>
+        <option value="code-by-code">Code × Code (co-occurrence)</option>
+        <option value="code-by-attribute">Code × Attribute (cross-tab)</option>
+      </select>
+    </div>
+
+    {# Visible only when kind === code-by-code #}
+    <div class="field" id="mxScopeField" style="display:none">
+      <label for="mxScope">Scope</label>
+      <select id="mxScope" class="mx-single" data-test-id="mx-scope-select">
+        <option value="source">Same source</option>
+        <option value="segment">Overlapping anchors</option>
+        <option value="paragraph">Paragraph (within max gap)</option>
+      </select>
+    </div>
+
+    {# Visible only when kind === code-by-code AND scope === paragraph #}
+    <div class="field" id="mxMaxGapField" style="display:none">
+      <label for="mxMaxGap">Max gap (s)</label>
+      <input type="number" id="mxMaxGap" class="mx-text"
+             data-test-id="mx-max-gap" min="0" step="0.5" value="0">
+    </div>
+
+    {# Visible only when kind === code-by-attribute #}
+    <div class="field" id="mxAttrKindField" style="display:none">
+      <label for="mxAttrKind">Attribute on</label>
+      <select id="mxAttrKind" class="mx-single" data-test-id="mx-attr-kind-select">
+        <option value="source">Source</option>
+        <option value="participant">Participant</option>
+      </select>
+    </div>
+    <div class="field" id="mxAttrKeyField" style="display:none">
+      <label for="mxAttrKey">Attribute key</label>
+      <input type="text" id="mxAttrKey" class="mx-text"
+             data-test-id="mx-attr-key" placeholder="e.g. setting">
+    </div>
+
+    <div class="field">
+      <label>&nbsp;</label>
+      <label class="checkbox-row">
+        <input type="checkbox" id="mxUseQuery"
+               data-test-id="mx-use-query">
+        Use current query
+      </label>
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <label class="checkbox-row">
+        <input type="checkbox" id="mxCompact"
+               data-test-id="mx-compact" checked>
+        Drop empty rows / cols
+      </label>
+    </div>
+
+    <div class="field">
+      <label>&nbsp;</label>
+      <button id="mxRun" class="btn" data-test-id="mx-run">Show matrix</button>
+    </div>
+  </div>
+
+  <div class="mx-results" id="mxResults">
+    <div class="mx-summary" id="mxSummary" data-test-id="mx-summary">Pick a matrix kind, then "Show matrix".</div>
+    <div id="mxError" class="mx-error" style="display:none"></div>
+    <div id="mxTableHost"></div>
+  </div>
+</div>
+
 <script type="module">
 // Pure helpers — buildQueryPayload + groupApplicationsBySource — are
 // in helpers.mjs so the JS-side translation from the form to the
@@ -219,7 +367,9 @@
 // between the runtime path and the test path.
 import {
   buildQueryPayload,
+  buildMatrixPayload,
   groupApplicationsBySource,
+  matrixToTable,
 } from "/static/js/helpers.mjs";
 
 const PROJECT_ID = {{ project_id | tojson }};
@@ -407,6 +557,175 @@ function resetForm() {
 
 document.getElementById("qbRun").addEventListener("click", runQuery);
 document.getElementById("qbReset").addEventListener("click", resetForm);
+
+
+// ============================================================ //
+// F3.6 — Matrix view wiring                                    //
+// ============================================================ //
+
+function refreshMatrixControls() {
+  const kind = document.getElementById("mxKind").value;
+  const scopeField   = document.getElementById("mxScopeField");
+  const maxGapField  = document.getElementById("mxMaxGapField");
+  const attrKindFld  = document.getElementById("mxAttrKindField");
+  const attrKeyFld   = document.getElementById("mxAttrKeyField");
+  const scopeSel     = document.getElementById("mxScope");
+
+  scopeField.style.display  = (kind === "code-by-code")      ? "" : "none";
+  attrKindFld.style.display = (kind === "code-by-attribute") ? "" : "none";
+  attrKeyFld.style.display  = (kind === "code-by-attribute") ? "" : "none";
+  // max-gap only matters for paragraph scope.
+  maxGapField.style.display =
+    (kind === "code-by-code" && scopeSel.value === "paragraph") ? "" : "none";
+}
+
+function readMatrixForm() {
+  const kind = document.getElementById("mxKind").value;
+  const scope = document.getElementById("mxScope").value;
+  const maxGap = Number(document.getElementById("mxMaxGap").value || 0);
+  const attrKind = document.getElementById("mxAttrKind").value;
+  const attrKey = document.getElementById("mxAttrKey").value;
+  const useQuery = document.getElementById("mxUseQuery").checked;
+  const compact = document.getElementById("mxCompact").checked;
+
+  const opts = {
+    kind, scope, maxGap,
+    attributeKey: attrKey,
+    attributeKind: attrKind,
+    compact,
+  };
+  if (useQuery) {
+    opts.query = readFormPayload();
+  }
+  return buildMatrixPayload(opts);
+}
+
+function renderMatrix(payload) {
+  const host = document.getElementById("mxTableHost");
+  const summary = document.getElementById("mxSummary");
+  host.innerHTML = "";
+
+  const matrix = payload.matrix || {};
+  const t = matrixToTable(matrix);
+
+  summary.innerHTML = (
+    `<strong data-test-id="mx-result-total">${t.grandTotal}</strong> total · ` +
+    `<span data-test-id="mx-matched-count">${payload.matched_applications || 0}</span> ` +
+    `of ${payload.total_applications || 0} application(s) fed the matrix · ` +
+    `${matrix.rows ? matrix.rows.length : 0} row(s) × ` +
+    `${matrix.cols ? matrix.cols.length : 0} col(s)`
+  );
+
+  if (!t.body.length || !matrix.cols || !matrix.cols.length) {
+    const empty = document.createElement("div");
+    empty.className = "mx-empty";
+    empty.dataset.testId = "mx-empty";
+    empty.textContent =
+      "No data for this matrix. Try a different kind, loosen the query, or untick \"Drop empty rows / cols\".";
+    host.appendChild(empty);
+    return;
+  }
+
+  const table = document.createElement("table");
+  table.className = "mx-table";
+  table.dataset.testId = "mx-table";
+
+  const thead = document.createElement("thead");
+  const trh = document.createElement("tr");
+  t.header.forEach(h => {
+    const th = document.createElement("th");
+    th.textContent = h;
+    trh.appendChild(th);
+  });
+  // Totals header
+  const totalsHeader = document.createElement("th");
+  totalsHeader.textContent = "Σ";
+  trh.appendChild(totalsHeader);
+  thead.appendChild(trh);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  t.body.forEach((row, ri) => {
+    const tr = document.createElement("tr");
+    row.forEach((cell, ci) => {
+      const el = document.createElement(ci === 0 ? "th" : "td");
+      el.textContent = String(cell);
+      tr.appendChild(el);
+    });
+    const totalCell = document.createElement("td");
+    totalCell.textContent = String(t.rowTotals[ri] || 0);
+    tr.appendChild(totalCell);
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+
+  const tfoot = document.createElement("tfoot");
+  const trf = document.createElement("tr");
+  const corner = document.createElement("td");
+  corner.textContent = "Σ";
+  trf.appendChild(corner);
+  t.colTotals.forEach(v => {
+    const td = document.createElement("td");
+    td.textContent = String(v);
+    trf.appendChild(td);
+  });
+  const grand = document.createElement("td");
+  grand.textContent = String(t.grandTotal);
+  trf.appendChild(grand);
+  tfoot.appendChild(trf);
+  table.appendChild(tfoot);
+
+  host.appendChild(table);
+}
+
+async function runMatrix() {
+  const errEl = document.getElementById("mxError");
+  const summary = document.getElementById("mxSummary");
+  errEl.style.display = "none";
+  summary.textContent = "Computing matrix…";
+  document.getElementById("mxTableHost").innerHTML = "";
+
+  let payload;
+  try {
+    payload = readMatrixForm();
+  } catch (e) {
+    errEl.textContent = e.message || String(e);
+    errEl.style.display = "";
+    summary.textContent = "Matrix request was invalid.";
+    return;
+  }
+
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/matrices/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try {
+        const e = await r.json();
+        if (e && e.detail) msg = String(e.detail);
+      } catch (_) { /* keep msg */ }
+      errEl.textContent = `Matrix failed: ${msg}`;
+      errEl.style.display = "";
+      summary.textContent = "Matrix failed.";
+      return;
+    }
+    const result = await r.json();
+    renderMatrix(result);
+  } catch (e) {
+    errEl.textContent = `Matrix failed: ${e.message || e}`;
+    errEl.style.display = "";
+    summary.textContent = "Matrix failed.";
+  }
+}
+
+document.getElementById("mxKind").addEventListener("change", refreshMatrixControls);
+document.getElementById("mxScope").addEventListener("change", refreshMatrixControls);
+document.getElementById("mxRun").addEventListener("click", runMatrix);
+refreshMatrixControls();
+
 
 (async () => {
   await Promise.all([loadCodes(), loadSources()]);

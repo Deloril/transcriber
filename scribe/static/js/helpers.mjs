@@ -2493,3 +2493,138 @@ export function groupApplicationsBySource(apps) {
   }
   return out;
 }
+
+
+// ---------- F3.6 matrix payload builder ----------
+//
+// Mirror of `scribe.server`'s POST /api/projects/<pid>/matrices/run
+// body shape. Pulled into helpers.mjs (rather than living in the
+// queries.html template) so the JS-side translation is unit-tested
+// against the same vocabulary the Python route accepts:
+//
+//   * kind            — required; one of "code-by-source",
+//                       "code-by-code", "code-by-attribute".
+//   * scope           — only emitted when kind === "code-by-code"
+//                       AND scope is non-empty. Default on the server
+//                       side is "source"; the form sends what the
+//                       user picked so the round-trip is explicit.
+//   * maxGap          — only emitted when kind === "code-by-code"
+//                       AND scope === "paragraph" AND a number > 0.
+//   * attributeKey    — required for kind === "code-by-attribute";
+//                       trimmed.
+//   * attributeKind   — only emitted when kind === "code-by-attribute";
+//                       defaults to "source".
+//   * includeMissing  — only emitted when kind === "code-by-attribute";
+//                       defaults to true.
+//   * compact         — defaults to true on the server; emitted only
+//                       when explicitly false.
+//   * query           — optional Query payload to pre-filter
+//                       applications via the F3.5 executor.
+//
+// Returns a plain object suitable for JSON.stringify into the body of
+// `POST /api/projects/<pid>/matrices/run`.
+export function buildMatrixPayload({
+  kind,
+  scope = "",
+  maxGap = 0,
+  attributeKey = "",
+  attributeKind = "source",
+  includeMissing = true,
+  compact = true,
+  query = null,
+} = {}) {
+  if (!kind) {
+    throw new Error("buildMatrixPayload: kind is required");
+  }
+  const allowed = new Set([
+    "code-by-source", "code-by-code", "code-by-attribute",
+  ]);
+  if (!allowed.has(kind)) {
+    throw new Error(`buildMatrixPayload: unknown kind ${kind}`);
+  }
+
+  const out = { kind };
+
+  if (kind === "code-by-code") {
+    if (scope) out.scope = scope;
+    if (scope === "paragraph"
+        && typeof maxGap === "number"
+        && maxGap > 0
+        && Number.isFinite(maxGap)) {
+      out.max_gap = maxGap;
+    }
+  }
+
+  if (kind === "code-by-attribute") {
+    const k = String(attributeKey || "").trim();
+    if (!k) {
+      throw new Error(
+        "buildMatrixPayload: attributeKey is required for code-by-attribute",
+      );
+    }
+    out.attribute_key = k;
+    out.attribute_kind = attributeKind || "source";
+    out.include_missing = !!includeMissing;
+  }
+
+  if (compact === false) {
+    out.compact = false;
+  }
+
+  if (query && typeof query === "object") {
+    out.query = query;
+  }
+
+  return out;
+}
+
+
+// Render a Matrix.to_dict() payload as a 2-D array suitable for the
+// queries page's <table> render. Pure logic so the row/column shape
+// is testable without a DOM.
+//
+// Returns:
+//   {
+//     header: [<top-left>, ...colTitles],
+//     body:   [[<rowTitle>, ...cellValues], ...],
+//     rowTotals: [<int>, ...],     // per row
+//     colTotals: [<int>, ...],     // per col
+//     grandTotal: <int>,
+//   }
+//
+// `top-left` is the matrix's row_label (e.g. "Code"). Cell values
+// fall back to 0 when missing — Matrix.to_dict() omits zero cells.
+export function matrixToTable(payload) {
+  if (!payload || typeof payload !== "object") {
+    return { header: [], body: [], rowTotals: [], colTotals: [], grandTotal: 0 };
+  }
+  const rows = Array.isArray(payload.rows) ? payload.rows.slice() : [];
+  const cols = Array.isArray(payload.cols) ? payload.cols.slice() : [];
+  const rowTitles = payload.row_titles || {};
+  const colTitles = payload.col_titles || {};
+  const rawCells = Array.isArray(payload.cells) ? payload.cells : [];
+
+  // Build a sparse lookup: "<r>::<c>" → value.
+  const lookup = new Map();
+  for (const triple of rawCells) {
+    if (!Array.isArray(triple) || triple.length !== 3) continue;
+    const [r, c, v] = triple;
+    lookup.set(`${r}::${c}`, Number(v) || 0);
+  }
+
+  const cell = (r, c) => lookup.get(`${r}::${c}`) || 0;
+
+  const header = [String(payload.row_label || ""),
+                  ...cols.map(c => String(colTitles[c] || c))];
+
+  const body = rows.map(r => {
+    const rowKey = String(rowTitles[r] || r);
+    return [rowKey, ...cols.map(c => cell(r, c))];
+  });
+
+  const rowTotals = rows.map(r => cols.reduce((s, c) => s + cell(r, c), 0));
+  const colTotals = cols.map(c => rows.reduce((s, r) => s + cell(r, c), 0));
+  const grandTotal = rowTotals.reduce((s, v) => s + v, 0);
+
+  return { header, body, rowTotals, colTotals, grandTotal };
+}

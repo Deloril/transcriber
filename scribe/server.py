@@ -2067,6 +2067,329 @@ async def run_project_query_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Matrix views (F3.6) — code × source / code × code / code × attribute.
+#
+# scribe.matrix shipped the pure builders in c206b8d with full unit
+# coverage; the UI surface was deferred. This block wires those builders
+# through to the queries page's matrix panel via:
+#
+#   POST /api/projects/<pid>/matrices/run
+#     Body:
+#       {
+#         "kind": "code-by-source" | "code-by-code" | "code-by-attribute",
+#         "scope": "source" | "segment" | "paragraph",   # code-by-code only
+#         "max_gap": <number>,                            # code-by-code only
+#         "attribute_key": "<key>",                       # code-by-attribute only
+#         "attribute_kind": "source" | "participant",     # code-by-attribute only
+#         "include_missing": <bool>,                      # code-by-attribute only
+#         "compact": <bool>,                              # default True
+#         "query": {<scribe.query.Query payload>}         # optional pre-filter
+#       }
+#
+# When ``query`` is provided the matrix is computed over the matching
+# applications only — the natural F3.5 → F3.6 pipeline. Without it,
+# every application in the project participates.
+# --------------------------------------------------------------------------- #
+
+from . import matrix as _matrix  # noqa: E402  (after module-level state)
+
+
+def _matrix_payload_bool(body: dict, key: str, default: bool) -> bool:
+    """Coerce a boolean field that the JS client may have sent as a
+    real bool, or as one of the usual truthy/falsy spellings.
+
+    Mirrors :func:`_archive_query_flag` but with a configurable default
+    (``compact`` defaults to True; ``include_missing`` to True; the
+    rest aren't relevant here)."""
+    if key not in body or body[key] is None:
+        return default
+    v = body[key]
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
+@app.post("/api/projects/{project_id}/matrices/run")
+async def run_project_matrix_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    """Compute a matrix view over the project's coded segments (F3.6).
+
+    Three matrix kinds are supported (see :mod:`scribe.matrix`):
+
+      * ``code-by-source`` — frequency: one cell per (code, source)
+        counts how many applications attach that code to that source.
+      * ``code-by-code``   — undirected co-occurrence within a chosen
+        scope (``source`` / ``segment`` / ``paragraph``). The diagonal
+        counts unordered pairs of distinct applications of the same
+        code (4 in one source ⇒ C(4,2)=6 on the diagonal).
+      * ``code-by-attribute`` — cross-tab against either a
+        :mod:`scribe.source_schema` attribute key or a participant
+        demographic key. Empty values bucket into a sentinel column
+        when ``include_missing`` is true (default).
+
+    The optional ``query`` body field re-uses the F3.5 executor: when
+    provided, the matrix builds only over the matching applications.
+    Without it the full corpus is used.
+
+    Returns::
+
+        {
+          "kind": <str>,
+          "matrix": <Matrix.to_dict()>,
+          "total_applications": <int>,         # all applications in scope
+          "matched_applications": <int>,       # applications that fed the matrix
+          "sources_missing_transcript": [...], # only when query is in play
+          "warnings": [...],
+          "params": {<echoed kind / scope / attribute_key / ...>}
+        }
+
+    Status codes:
+      * 200 — matrix computed (even when zero matches).
+      * 400 — invalid kind / scope / attribute_kind / query payload, or
+              any :class:`MatrixError` from the builder.
+      * 404 — project does not exist on disk.
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    kind_raw = body.get("kind")
+    if not isinstance(kind_raw, str) or not kind_raw.strip():
+        raise HTTPException(400, "'kind' is required")
+    kind = kind_raw.strip().lower()
+    if kind not in ("code-by-source", "code-by-code", "code-by-attribute"):
+        raise HTTPException(
+            400,
+            "'kind' must be one of "
+            "'code-by-source' / 'code-by-code' / 'code-by-attribute'",
+        )
+
+    # F3.6 matrix module's optional knobs — all defaulted server-side
+    # so the caller can send a minimal `{kind: ...}` payload.
+    scope = (body.get("scope") or "source")
+    if not isinstance(scope, str):
+        raise HTTPException(400, "'scope' must be a string")
+    scope = scope.strip().lower() or "source"
+
+    try:
+        max_gap = float(body.get("max_gap", 0) or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "'max_gap' must be a number")
+
+    attribute_key = body.get("attribute_key") or ""
+    if not isinstance(attribute_key, str):
+        raise HTTPException(400, "'attribute_key' must be a string")
+    attribute_key = attribute_key.strip()
+
+    attribute_kind = (body.get("attribute_kind") or "source")
+    if not isinstance(attribute_kind, str):
+        raise HTTPException(400, "'attribute_kind' must be a string")
+    attribute_kind = attribute_kind.strip().lower() or "source"
+    if attribute_kind not in ("source", "participant"):
+        raise HTTPException(
+            400, "'attribute_kind' must be 'source' or 'participant'"
+        )
+
+    include_missing = _matrix_payload_bool(body, "include_missing", True)
+    compact = _matrix_payload_bool(body, "compact", True)
+
+    if kind == "code-by-attribute" and not attribute_key:
+        raise HTTPException(
+            400, "'attribute_key' is required for 'code-by-attribute'"
+        )
+
+    # Optional pre-filter via F3.5 query.
+    query_obj: _query.Query | None = None
+    raw_query = body.get("query")
+    if raw_query is not None:
+        if not isinstance(raw_query, dict):
+            raise HTTPException(400, "'query' must be an object")
+        query_payload = dict(raw_query)
+        query_payload.setdefault("project_id", project_id)
+        if query_payload.get("project_id") != project_id:
+            raise HTTPException(
+                400, "query.project_id must match the URL project_id"
+            )
+        try:
+            query_obj = _query.Query.from_dict(query_payload)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, f"Invalid query: {e}")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        codes = _codes.list_codes(_projects_root(), project_id)
+        sources = _sources.list_sources(_projects_root(), project_id)
+        all_apps = _applications.list_applications(
+            _projects_root(), project_id
+        )
+
+        # Bind the same speaker-map / segments cache the query route
+        # uses, so application_to_query_dict resolves speaker / start /
+        # end consistently between the two pipelines.
+        sources_by_id = {s.id: s for s in sources}
+        smap_cache: dict[str, _speaker_map.SpeakerMap] = {}
+        seg_cache: dict[str, "list[dict] | None"] = {}
+        sources_missing_transcript: list[str] = []
+        warnings: list[str] = []
+
+        def _segments_loader(sid: str):
+            if sid in seg_cache:
+                return seg_cache[sid]
+            src = sources_by_id.get(sid)
+            if src is None:
+                try:
+                    src = _sources.load_source(
+                        _projects_root(), project_id, sid
+                    )
+                    sources_by_id[sid] = src
+                except FileNotFoundError:
+                    seg_cache[sid] = None
+                    return None
+                except _projects.ProjectValidationError:
+                    seg_cache[sid] = None
+                    return None
+            segs = _load_segments_for_source_speaker_map(src)
+            seg_cache[sid] = segs
+            if segs is None and sid not in sources_missing_transcript:
+                sources_missing_transcript.append(sid)
+            return segs
+
+        def _smap_for(sid: str) -> _speaker_map.SpeakerMap:
+            if sid not in smap_cache:
+                try:
+                    smap_cache[sid] = _speaker_map.load_or_empty_speaker_map(
+                        _projects_root(), project_id, sid
+                    )
+                except Exception:
+                    smap_cache[sid] = _speaker_map.SpeakerMap.new(
+                        project_id=project_id, source_id=sid
+                    )
+            return smap_cache[sid]
+
+        # If the caller provided a query, run it through the F3.5
+        # runtime so the matrix is built over the matching subset only.
+        # The runtime caches segments / speaker maps internally; we
+        # re-load the survivors via application_to_query_dict so the
+        # matrix sees the same start/end/speaker fields.
+        total_applications = len(all_apps)
+        if query_obj is not None:
+            try:
+                report = _query_runtime.run_query_against_project(
+                    _projects_root(), project_id, query_obj,
+                    segments_loader=_segments_loader,
+                    applications=all_apps,
+                )
+            except _projects.ProjectValidationError as e:
+                raise HTTPException(400, str(e))
+            apps_for_matrix = list(report.matches)
+            # Surface the runtime's diagnostics so the UI can mirror
+            # the F3.5 page's "this source had no transcript" hint.
+            for sid in report.sources_missing_transcript:
+                if sid not in sources_missing_transcript:
+                    sources_missing_transcript.append(sid)
+            warnings.extend(report.warnings)
+        else:
+            apps_for_matrix = list(all_apps)
+
+        # Project on-disk Application objects → the dict shape the
+        # F3.6 builders accept (code_id, source_id, optional speaker /
+        # start / end / participant_id). Doing this server-side keeps
+        # the pure matrix module honest: it never touches disk.
+        app_dicts: list[dict] = []
+        participant_explicit_ids: dict[str, str] = {}
+        for a in apps_for_matrix:
+            segs = _segments_loader(a.source_id)
+            d = _query_runtime.application_to_query_dict(a, segs)
+            # For code-by-attribute participant resolution: the matrix
+            # module accepts an optional ``participant_id`` field on
+            # the application dict as a fallback when the speaker label
+            # doesn't resolve via the speaker map. We inject it here
+            # whenever the speaker_map maps the application's speaker
+            # label to a participant — this lets the matrix builder
+            # work even if the caller didn't pass speaker_maps.
+            if attribute_kind == "participant":
+                smap = _smap_for(a.source_id)
+                pid = smap.participant_for(d.get("speaker", "") or "")
+                if pid:
+                    d["participant_id"] = pid
+            app_dicts.append(d)
+
+        try:
+            if kind == "code-by-source":
+                m = _matrix.code_by_source_matrix(
+                    applications=app_dicts,
+                    codes=codes,
+                    sources=sources,
+                )
+            elif kind == "code-by-code":
+                m = _matrix.code_by_code_matrix(
+                    applications=app_dicts,
+                    codes=codes,
+                    scope=scope,
+                    max_gap=max_gap,
+                )
+            else:  # code-by-attribute
+                if attribute_kind == "source":
+                    m = _matrix.code_by_attribute_matrix(
+                        applications=app_dicts,
+                        codes=codes,
+                        attribute_key=attribute_key,
+                        attribute_kind="source",
+                        sources=sources,
+                        include_missing=include_missing,
+                    )
+                else:
+                    participants = _participants.list_participants(
+                        _projects_root(), project_id
+                    )
+                    m = _matrix.code_by_attribute_matrix(
+                        applications=app_dicts,
+                        codes=codes,
+                        attribute_key=attribute_key,
+                        attribute_kind="participant",
+                        participants=participants,
+                        speaker_maps=smap_cache,
+                        include_missing=include_missing,
+                    )
+        except _matrix.MatrixError as e:
+            raise HTTPException(400, str(e))
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+        if compact:
+            m = m.compact()
+
+    return JSONResponse({
+        "kind": kind,
+        "matrix": m.to_dict(),
+        "total_applications": total_applications,
+        "matched_applications": len(app_dicts),
+        "sources_missing_transcript": sources_missing_transcript,
+        "warnings": warnings,
+        "params": {
+            "kind": kind,
+            "scope": scope if kind == "code-by-code" else None,
+            "max_gap": max_gap if kind == "code-by-code" else None,
+            "attribute_key": (
+                attribute_key if kind == "code-by-attribute" else None
+            ),
+            "attribute_kind": (
+                attribute_kind if kind == "code-by-attribute" else None
+            ),
+            "include_missing": (
+                include_missing if kind == "code-by-attribute" else None
+            ),
+            "compact": compact,
+        },
+    })
+
+
+# --------------------------------------------------------------------------- #
 # Coders (F2.5, multi-coder mode) — REST surface
 #
 # The pure data layer (``scribe/coders.py``) and the ICR statistics
