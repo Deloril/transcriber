@@ -37,9 +37,13 @@
     padding: 1px 0;
     border-radius: 2px;
   }
+  /* Highlight backgrounds and underline come from a per-code colour
+     set via inline style: --code-bg / --code-border. The CSS rule
+     just plumbs them through so the colour stays per-code while the
+     hover/transition stays uniform. */
   .seg .word.is-applied {
-    background: rgba(167, 139, 250, .15);
-    border-bottom: 2px solid var(--accent-2);
+    background: var(--code-bg, rgba(167, 139, 250, .15));
+    border-bottom: 2px solid var(--code-border, var(--accent-2));
   }
   .seg .word.in-selection { background: rgba(122,167,255,.25); }
 
@@ -73,12 +77,35 @@
     cursor: pointer;
     font-size: 13px;
     color: var(--text);
+    display: flex; align-items: center; gap: 8px;
   }
   .apply-popover .pop-row:hover { background: var(--panel-2); }
+  .apply-popover .pop-row .row-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .apply-popover .pop-row .stage {
-    color: var(--muted); font-size: 10px; margin-left: 8px;
+    color: var(--muted); font-size: 10px;
+  }
+  /* Small per-code colour swatch shown next to each code in the popover
+     and the side panel so users can spot the same code across the
+     transcript without reading every label. */
+  .swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    background: var(--accent-2);
   }
   .apply-popover .pop-empty { padding: 8px 10px; color: var(--muted); font-size: 12px; }
+  /* "Create code: foo" row — visually distinct from existing-code rows so
+     the user understands they're about to mint something new, not pick. */
+  .apply-popover .pop-row.create-row {
+    border-top: 1px dashed var(--border);
+    margin-top: 4px;
+    padding-top: 8px;
+    color: var(--accent);
+  }
+  .apply-popover .pop-row.create-row:hover { background: rgba(122,167,255,.08); }
+  .apply-popover .pop-row.create-row .new-name { font-weight: 600; }
+  .apply-popover .pop-row.create-row.only { border-top: 0; margin-top: 0; padding-top: 6px; }
 
   /* Side panel — applications already on this source. */
   .side-card { padding: 14px 16px; }
@@ -86,13 +113,19 @@
     padding: 8px 10px;
     background: var(--panel-2);
     border: 1px solid var(--border);
+    /* Left edge picks up the per-code colour for an at-a-glance
+       cross-reference with the highlights in the transcript. */
+    border-left: 3px solid var(--code-border, var(--accent-2));
     border-radius: 6px;
     margin-bottom: 6px;
     cursor: pointer;
     font-size: 12px;
   }
-  .app-row:hover { border-color: var(--accent); }
-  .app-row .code-name { color: var(--text); font-weight: 600; }
+  .app-row:hover { border-color: var(--accent); border-left-color: var(--code-border, var(--accent-2)); }
+  .app-row .code-name {
+    color: var(--text); font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
   .app-row .quote {
     color: var(--muted);
     font-style: italic;
@@ -160,6 +193,44 @@ function escapeHtml(s) {
     "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
   }[c]));
 }
+
+/**
+ * Stable per-code colour. Hashes the code id (or name as a fallback)
+ * to a hue 0..359, then returns:
+ *   {bg, border, swatch} — usable as inline-style values.
+ *
+ * Background is low-saturation low-alpha so overlapping highlights
+ * stay readable against the dark theme; border is the same hue at
+ * full saturation. Two codes in the same hue range may collide; that's
+ * accepted (the user said "some duplication is ok").
+ */
+const _CODE_COLOUR_CACHE = new Map();
+function codeColours(code) {
+  const key = (code && (code.id || code.name)) || "";
+  if (_CODE_COLOUR_CACHE.has(key)) return _CODE_COLOUR_CACHE.get(key);
+  // 32-bit FNV-1a → mod 360. Stable, no randomness.
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  // Spread across the full hue circle but skip the orange/red 10–25
+  // band so highlights don't read as "errors". 0..335 covering rest.
+  const hue = (h % 335 + 25) % 360;
+  // Saturation/lightness tuned for the dark theme — high alpha kept
+  // for the swatch + border, low alpha for the inline highlight.
+  const out = {
+    bg: `hsla(${hue}, 65%, 65%, 0.22)`,   // low-alpha tint behind text
+    border: `hsl(${hue}, 65%, 62%)`,      // 2px underline / left accent
+    swatch: `hsl(${hue}, 65%, 60%)`,      // small colour chip
+  };
+  _CODE_COLOUR_CACHE.set(key, out);
+  return out;
+}
+
+// Convenience accessor used by render code that just needs the swatch
+// background string (e.g. inline style for popover rows).
+function codeColour(code) { return codeColours(code).swatch; }
 
 async function fetchJSON(url) {
   const r = await fetch(url);
@@ -266,11 +337,35 @@ function formatTime(t) {
 
 function paintApplications() {
   // Clear all "is-applied" first, then re-paint.
-  document.querySelectorAll(".word.is-applied").forEach(el => el.classList.remove("is-applied"));
+  document.querySelectorAll(".word.is-applied").forEach(el => {
+    el.classList.remove("is-applied");
+    el.style.removeProperty("--code-bg");
+    el.style.removeProperty("--code-border");
+  });
+  // For each application, paint its word range and stamp the per-code
+  // colour into CSS custom properties. Where two applications overlap
+  // on the same word, the *later* one wins — matches the rendering
+  // order the user sees, since side-panel rows are sorted by start.
   APPS.forEach(a => {
     const startId = a.anchor_start_word_id;
     const endId = a.anchor_end_word_id;
-    paintRange(startId, endId, "is-applied");
+    const code = CODES.find(c => c.id === a.code_id);
+    const colours = codeColours(code || { id: a.code_id });
+    paintRangeColoured(startId, endId, colours);
+  });
+}
+
+function paintRangeColoured(startId, endId, colours) {
+  const swap = compareWordIds(startId, endId) > 0;
+  const lo = swap ? endId : startId;
+  const hi = swap ? startId : endId;
+  document.querySelectorAll(".word").forEach(el => {
+    const id = el.dataset.wordId;
+    if (compareWordIds(id, lo) >= 0 && compareWordIds(id, hi) <= 0) {
+      el.classList.add("is-applied");
+      el.style.setProperty("--code-bg", colours.bg);
+      el.style.setProperty("--code-border", colours.border);
+    }
   });
 }
 
@@ -368,34 +463,95 @@ function showPopover(range) {
 
 function renderPopList(filter) {
   const list = document.getElementById("popList");
-  const f = filter.toLowerCase();
+  const f = filter.trim().toLowerCase();
   const candidates = CODES.filter(c => !f || (c.name || "").toLowerCase().includes(f));
-  if (!candidates.length) {
-    if (!CODES.length) {
-      list.innerHTML = `<div class="pop-empty">No codes yet. <a href="/projects/${PROJECT_ID}/codebook">Add a code →</a></div>`;
-    } else {
-      list.innerHTML = `<div class="pop-empty">No codes match "${escapeHtml(filter)}".</div>`;
-    }
-    return;
+
+  // Detect an *exact* (case-insensitive, trim-aware) match so we don't
+  // offer to create a duplicate when the typed text already exists.
+  const exact = !!f && CODES.some(c => (c.name || "").trim().toLowerCase() === f);
+
+  let html = "";
+  if (candidates.length) {
+    html += candidates.map(c => {
+      const swatch = `<span class="swatch" style="background:${codeColour(c)}"></span>`;
+      return `<div class="pop-row" data-code-id="${escapeHtml(c.id)}">${swatch}<span class="row-label">${escapeHtml(c.name)}</span><span class="stage">${escapeHtml(c.stage || "initial")}</span></div>`;
+    }).join("");
   }
-  list.innerHTML = candidates.map(c =>
-    `<div class="pop-row" data-code-id="${escapeHtml(c.id)}">${escapeHtml(c.name)}<span class="stage">${escapeHtml(c.stage || "initial")}</span></div>`
-  ).join("");
+
+  // "Create code: <text>" row — only when the user has typed something
+  // and it's not already an exact match. Goes at the bottom so picking
+  // an existing code stays the easy default.
+  if (f && !exact) {
+    const onlyClass = candidates.length ? "" : "only";
+    html += `<div class="pop-row create-row ${onlyClass}" data-create-name="${escapeHtml(filter.trim())}">+ Create code: <span class="new-name">"${escapeHtml(filter.trim())}"</span></div>`;
+  }
+
+  if (!html) {
+    if (!CODES.length) {
+      html = `<div class="pop-empty">No codes yet. <a href="/projects/${PROJECT_ID}/codebook">Add a code →</a></div>`;
+    } else {
+      html = `<div class="pop-empty">No codes match "${escapeHtml(filter)}".</div>`;
+    }
+  }
+  list.innerHTML = html;
 }
 
 document.getElementById("popSearch").addEventListener("input", (e) => {
   renderPopList(e.target.value);
 });
 document.getElementById("popSearch").addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { e.preventDefault(); hidePopover(); }
+  if (e.key === "Escape") { e.preventDefault(); hidePopover(); return; }
+  if (e.key === "Enter") {
+    // Enter picks the first row in the list — either the top existing
+    // candidate or the "Create code: <text>" row if no existing codes
+    // match. Mirrors the standard quick-picker pattern users expect.
+    e.preventDefault();
+    const firstRow = document.querySelector("#popList .pop-row");
+    if (firstRow) firstRow.click();
+  }
 });
 document.getElementById("popList").addEventListener("click", async (e) => {
   const row = e.target.closest(".pop-row");
   if (!row || !CURRENT_SELECTION) return;
-  const codeId = row.dataset.codeId;
-  await applyCode(codeId);
+  // Two row kinds: existing-code (data-code-id) and create-on-the-fly
+  // (data-create-name). Disable both during the network round-trip so
+  // a double-click can't double-apply.
+  row.style.pointerEvents = "none";
+  try {
+    if (row.dataset.codeId) {
+      await applyCode(row.dataset.codeId);
+    } else if (row.dataset.createName) {
+      await createCodeAndApply(row.dataset.createName);
+    }
+  } finally {
+    row.style.pointerEvents = "";
+  }
   hidePopover();
 });
+
+async function createCodeAndApply(name) {
+  // Create the code, then apply it to the current selection. Shape
+  // mirrors the codebook-editor form (definition / inclusion /
+  // exclusion default to empty; the user can flesh them out later in
+  // the codebook editor).
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/codes`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ name }),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const code = await r.json();
+    CODES.push(code);          // keep in-memory list in sync so the
+                               // popover's next render shows it as existing
+    await applyCode(code.id);
+  } catch (e) {
+    alert(`Couldn't create code: ${e.message}`);
+  }
+}
 
 // Close popover on outside click.
 document.addEventListener("mousedown", (e) => {
@@ -449,8 +605,12 @@ function renderApps() {
     const code = CODES.find(c => c.id === a.code_id);
     const codeName = code ? code.name : `(deleted code ${a.code_id.slice(0,8)})`;
     const snippet = quoteSnippet(a.anchor_start_word_id, a.anchor_end_word_id);
-    return `<div class="app-row" data-app-id="${escapeHtml(a.id)}" data-start="${escapeHtml(a.anchor_start_word_id)}">
-      <span class="code-name">${escapeHtml(codeName)}</span>
+    const colours = codeColours(code || { id: a.code_id });
+    return `<div class="app-row"
+                 data-app-id="${escapeHtml(a.id)}"
+                 data-start="${escapeHtml(a.anchor_start_word_id)}"
+                 style="--code-border:${colours.border}">
+      <span class="code-name"><span class="swatch" style="background:${colours.swatch}"></span>${escapeHtml(codeName)}</span>
       <div class="quote">"${escapeHtml(snippet)}"</div>
       <div class="actions">
         <button data-act="delete">Remove</button>
