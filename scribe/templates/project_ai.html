@@ -190,6 +190,64 @@
   <div id="ai-error" class="ai-section" hidden style="color:var(--err);font-size:13px"></div>
 </div>
 
+{# F8.11 / F8.12 — model-tier picker + download manager.
+
+   The picker reads ``GET /api/system/model-recommendations`` (which
+   wraps F8.11's hardware autodetection + tier verdicts and decorates
+   each tier with F8.12's baked-in model picks). It then lets the user
+   pull a recommended model into the configured backend's local store
+   via ``POST /api/projects/<pid>/ai/backend/pull`` (F8.11). "Use as
+   default" copies the model tag into the Active-model form's
+   default_model / default_embedding_model field so the user can save
+   it as the project's default in one click.
+
+   This is the only place in the UI where the tier verdicts and the
+   download manager are reachable without curl. The settings page
+   (W4.2) graduates the read-only hardware tier summary; the actual
+   download manager lives here because the pull endpoint is project-
+   scoped (it consults the saved BackendConfig).
+#}
+<div id="aiTierPickerCard" class="card ai-card"
+     data-test-feature="F8.11"
+     data-test-id="ai-tier-picker-card">
+  <h2>Model tier picker <span class="ai-pill">F8.11 · F8.12</span></h2>
+  <p class="ai-help">
+    Scribe inspects your CPU / GPU / RAM and tells you which tier of
+    open-weights model fits. Each tier ships with one default and one
+    alternative pick (F8.12). Click <strong>Pull</strong> to download
+    the model into the configured backend, or <strong>Use as default</strong>
+    to wire it into the Active-model form above. Local-only — no cloud
+    calls, ever.
+  </p>
+
+  <div id="ai-tier-hw" class="ai-section ai-status-row"
+       data-test-id="ai-tier-hardware">
+    <span class="dot"></span>
+    <span class="text">Loading hardware…</span>
+  </div>
+
+  <div id="ai-tier-list" class="ai-section"
+       data-test-id="ai-tier-list" style="margin-top:10px"></div>
+
+  <div class="ai-section" style="margin-top:14px">
+    <strong>Embedding models</strong>
+    <p class="ai-help" style="margin-top:4px">
+      Used to build the F8.2 embedding index. Lightweight; fits on every
+      tier. The multilingual default is recommended unless your corpus
+      is English-only.
+    </p>
+    <div id="ai-embed-list" class="ai-section"
+         data-test-id="ai-embed-list" style="margin-top:6px"></div>
+  </div>
+
+  <div id="ai-tier-msg" class="ai-section hint" role="alert"
+       aria-live="polite" data-test-id="ai-tier-msg" style="margin-top:8px"></div>
+
+  <div id="ai-tier-error" class="ai-section" hidden
+       style="color:var(--err);font-size:13px"
+       data-test-id="ai-tier-error"></div>
+</div>
+
 <div class="card ai-card" data-test-feature="F8.2">
   <h2>Embedding index</h2>
   <p class="ai-help">
@@ -1008,6 +1066,217 @@ document.getElementById("embed-index-clear-btn").addEventListener("click", clear
   if (force) force.addEventListener("click", forceOnGate);
   if (reset) reset.addEventListener("click", resetGate);
 })();
+
+// --- F8.11 / F8.12 model-tier picker + download manager --------- //
+
+function _tpFitClass(fit) {
+  if (fit === "comfortable") return "ok";
+  if (fit === "infeasible") return "bad";
+  return "muted";
+}
+
+function _tpFitLabel(fit) {
+  if (fit === "comfortable") return "✓ Comfortable";
+  if (fit === "marginal") return "△ Marginal";
+  if (fit === "infeasible") return "✕ Infeasible";
+  return fit || "unknown";
+}
+
+function _tpEsc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function _tpRenderHardware(hw) {
+  const row = $("ai-tier-hw");
+  if (!row) return;
+  const backend = (hw.gpu_backend || "cpu").toUpperCase();
+  const parts = [`Backend: ${_tpEsc(backend)}`];
+  if (hw.gpu_name) parts.push(`Device: ${_tpEsc(hw.gpu_name)}`);
+  if (hw.vram_gb) parts.push(`${_tpEsc(hw.vram_gb)} GB VRAM`);
+  if (hw.system_ram_gb) parts.push(`${_tpEsc(hw.system_ram_gb)} GB RAM`);
+  if (hw.cpu_count) parts.push(`${_tpEsc(hw.cpu_count)} CPU`);
+  setStatusRow(row, hw.gpu_backend && hw.gpu_backend !== "cpu" ? "ok" : "muted",
+               parts.join(" · "));
+}
+
+function _tpRenderModelRow(model, defaultFieldId) {
+  const tag = _tpEsc(model.tag);
+  const display = _tpEsc(model.display_name || model.tag);
+  const params = model.parameter_size_b ? `${model.parameter_size_b}B` : "";
+  const ctx = model.context_window
+    ? `${Math.round(model.context_window / 1000)}k ctx`
+    : "";
+  const meta = [params, _tpEsc(model.licence || ""), ctx]
+    .filter(Boolean).join(" · ");
+  const note = model.notes ? `<div class="hint" style="margin-top:3px;font-size:12px">${_tpEsc(model.notes)}</div>` : "";
+  const defaultBadge = model.is_default
+    ? ` <span class="ai-pill" style="font-size:11px">default</span>` : "";
+  return `
+    <div class="ai-model-row" data-test-id="ai-tier-model" data-model-tag="${tag}">
+      <div style="flex:1;min-width:0">
+        <div><strong>${display}</strong>${defaultBadge}</div>
+        <div class="hint" style="font-size:12px"><code>${tag}</code> · ${meta}</div>
+        ${note}
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <button class="btn secondary" type="button"
+                data-test-id="ai-tier-pull"
+                data-action="pull"
+                data-model-tag="${tag}">Pull</button>
+        <button class="btn secondary" type="button"
+                data-test-id="ai-tier-use-default"
+                data-action="use-default"
+                data-model-tag="${tag}"
+                data-default-field="${_tpEsc(defaultFieldId)}">Use as default</button>
+      </div>
+    </div>`;
+}
+
+function _tpRenderTier(tier, isRecommended) {
+  const fitClass = _tpFitClass(tier.fit);
+  const fitLabel = _tpFitLabel(tier.fit);
+  const recommended = isRecommended
+    ? `<span class="ai-pill" style="margin-left:6px"
+              data-test-id="ai-tier-recommended-badge">Recommended</span>`
+    : "";
+  const reason = tier.reason
+    ? `<div class="hint" style="font-size:12px;margin-top:2px">${_tpEsc(tier.reason)}</div>`
+    : "";
+  const models = (tier.recommended_models || [])
+    .map(m => _tpRenderModelRow(m, "ai-default-model")).join("");
+  return `
+    <div class="ai-section" data-test-id="ai-tier-row" data-tier-id="${_tpEsc(tier.id)}"
+         style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-top:8px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
+        <div>
+          <div><strong>${_tpEsc(tier.display_name || tier.id)}</strong>${recommended}
+            <span class="hint" style="margin-left:6px">${_tpEsc(tier.parameter_label || "")}</span>
+          </div>
+          <div class="hint" style="font-size:12px">${_tpEsc(tier.description || "")}</div>
+          ${reason}
+        </div>
+        <div class="ai-status-row ${fitClass}" data-test-id="ai-tier-fit"
+             data-fit="${_tpEsc(tier.fit)}" style="align-self:flex-start">
+          <span class="dot"></span><span class="text">${_tpEsc(fitLabel)}</span>
+        </div>
+      </div>
+      <div class="ai-models-list" style="margin-top:8px">${models}</div>
+    </div>`;
+}
+
+async function loadModelTiers() {
+  const errBox = $("ai-tier-error");
+  const list = $("ai-tier-list");
+  const embed = $("ai-embed-list");
+  if (errBox) errBox.hidden = true;
+  if (list) list.innerHTML = `<div class="hint" data-test-id="ai-tier-loading">Loading tiers…</div>`;
+  try {
+    const r = await fetch(`/api/system/model-recommendations`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const body = await r.json();
+    _tpRenderHardware(body.hardware || {});
+    const tiers = body.tiers || [];
+    const recommended = body.recommended || "";
+    if (!tiers.length) {
+      list.innerHTML = `<div class="hint" data-test-id="ai-tier-empty">No tiers reported.</div>`;
+    } else {
+      list.innerHTML = tiers
+        .map(t => _tpRenderTier(t, t.id === recommended))
+        .join("");
+    }
+    const embedModels = body.embedding_models || [];
+    if (!embedModels.length) {
+      embed.innerHTML = `<div class="hint" data-test-id="ai-embed-empty">No embedding models registered.</div>`;
+    } else {
+      embed.innerHTML = embedModels
+        .map(m => _tpRenderModelRow(m, "ai-default-embed")).join("");
+    }
+  } catch (e) {
+    if (errBox) {
+      errBox.hidden = false;
+      errBox.textContent = `Couldn't load model tiers: ${e.message}`;
+    }
+    if (list) list.innerHTML = "";
+    if (embed) embed.innerHTML = "";
+  }
+}
+
+async function pullModel(tag, btn) {
+  const msg = $("ai-tier-msg");
+  if (!tag) return;
+  if (msg) {
+    msg.textContent = `Pulling ${tag}…`;
+    msg.style.color = "var(--muted)";
+  }
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/ai/backend/pull`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({model: tag}),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.detail || `HTTP ${r.status}`);
+    }
+    const body = await r.json();
+    if (msg) {
+      if (body.success) {
+        msg.textContent = `Pulled ${tag}.`;
+        msg.style.color = "var(--ok)";
+      } else {
+        msg.textContent = `Pull reported failure for ${tag}: ${body.error || "see backend logs"}`;
+        msg.style.color = "var(--err)";
+      }
+    }
+  } catch (e) {
+    if (msg) {
+      msg.textContent = `Couldn't pull ${tag}: ${e.message}`;
+      msg.style.color = "var(--err)";
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function useAsDefault(tag, fieldId) {
+  const input = document.getElementById(fieldId);
+  const msg = $("ai-tier-msg");
+  if (!input) {
+    if (msg) {
+      msg.textContent = `No field "${fieldId}" to set.`;
+      msg.style.color = "var(--err)";
+    }
+    return;
+  }
+  input.value = tag;
+  input.dispatchEvent(new Event("change", {bubbles: true}));
+  if (msg) {
+    msg.textContent = `Set ${fieldId === "ai-default-embed" ? "embedding" : "default"} model to ${tag}. Click "Save backend" to persist.`;
+    msg.style.color = "var(--ok)";
+  }
+}
+
+(function wireTierPicker() {
+  const card = document.getElementById("aiTierPickerCard");
+  if (!card) return;
+  card.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("button[data-action]");
+    if (!btn) return;
+    const action = btn.getAttribute("data-action");
+    const tag = btn.getAttribute("data-model-tag") || "";
+    if (action === "pull") {
+      pullModel(tag, btn);
+    } else if (action === "use-default") {
+      const fieldId = btn.getAttribute("data-default-field") || "ai-default-model";
+      useAsDefault(tag, fieldId);
+    }
+  });
+})();
+
+loadModelTiers();
 
 loadBackend();
 loadGate();

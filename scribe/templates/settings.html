@@ -3,10 +3,11 @@
 {% block title %}Settings{% endblock %}
 
 {% block body %}
-<div class="stub">
-  <strong>Wireframe.</strong> Top-level settings — host preferences and credentials, not project-scoped.
-  Project settings (codebook stage, methodology, attributes) live under <code>/projects/&lt;id&gt;/settings</code>.
-</div>
+<p class="hint" style="margin-bottom:14px">
+  Top-level settings — host preferences and credentials, not project-scoped.
+  Project settings (codebook stage, methodology, attributes) live under
+  <code>/projects/&lt;id&gt;/settings</code>.
+</p>
 
 <div class="grid two">
   <div class="card">
@@ -28,13 +29,23 @@
     </div>
   </div>
 
-  <div class="card">
-    <h2>Local AI</h2>
-    <div class="hint">Model picker for the academic-coding suggester (<code>F8.1</code>, <code>F8.11</code>).</div>
-    <div class="wf" style="margin-top:10px">
-      <span class="label">Wireframe</span><br>
-      Backend: Ollama / llama.cpp / off · Tier: small / mid / large · Model name · Embedding model · "Test" button.
+  <div class="card" data-test-feature="F8.11" data-test-id="settings-tier-picker">
+    <h2>Local AI · model tier <span class="ai-pill" style="margin-left:4px">F8.11 · F8.12</span></h2>
+    <div class="hint">
+      Hardware-aware tier verdict for the academic-coding suggester. The
+      configurable backend (provider / base URL / default model) lives on the
+      project AI page — open a project to pull a model into the local store.
     </div>
+    <div id="tier-summary" class="hint" style="margin-top:10px"
+         data-test-id="settings-tier-summary">Loading…</div>
+    <div id="tier-rows" style="margin-top:10px"
+         data-test-id="settings-tier-rows"></div>
+    <div id="tier-embed" style="margin-top:10px"
+         data-test-id="settings-tier-embed"></div>
+    <p class="hint" style="margin-top:10px">
+      Open <a href="/projects" data-test-id="settings-tier-projects-link">a project</a>
+      and visit its <strong>AI</strong> page to download a recommended model.
+    </p>
   </div>
 
   <div class="card">
@@ -56,5 +67,71 @@ fetch("/api/capabilities").then(r => r.ok ? r.json() : null).then(c => {
   ].filter(Boolean);
   document.getElementById("caps").innerHTML = lines.join("<br>");
 }).catch(() => {});
+
+// F8.11 / F8.12 — render a read-only hardware-tier verdict + per-tier
+// recommended models. The download manager is project-scoped so it
+// lives on /projects/<id>/ai instead.
+function _settingsTierEsc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function _settingsTierFitLabel(fit) {
+  if (fit === "comfortable") return "✓ comfortable";
+  if (fit === "marginal") return "△ marginal";
+  if (fit === "infeasible") return "✕ infeasible";
+  return fit || "unknown";
+}
+fetch("/api/system/model-recommendations")
+  .then(r => r.ok ? r.json() : null)
+  .then(body => {
+    if (!body) {
+      document.getElementById("tier-summary").textContent =
+        "Tier recommendations unavailable.";
+      return;
+    }
+    const hw = body.hardware || {};
+    const summary = document.getElementById("tier-summary");
+    summary.innerHTML = [
+      `Hardware: ${_settingsTierEsc((hw.gpu_backend || "cpu").toUpperCase())}`,
+      hw.gpu_name ? _settingsTierEsc(hw.gpu_name) : "",
+      hw.vram_gb ? `${_settingsTierEsc(hw.vram_gb)} GB VRAM` : "",
+      hw.system_ram_gb ? `${_settingsTierEsc(hw.system_ram_gb)} GB RAM` : "",
+    ].filter(Boolean).join(" · ");
+    const rows = document.getElementById("tier-rows");
+    const recommended = body.recommended || "";
+    rows.innerHTML = (body.tiers || []).map(t => {
+      const isRec = t.id === recommended;
+      const recBadge = isRec
+        ? ` <span class="ai-pill" data-test-id="settings-tier-recommended">recommended</span>`
+        : "";
+      const models = (t.recommended_models || []).map(m => {
+        const tag = _settingsTierEsc(m.tag);
+        return `<li data-test-id="settings-tier-model"><code>${tag}</code>${m.is_default ? " <em>(default)</em>" : ""}</li>`;
+      }).join("");
+      return `
+        <div class="hint" data-test-id="settings-tier-row" data-tier-id="${_settingsTierEsc(t.id)}"
+             style="margin-top:6px">
+          <strong>${_settingsTierEsc(t.display_name || t.id)}</strong>${recBadge}
+          — ${_settingsTierEsc(_settingsTierFitLabel(t.fit))}
+          <ul style="margin:4px 0 0 18px">${models}</ul>
+        </div>`;
+    }).join("");
+    const embed = document.getElementById("tier-embed");
+    if (body.embedding_models && body.embedding_models.length) {
+      embed.innerHTML = `
+        <div class="hint">Embedding models:
+          <ul style="margin:4px 0 0 18px">${
+            body.embedding_models.map(m =>
+              `<li data-test-id="settings-tier-embed-model"><code>${_settingsTierEsc(m.tag)}</code>${m.is_default ? " <em>(default)</em>" : ""}</li>`
+            ).join("")
+          }</ul>
+        </div>`;
+    }
+  })
+  .catch(() => {
+    document.getElementById("tier-summary").textContent =
+      "Tier recommendations unavailable.";
+  });
 </script>
 {% endblock %}
