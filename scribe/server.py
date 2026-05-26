@@ -1651,6 +1651,315 @@ async def participant_source_map_endpoint(project_id: str) -> JSONResponse:
     return JSONResponse({"map": m})
 
 
+# Speaker-map module is imported here (in addition to the QDPX block
+# below) because the F3.4 endpoints below need it; the duplicate alias
+# is harmless and keeps both feature blocks self-contained.
+from . import speaker_map as _speaker_map  # noqa: E402  (F3.4)
+
+
+# --------------------------------------------------------------------------- #
+# Speaker map (F3.4) — speaker-awareness REST surface
+#
+# The pure data layer ``scribe/speaker_map.py`` shipped in 84039cb with
+# 82 passing unit tests but had no HTTP surface — researchers couldn't
+# tag a transcript label as ``interviewer`` vs ``interviewee`` from the
+# UI, link a label to a Project participant, or run the role / participant
+# distribution that powers the F3.6 matrix views. F3.4 closes that gap
+# so "show me only the interviewee's words" stops being a curl-only
+# operation.
+#
+# Endpoints:
+#
+#   GET    /api/projects/<pid>/sources/<sid>/speaker_map
+#           Load the saved map (returns an empty map if none exists yet,
+#           so the UI can branch on entries-vs-empty without a 404).
+#           Always also returns ``transcript_labels`` — distinct labels
+#           found in the source's transcript, in first-occurrence order
+#           — so the UI can render a row per speaker even before the
+#           researcher has saved anything. Hits the same edited.json
+#           / *.json discovery as the QDPX exporter.
+#
+#   PUT    /api/projects/<pid>/sources/<sid>/speaker_map
+#           Replace the map with the supplied entries (set-style save —
+#           one Save click writes the whole roster). Body shape:
+#               {"entries": [
+#                  {"label": "SPEAKER_00",
+#                   "role": "interviewer",
+#                   "participant_id": null,
+#                   "display_name": "",
+#                   "notes": ""},
+#                  ...
+#               ]}
+#           Validates each entry; the role must be in SPEAKER_ROLES and
+#           any participant_id must shape-match a real participant on
+#           disk. Returns the saved map.
+#
+#   POST   /api/projects/<pid>/sources/<sid>/speaker_map/seed
+#           Build a fresh map from the source's transcript segments.
+#           Pre-existing role / participant assignments are preserved
+#           (uses the merge_segments_into_map helper). Body:
+#               {"default_role": "unknown"}   (optional)
+#           Returns the saved map and the list of newly-added labels.
+#
+#   GET    /api/projects/<pid>/sources/<sid>/speaker_map/distribution
+#           Role + participant counts for the source's transcript,
+#           computed from the current map. Powers the matrix-view
+#           preview ("how much did each role talk?"). 200 with empty
+#           dicts if the transcript can't be located.
+# --------------------------------------------------------------------------- #
+
+
+def _load_segments_for_source_speaker_map(
+    source: "_sources.Source",
+) -> list[dict] | None:
+    """Resolve the segment list for a source — same discovery rules as
+    the QDPX exporter (prefer ``edited.json``, fall back to any
+    ``*.json`` engine sidecar with a ``segments`` key). Returns None
+    if no transcript is available.
+
+    Pulled out as a separate function so the speaker-map endpoints can
+    use it without importing from the QDPX block (which lives further
+    down the file and depends on different modules)."""
+    if not getattr(source, "transcript_job_id", ""):
+        return None
+    job_dir = OUTPUT_DIR / source.transcript_job_id
+    if not job_dir.is_dir():
+        return None
+    edited = job_dir / "edited.json"
+    candidates: list[Path] = []
+    if edited.is_file():
+        candidates.append(edited)
+    candidates.extend(
+        sorted(p for p in job_dir.glob("*.json") if p.name != "edited.json")
+    )
+    for p in candidates:
+        try:
+            data = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("segments"), list):
+            return data["segments"]
+    return None
+
+
+@app.get("/api/projects/{project_id}/sources/{source_id}/speaker_map")
+async def get_source_speaker_map_endpoint(
+    project_id: str, source_id: str
+) -> JSONResponse:
+    """Load the speaker map for a source plus the distinct transcript
+    labels (F3.4).
+
+    Returns 200 with an empty ``entries`` list when no map has been
+    saved yet — the UI branches on ``entries.length`` rather than the
+    HTTP status. Always returns ``transcript_labels`` (first-occurrence
+    order) so the UI can show a row per speaker even before the
+    researcher hits Save. ``transcript_labels`` is empty when no
+    transcript can be located on disk.
+    """
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            source = _sources.load_source(
+                _projects_root(), project_id, source_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+        speaker_map = _speaker_map.load_or_empty_speaker_map(
+            _projects_root(), project_id, source_id
+        )
+    segments = _load_segments_for_source_speaker_map(source)
+    if segments is None:
+        labels: list[str] = []
+    else:
+        labels = _speaker_map.speaker_labels_in_segments(segments)
+    return JSONResponse({
+        "speaker_map": speaker_map.to_dict(),
+        "transcript_labels": labels,
+        "available_roles": list(_speaker_map.SPEAKER_ROLES),
+    })
+
+
+@app.put("/api/projects/{project_id}/sources/{source_id}/speaker_map")
+async def put_source_speaker_map_endpoint(
+    project_id: str, source_id: str, request: Request
+) -> JSONResponse:
+    """Save the entire speaker map for a source in one call (F3.4).
+
+    Set-style save — the body lists every entry the researcher wants
+    persisted; anything not in the list is dropped. Validates each
+    entry (role vocabulary, participant_id shape, max field lengths).
+
+    Body::
+
+        {"entries": [
+           {"label": "SPEAKER_00", "role": "interviewer"},
+           {"label": "SPEAKER_01", "role": "interviewee",
+            "participant_id": "abcdef012345"}
+        ]}
+
+    Status codes:
+      * 200 — saved.
+      * 400 — invalid payload / validation failure.
+      * 404 — project or source not found.
+    """
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    raw_entries = body.get("entries", [])
+    if raw_entries is None:
+        raw_entries = []
+    if not isinstance(raw_entries, list):
+        raise HTTPException(400, "'entries' must be a list")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            _sources.load_source(_projects_root(), project_id, source_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+        try:
+            speaker_map = _speaker_map.SpeakerMap.new(
+                project_id=project_id,
+                source_id=source_id,
+                entries=raw_entries,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        # Cross-check participant ids against on-disk participants to
+        # catch typos and orphaned references — the entry validator
+        # only checks shape.
+        if speaker_map.entries:
+            known_pids = {
+                p.id
+                for p in _participants.list_participants(
+                    _projects_root(), project_id
+                )
+            }
+            for e in speaker_map.entries:
+                if e.participant_id and e.participant_id not in known_pids:
+                    raise HTTPException(
+                        400,
+                        f"participant_id {e.participant_id!r} not in this "
+                        "project",
+                    )
+        _speaker_map.save_speaker_map(_projects_root(), speaker_map)
+    return JSONResponse({"speaker_map": speaker_map.to_dict()})
+
+
+@app.post("/api/projects/{project_id}/sources/{source_id}/speaker_map/seed")
+async def seed_source_speaker_map_endpoint(
+    project_id: str, source_id: str, request: Request
+) -> JSONResponse:
+    """Seed the speaker map from the source's transcript (F3.4).
+
+    Builds a row per distinct ``speaker`` label found in the segments,
+    leaving any pre-existing rows untouched (so re-running after the
+    researcher has set roles doesn't trample those choices). Returns
+    the saved map plus the list of newly-added labels.
+
+    Body::
+
+        {"default_role": "unknown"}   (optional, defaults to ``"unknown"``)
+
+    Status codes:
+      * 200 — seeded (``added`` may be empty if nothing new was found).
+      * 400 — invalid payload / role vocabulary error.
+      * 404 — project / source not found.
+      * 409 — no transcript available for the source.
+    """
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    try:
+        body = await request.json() if (await request.body()) else {}
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if body and not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    default_role = (
+        str((body or {}).get("default_role", "unknown") or "unknown")
+    )
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            source = _sources.load_source(
+                _projects_root(), project_id, source_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+        segments = _load_segments_for_source_speaker_map(source)
+        if segments is None:
+            raise HTTPException(
+                409, "No transcript available for this source yet"
+            )
+        speaker_map = _speaker_map.load_or_empty_speaker_map(
+            _projects_root(), project_id, source_id
+        )
+        try:
+            added = _speaker_map.merge_segments_into_map(
+                speaker_map, segments, new_role=default_role
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _speaker_map.save_speaker_map(_projects_root(), speaker_map)
+    return JSONResponse({
+        "speaker_map": speaker_map.to_dict(),
+        "added": added,
+    })
+
+
+@app.get(
+    "/api/projects/{project_id}/sources/{source_id}/speaker_map/distribution"
+)
+async def get_source_speaker_map_distribution_endpoint(
+    project_id: str, source_id: str
+) -> JSONResponse:
+    """Role + participant distribution for a source (F3.4).
+
+    Counts segments per role and per linked participant, computed
+    against the *currently saved* speaker map. The empty-string key in
+    each dict is the catch-all bucket for unlabelled / unmapped
+    segments. Returns 200 with empty dicts when no transcript is
+    available — the UI shows "no transcript yet" rather than a 404.
+    """
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            source = _sources.load_source(
+                _projects_root(), project_id, source_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+        speaker_map = _speaker_map.load_or_empty_speaker_map(
+            _projects_root(), project_id, source_id
+        )
+    segments = _load_segments_for_source_speaker_map(source)
+    if segments is None:
+        return JSONResponse({
+            "role_distribution": {},
+            "participant_distribution": {},
+            "has_transcript": False,
+        })
+    return JSONResponse({
+        "role_distribution": _speaker_map.role_distribution(
+            segments, speaker_map
+        ),
+        "participant_distribution": _speaker_map.participant_distribution(
+            segments, speaker_map
+        ),
+        "has_transcript": True,
+    })
+
+
 # --------------------------------------------------------------------------- #
 # Coders (F2.5, multi-coder mode) — REST surface
 #

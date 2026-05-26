@@ -237,6 +237,44 @@
   .part-checkbox-row:hover { background: var(--panel); }
   .part-checkbox-row input[type=checkbox] { margin: 0; }
   .part-checkbox-row .pseudo { color: var(--muted); font-size: 11px; }
+
+  /* F3.4 — Speakers panel. One row per distinct transcript label
+     with a role dropdown + an optional participant link selector.
+     Layout is compact (the side card is 320px wide) but readable;
+     ``label`` is the raw transcript-side string (``SPEAKER_00`` /
+     ``Luke``) so the researcher can tell which row is which. */
+  .spk-list { display: flex; flex-direction: column; gap: 6px; }
+  .spk-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 4px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel-2);
+  }
+  .spk-row .spk-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .spk-row .spk-controls {
+    display: flex; gap: 6px; align-items: center;
+    flex-wrap: wrap;
+  }
+  .spk-row select {
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    font: inherit; font-size: 11.5px;
+    padding: 2px 4px;
+    flex: 1 1 110px;
+    min-width: 0;
+  }
+  .spk-row .spk-role { flex: 0 0 110px; }
+  .spk-list .hint { font-size: 11px; }
 {% endblock %}
 
 {% block body %}
@@ -281,6 +319,37 @@
            target="_blank" rel="noopener">+ New participant</a>
       </div>
       <div id="partsMsg" class="hint"
+           style="margin-top:6px;font-size:11px"
+           role="status" aria-live="polite"></div>
+    </div>
+    <hr style="border:0;border-top:1px solid var(--border);margin:14px 0">
+
+    <!-- F3.4: Speaker awareness for queries. Per transcript label,
+         the researcher tags a role (interviewer / interviewee / ...)
+         and optionally links the label to a Project participant. The
+         data layer powers "show me only the interviewee's words"
+         queries (F3.5) and the participant-distribution matrix views
+         (F3.6). One Save click PUTs the whole roster. -->
+    <h3 style="margin-top:0;font-size:14px"
+        data-test-feature="F3.4">
+      Speakers <span id="spkCount" class="hint"></span>
+      <button id="seedSpkBtn" type="button" class="btn secondary"
+              style="float:right;font-size:11px;padding:2px 8px;margin-left:6px"
+              data-test-id="src-seed-speaker-map"
+              title="Add rows for any speakers found in the transcript">Seed from transcript</button>
+    </h3>
+    <div id="spkList" class="spk-list">
+      <div class="hint" id="spkLoading" style="font-size:11px">Loading speakers…</div>
+    </div>
+    <div id="spkEditor" style="display:none">
+      <div style="display:flex;gap:6px;align-items:center;margin-top:6px">
+        <button id="saveSpkBtn" type="button" class="btn"
+                style="font-size:12px;padding:4px 10px"
+                data-test-id="src-save-speaker-map">Save speakers</button>
+        <span id="spkRoleDist" class="hint"
+              style="margin-left:auto;font-size:11px"></span>
+      </div>
+      <div id="spkMsg" class="hint"
            style="margin-top:6px;font-size:11px"
            role="status" aria-live="polite"></div>
     </div>
@@ -440,6 +509,8 @@ async function loadAll() {
     // they don't block the coding view if a researcher hasn't created
     // any participants yet.
     loadParticipantRoster();
+    // F3.4 — speakers panel: same non-blocking contract.
+    loadSpeakerMap();
   } catch (e) {
     loading.style.display = "none";
     errorCard.textContent = `Couldn't load: ${e.message}`;
@@ -573,6 +644,223 @@ document.getElementById("savePartsBtn").addEventListener("click", async () => {
   } finally {
     saveBtn.disabled = false;
   }
+});
+
+// --- F3.4 — Speaker awareness for queries -------------------------
+//
+// Per transcript label, the researcher tags a role and (optionally)
+// links the label to a Project participant. The pure module
+// scribe/speaker_map.py shipped with passing tests but had no UI.
+// This block wires:
+//   - GET  /api/projects/<pid>/sources/<sid>/speaker_map  (load)
+//   - PUT  /api/projects/<pid>/sources/<sid>/speaker_map  (save all)
+//   - POST .../speaker_map/seed                            (auto-fill from transcript)
+// The list always contains every distinct transcript label, plus any
+// extra entries the saved map carries (so a speaker who's been
+// removed from the transcript still shows up to be cleaned up).
+
+let SPK_AVAILABLE_ROLES = [];
+let SPK_TRANSCRIPT_LABELS = [];
+let SPK_ENTRIES_BY_LABEL = new Map();
+
+async function loadSpeakerMap() {
+  const list = document.getElementById("spkList");
+  const editor = document.getElementById("spkEditor");
+  const count = document.getElementById("spkCount");
+  try {
+    const r = await fetchJSON(
+      `/api/projects/${PROJECT_ID}/sources/${SOURCE_ID}/speaker_map`
+    );
+    SPK_AVAILABLE_ROLES = r.available_roles || [];
+    SPK_TRANSCRIPT_LABELS = r.transcript_labels || [];
+    const entries = (r.speaker_map && r.speaker_map.entries) || [];
+    SPK_ENTRIES_BY_LABEL = new Map(entries.map(e => [e.label, e]));
+    // Make sure ALL_PARTS_CACHE is populated so the dropdown can
+    // offer participant links. Best-effort — failures fall back to
+    // an empty list, which still lets the user set roles.
+    if (!ALL_PARTS_CACHE.length) {
+      try {
+        const pr = await fetchJSON(`/api/projects/${PROJECT_ID}/participants`);
+        ALL_PARTS_CACHE = pr.participants || [];
+      } catch (_) { /* non-fatal */ }
+    }
+    renderSpeakerMap();
+    // Fire-and-forget — the distribution is decorative.
+    loadSpeakerMapDistribution();
+  } catch (e) {
+    list.innerHTML =
+      `<span class="hint" style="color:var(--err)">Couldn't load speakers: ${escapeHtml(e.message)}</span>`;
+    editor.style.display = "none";
+    count.textContent = "";
+  }
+}
+
+function renderSpeakerMap() {
+  const list = document.getElementById("spkList");
+  const editor = document.getElementById("spkEditor");
+  const count = document.getElementById("spkCount");
+  list.innerHTML = "";
+
+  // Union of transcript labels and saved-map labels — preserves
+  // insertion order from the transcript, then appends any saved
+  // labels that no longer appear (so the user can clean them up).
+  const labels = SPK_TRANSCRIPT_LABELS.slice();
+  for (const lbl of SPK_ENTRIES_BY_LABEL.keys()) {
+    if (!labels.includes(lbl)) labels.push(lbl);
+  }
+  count.textContent = labels.length ? `(${labels.length})` : "";
+  if (!labels.length) {
+    list.innerHTML =
+      '<span class="hint" id="spkEmpty">No speakers detected in this transcript.</span>';
+    editor.style.display = "none";
+    return;
+  }
+  for (const lbl of labels) {
+    list.appendChild(renderSpeakerRow(lbl));
+  }
+  editor.style.display = "";
+}
+
+function renderSpeakerRow(label) {
+  const row = document.createElement("div");
+  row.className = "spk-row";
+  row.dataset.testId = "src-spk-row";
+  row.dataset.label = label;
+
+  const lblEl = document.createElement("div");
+  lblEl.className = "spk-label";
+  lblEl.title = label;
+  lblEl.textContent = label;
+  row.appendChild(lblEl);
+
+  const controls = document.createElement("div");
+  controls.className = "spk-controls";
+  const saved = SPK_ENTRIES_BY_LABEL.get(label) || {role: "unknown", participant_id: null};
+
+  // Role dropdown.
+  const roleSel = document.createElement("select");
+  roleSel.className = "spk-role";
+  roleSel.dataset.testRole = "true";
+  for (const r of SPK_AVAILABLE_ROLES) {
+    const opt = document.createElement("option");
+    opt.value = r; opt.textContent = r;
+    if (r === (saved.role || "unknown")) opt.selected = true;
+    roleSel.appendChild(opt);
+  }
+  controls.appendChild(roleSel);
+
+  // Participant link dropdown — empty + per-participant.
+  const partSel = document.createElement("select");
+  partSel.className = "spk-part";
+  const noneOpt = document.createElement("option");
+  noneOpt.value = "";
+  noneOpt.textContent = "— no participant —";
+  partSel.appendChild(noneOpt);
+  for (const p of ALL_PARTS_CACHE) {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    const pname = p.name || p.id;
+    const pseudo = p.pseudonym ? ` (${p.pseudonym})` : "";
+    opt.textContent = `${pname}${pseudo}`;
+    if (p.id === saved.participant_id) opt.selected = true;
+    partSel.appendChild(opt);
+  }
+  controls.appendChild(partSel);
+
+  row.appendChild(controls);
+  return row;
+}
+
+async function loadSpeakerMapDistribution() {
+  const dist = document.getElementById("spkRoleDist");
+  if (!dist) return;
+  try {
+    const r = await fetchJSON(
+      `/api/projects/${PROJECT_ID}/sources/${SOURCE_ID}/speaker_map/distribution`
+    );
+    if (!r.has_transcript) {
+      dist.textContent = "";
+      return;
+    }
+    const role = r.role_distribution || {};
+    const counts = Object.entries(role)
+      .filter(([, n]) => n > 0)
+      .filter(([k]) => k && k !== "unknown")
+      .map(([k, n]) => `${k} ${n}`);
+    dist.textContent = counts.length ? counts.join(" · ") : "";
+  } catch (_) { dist.textContent = ""; }
+}
+
+document.getElementById("seedSpkBtn").addEventListener("click", async () => {
+  const msg = document.getElementById("spkMsg");
+  const btn = document.getElementById("seedSpkBtn");
+  btn.disabled = true;
+  msg.textContent = "Seeding…";
+  msg.style.color = "var(--muted)";
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/sources/${SOURCE_ID}/speaker_map/seed`,
+      {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"}
+    );
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const body = await r.json();
+    const added = (body.added || []).length;
+    msg.textContent = added
+      ? `Seeded ${added} new speaker${added === 1 ? "" : "s"}.`
+      : "No new speakers — map is already up to date.";
+    msg.style.color = "var(--ok)";
+    await loadSpeakerMap();
+  } catch (e) {
+    msg.textContent = `Couldn't seed: ${e.message}`;
+    msg.style.color = "var(--err)";
+  } finally { btn.disabled = false; }
+});
+
+document.getElementById("saveSpkBtn").addEventListener("click", async () => {
+  const list = document.getElementById("spkList");
+  const msg = document.getElementById("spkMsg");
+  const btn = document.getElementById("saveSpkBtn");
+  // Collect every row's current selections.
+  const rows = list.querySelectorAll(".spk-row");
+  const entries = [];
+  rows.forEach(row => {
+    const label = row.dataset.label || "";
+    if (!label) return;
+    const role = row.querySelector("select.spk-role")?.value || "unknown";
+    const pid = row.querySelector("select.spk-part")?.value || "";
+    entries.push({
+      label,
+      role,
+      participant_id: pid || null,
+    });
+  });
+  btn.disabled = true;
+  msg.textContent = "Saving…";
+  msg.style.color = "var(--muted)";
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/sources/${SOURCE_ID}/speaker_map`,
+      {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({entries}),
+      }
+    );
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    msg.textContent = `Saved ${entries.length} speaker${entries.length === 1 ? "" : "s"}.`;
+    msg.style.color = "var(--ok)";
+    // Refresh distribution numbers.
+    loadSpeakerMapDistribution();
+  } catch (e) {
+    msg.textContent = `Couldn't save: ${e.message}`;
+    msg.style.color = "var(--err)";
+  } finally { btn.disabled = false; }
 });
 
 function renderTranscript() {
