@@ -7016,6 +7016,171 @@ async def list_ai_suggestions_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Embedding index management (F8.2)
+#
+# F8.2 ships the storage + refresh layer underneath the F8.3 / F8.5 /
+# F8.6 / F8.8 AI features. PLANNING.md describes its lifecycle as
+# "built on import; refreshed on edit" — operationally, refresh is a
+# project-wide pass: enumerate every coded segment and uncoded
+# paragraph, embed the new/changed text, drop orphans. Until this
+# block landed there was no FastAPI surface for invoking or inspecting
+# the index — only the suggestion endpoints used the *search* helpers
+# inside the engine modules. These three endpoints expose the index
+# itself so the AI page can show "you have N spans embedded" and
+# trigger a refresh after the user adds applications / edits transcripts.
+# --------------------------------------------------------------------------- #
+
+from . import embedding_index as _embedding_index  # noqa: E402
+
+
+def _gather_segments_by_source(
+    sources: "list[_sources.Source]",
+) -> dict[str, list[dict[str, Any]]]:
+    """Resolve segments for every source; missing transcripts are
+    represented by an empty list so the refresh's desired-spans
+    enumerator simply yields nothing for that source."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for src in sources:
+        segs = _load_segments_for_source_speaker_map(src) or []
+        out[src.id] = segs
+    return out
+
+
+@app.get("/api/projects/{project_id}/ai/embedding-index")
+async def get_project_embedding_index_endpoint(project_id: str) -> JSONResponse:
+    """Return summary stats for the project's embedding index (F8.2).
+
+    Response shape::
+
+        {
+          "total": int,
+          "by_kind": {"coded_segment": N, "uncoded_paragraph": M},
+          "by_source": {"<sid>": K, ...},
+          "models": ["bge-m3", ...],            # distinct model names
+          "last_modified_at": "<ISO>" | null,
+          "configured_embedding_model": "<str>" | null,
+        }
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        entries = _embedding_index.list_embedding_entries(
+            _projects_root(), project_id,
+        )
+        try:
+            cfg = _ai_backend.load_backend_config(project)
+            configured_embedding_model = cfg.default_embedding_model or None
+        except _ai_backend.BackendValidationError:
+            configured_embedding_model = None
+    by_kind: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    models: set[str] = set()
+    last_modified = ""
+    for e in entries:
+        by_kind[e.kind] = by_kind.get(e.kind, 0) + 1
+        by_source[e.source_id] = by_source.get(e.source_id, 0) + 1
+        models.add(e.model_name)
+        if e.modified_at and e.modified_at > last_modified:
+            last_modified = e.modified_at
+    return JSONResponse({
+        "total": len(entries),
+        "by_kind": by_kind,
+        "by_source": by_source,
+        "models": sorted(models),
+        "last_modified_at": last_modified or None,
+        "configured_embedding_model": configured_embedding_model,
+    })
+
+
+@app.post("/api/projects/{project_id}/ai/embedding-index/refresh")
+async def post_project_embedding_index_refresh_endpoint(
+    project_id: str,
+) -> JSONResponse:
+    """Refresh the embedding index in-band (F8.2).
+
+    Walks every source's transcript, computes the desired set of spans,
+    embeds new/changed spans via the project's configured F8.1 backend,
+    and deletes orphans. Returns the F8.2 RefreshResult counts so the
+    UI can render "added N, updated M, removed K, unchanged J".
+
+    Errors:
+      400 if no embedding model is configured or backend config invalid;
+      404 if the project doesn't exist;
+      502 / 500 on backend failures.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            cfg, backend = _resolve_suggestion_backend(project)
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+        if not cfg.default_embedding_model:
+            raise HTTPException(
+                400,
+                "No default_embedding_model configured for this project",
+            )
+        embed_fn, _gen_fn, emb_model, _gen_model = _make_embed_and_generate_fns(
+            cfg, backend,
+        )
+
+        sources = _sources.list_sources(_projects_root(), project_id)
+        applications = _applications.list_applications(
+            _projects_root(), project_id,
+        )
+        segments_by_source = _gather_segments_by_source(sources)
+        try:
+            result = _embedding_index.refresh_embedding_index(
+                projects_root=_projects_root(),
+                project_id=project_id,
+                applications=applications,
+                segments_by_source=segments_by_source,
+                embed_fn=embed_fn,
+                model_name=emb_model,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except _ai_backend.BackendUnavailable as e:
+            raise HTTPException(502, f"Backend unavailable: {e}")
+        except _ai_backend.BackendError as e:
+            raise HTTPException(500, str(e))
+    return JSONResponse({
+        "added": result.added_count,
+        "updated": result.updated_count,
+        "removed": result.removed_count,
+        "unchanged": result.unchanged_count,
+        "model": emb_model,
+        "source_count": len(sources),
+        "application_count": len(applications),
+    })
+
+
+@app.delete("/api/projects/{project_id}/ai/embedding-index")
+async def delete_project_embedding_index_endpoint(
+    project_id: str,
+) -> JSONResponse:
+    """Clear the entire embedding index (F8.2).
+
+    Used when the embedding model changes — the next refresh will then
+    repopulate from scratch under the new model. Returns the number of
+    entries removed.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        n = _embedding_index.clear_embedding_index(
+            _projects_root(), project_id,
+        )
+    return JSONResponse({"removed": n})
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 

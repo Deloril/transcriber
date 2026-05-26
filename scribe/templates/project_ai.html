@@ -190,6 +190,33 @@
   <div id="ai-error" class="ai-section" hidden style="color:var(--err);font-size:13px"></div>
 </div>
 
+<div class="card ai-card" data-test-feature="F8.2">
+  <h2>Embedding index</h2>
+  <p class="ai-help">
+    F8.2 indexes every coded segment and every uncoded paragraph against the
+    backend's <code>default_embedding_model</code>. The index powers code-suggestion
+    (F8.3 / F8.4), find-similar-quotes (F8.5), the whole-transcript review pass
+    (F8.6) and memo drafting (F8.8). Refresh after applying / removing codes
+    or editing transcripts so the index stays in sync.
+  </p>
+  <div id="embed-index-stats" class="ai-section ai-status-row"
+       data-test-id="embed-index-stats">
+    <span class="dot"></span>
+    <span class="text">Loading…</span>
+  </div>
+  <div class="ai-section" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+    <button id="embed-index-refresh-btn" class="btn" type="button"
+            data-test-id="embed-index-refresh">
+      Refresh embedding index
+    </button>
+    <button id="embed-index-clear-btn" class="btn secondary" type="button"
+            data-test-id="embed-index-clear">
+      Clear index
+    </button>
+    <span id="embed-index-msg" class="hint" role="alert" aria-live="polite"></span>
+  </div>
+</div>
+
 <div class="card ai-card" data-test-feature="F8.10">
   <h2>AI gate status</h2>
   <p class="ai-help">
@@ -451,11 +478,91 @@ async function loadGate() {
   }
 }
 
+async function loadEmbeddingIndex() {
+  const row = $("embed-index-stats");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/ai/embedding-index`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const body = await r.json();
+    const total = body.total || 0;
+    const byKind = body.by_kind || {};
+    const coded = byKind.coded_segment || 0;
+    const para = byKind.uncoded_paragraph || 0;
+    const last = body.last_modified_at;
+    if (total === 0) {
+      setStatusRow(row, "muted",
+        "Empty — refresh to build the index from current applications + transcripts.");
+    } else {
+      const lastTxt = last ? ` · last refreshed ${last}` : "";
+      setStatusRow(row, "ok",
+        `${total} span${total === 1 ? "" : "s"} (${coded} coded, ${para} uncoded paragraph${para === 1 ? "" : "s"})${lastTxt}`);
+    }
+  } catch (e) {
+    setStatusRow(row, "bad", `Couldn't read index: ${e.message}`);
+  }
+}
+
+async function refreshEmbeddingIndex() {
+  const btn = $("embed-index-refresh-btn");
+  const msg = $("embed-index-msg");
+  btn.disabled = true;
+  setMsg(msg, "Refreshing — embedding may take a moment…", "muted");
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/ai/embedding-index/refresh`,
+      { method: "POST" },
+    );
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.detail || `HTTP ${r.status}`);
+    }
+    const body = await r.json();
+    setMsg(msg,
+      `Done — added ${body.added}, updated ${body.updated}, removed ${body.removed}, unchanged ${body.unchanged}`,
+      "ok");
+    await loadEmbeddingIndex();
+  } catch (err) {
+    setMsg(msg, `Refresh failed: ${err.message}`, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function clearEmbeddingIndex() {
+  const btn = $("embed-index-clear-btn");
+  const msg = $("embed-index-msg");
+  if (!confirm("Clear the embedding index? Next refresh will rebuild it from scratch.")) {
+    return;
+  }
+  btn.disabled = true;
+  setMsg(msg, "Clearing…", "muted");
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/ai/embedding-index`,
+      { method: "DELETE" },
+    );
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.detail || `HTTP ${r.status}`);
+    }
+    const body = await r.json();
+    setMsg(msg, `Cleared ${body.removed} entr${body.removed === 1 ? "y" : "ies"}.`, "ok");
+    await loadEmbeddingIndex();
+  } catch (err) {
+    setMsg(msg, `Couldn't clear: ${err.message}`, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 document.getElementById("aiBackendForm").addEventListener("submit", saveBackend);
 document.getElementById("ai-test-btn").addEventListener("click", testConnection);
 document.getElementById("ai-list-btn").addEventListener("click", listModels);
+document.getElementById("embed-index-refresh-btn").addEventListener("click", refreshEmbeddingIndex);
+document.getElementById("embed-index-clear-btn").addEventListener("click", clearEmbeddingIndex);
 
 loadBackend();
 loadGate();
+loadEmbeddingIndex();
 </script>
 {% endblock %}
