@@ -1,0 +1,357 @@
+{#
+  Audit timeline page (F9.1 user-facing surface).
+
+  PLANNING.md F9.1:
+    > Append-only event log. Every operation becomes an event with
+    > timestamp, actor, and full payload diff. Never deletable.
+
+  ``scribe/event_log.py`` shipped the data plane in 7e4250d:
+  the ``Event`` dataclass + the ``projects/<pid>/events/<eid>.json``
+  persistence layer + filter helpers. The original commit explicitly
+  deferred the HTTP / FastAPI surface; until this template + its two
+  accompanying API routes landed, the only way to read the F9.1 log
+  was via the Python module directly.
+
+  This page is the *generic* audit-trail UI: a chronological feed of
+  every operation that touches a project, with action / entity-type /
+  actor / date filters. Sibling-but-distinct from the F8.9 AI events
+  panel on ``project_ai.html``: that one shows AI invocations only;
+  this one shows every operation (code created, application added,
+  memo edited, codebook locked, source attached, snapshot taken).
+
+  Reads:
+    GET /api/projects/<pid>/events                — list (filterable)
+    GET /api/projects/<pid>/events/<eid>          — single event detail
+
+  Future graduations layer onto this same page:
+    F9.4 — checkpoint list + "Save checkpoint" button
+    F9.7 — "Export audit log" download menu (CSV / Markdown / RTF)
+    F9.8 — "Show project as it was on date X" time-travel banner
+#}
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Audit timeline{% endblock %}
+{% block heading %}Audit timeline{% endblock %}
+{% block subtitle_block %}
+  <span class="sub">
+    Append-only log of every operation on this project. Never editable,
+    never deletable — your evidence trail.
+  </span>
+{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+{% endblock %}
+
+{% block extra_styles %}
+  /* ------------------------------------------------------------ */
+  /*  Audit timeline                                               */
+  /* ------------------------------------------------------------ */
+  .audit-filters {
+    display: grid; gap: 12px; margin-bottom: 14px;
+    grid-template-columns: repeat(4, 1fr);
+  }
+  @media (max-width: 900px) { .audit-filters { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 540px) { .audit-filters { grid-template-columns: 1fr; } }
+  .audit-filters label {
+    display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px;
+  }
+  .audit-filters select,
+  .audit-filters input {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+    font: inherit; font-size: 13px;
+  }
+
+  .audit-list {
+    list-style: none; padding: 0; margin: 0;
+    display: flex; flex-direction: column;
+  }
+  .audit-row {
+    border-top: 1px solid var(--border);
+    padding: 12px 4px;
+    display: grid;
+    grid-template-columns: 150px 110px 1fr;
+    gap: 12px;
+    align-items: start;
+  }
+  .audit-row:first-child { border-top: 0; }
+  .audit-row .when {
+    color: var(--muted); font-size: 12px;
+    font-family: var(--mono);
+  }
+  .audit-row .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; background: var(--panel-2);
+    border: 1px solid var(--border); color: var(--muted);
+    font-family: var(--mono); letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .audit-row .pill.create { color: var(--ok); border-color: var(--ok); }
+  .audit-row .pill.update { color: var(--accent); border-color: var(--accent); }
+  .audit-row .pill.delete,
+  .audit-row .pill.retire { color: var(--err); border-color: var(--err); }
+  .audit-row .pill.lock,
+  .audit-row .pill.unlock { color: var(--accent-2, var(--accent)); border-color: var(--accent-2, var(--accent)); }
+
+  .audit-row .summary {
+    color: var(--text); line-height: 1.45;
+  }
+  .audit-row .summary .meta {
+    color: var(--muted-2, var(--muted)); font-size: 11.5px;
+    font-family: var(--mono);
+    margin-top: 4px;
+    display: block;
+  }
+  .audit-row .summary .notes {
+    margin-top: 6px;
+    color: var(--text);
+    font-style: italic;
+    font-family: var(--serif);
+    line-height: 1.5;
+    max-width: 60ch;
+  }
+  .audit-row .diff {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    max-width: 80ch;
+  }
+  .audit-row .diff .diff-row {
+    display: grid;
+    grid-template-columns: 70px 130px 1fr;
+    gap: 6px;
+    padding: 1px 0;
+  }
+  .audit-row .diff .op { color: var(--muted); }
+  .audit-row .diff .op.added { color: var(--ok); }
+  .audit-row .diff .op.removed { color: var(--err); }
+  .audit-row .diff .op.changed { color: var(--accent); }
+  .audit-row .diff .path { color: var(--text-strong); }
+  .audit-row .diff .vals {
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+
+  .audit-toolbar {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    margin: 8px 0 14px;
+  }
+  .audit-toolbar .count {
+    color: var(--muted); font-size: 13px;
+  }
+{% endblock %}
+
+{% block body %}
+<div class="card" data-test-feature="F9.1" data-test-id="audit-timeline">
+  <h2 style="margin-top:0">Filters</h2>
+  <div class="audit-filters">
+    <div>
+      <label for="f-action">Action</label>
+      <select id="f-action" data-test-id="audit-filter-action">
+        <option value="">— any —</option>
+      </select>
+    </div>
+    <div>
+      <label for="f-entity">Entity type</label>
+      <select id="f-entity" data-test-id="audit-filter-entity">
+        <option value="">— any —</option>
+      </select>
+    </div>
+    <div>
+      <label for="f-actor">Actor (coder id)</label>
+      <input id="f-actor" type="text" maxlength="12"
+             placeholder="12-char hex"
+             data-test-id="audit-filter-actor">
+    </div>
+    <div>
+      <label for="f-order">Order</label>
+      <select id="f-order" data-test-id="audit-filter-order">
+        <option value="desc">Newest first</option>
+        <option value="asc">Oldest first</option>
+      </select>
+    </div>
+  </div>
+  <div class="audit-toolbar">
+    <button id="reload" class="btn secondary" data-test-id="audit-reload">↻ Reload</button>
+    <span id="count" class="count" aria-live="polite"></span>
+  </div>
+</div>
+
+<div id="loadingCard" class="card hint" style="margin-top:16px">Loading audit timeline…</div>
+
+<div id="emptyState" class="empty card" style="display:none;margin-top:16px">
+  <h3>No events recorded yet</h3>
+  <p>
+    Operations on this project — codes, applications, memos, locks,
+    snapshots — will appear here as they happen. The log is append-only
+    and never editable.
+  </p>
+</div>
+
+<div id="errorState" class="card" style="display:none;margin-top:16px;color:var(--err)"></div>
+
+<div id="entriesCard" class="card" style="display:none;margin-top:16px">
+  <h2 style="margin-top:0">Events <span id="entriesCount" class="hint" style="font-weight:400"></span></h2>
+  <ul id="entriesList" class="audit-list" data-test-id="audit-events-list"></ul>
+</div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+function fmtDate(s) {
+  if (!s) return "—";
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    return d.toLocaleString(undefined, {
+      year: "numeric", month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+  } catch (_) { return s; }
+}
+function shortId(id) {
+  if (!id) return "";
+  return String(id).slice(0, 8);
+}
+function fmtVal(v) {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "string") {
+    if (v.length > 80) return v.slice(0, 77) + "…";
+    return v;
+  }
+  if (typeof v === "boolean" || typeof v === "number") return String(v);
+  try {
+    const j = JSON.stringify(v);
+    if (j.length > 80) return j.slice(0, 77) + "…";
+    return j;
+  } catch (_) { return String(v); }
+}
+
+function renderDiff(diff) {
+  if (!Array.isArray(diff) || !diff.length) return "";
+  const rows = diff.slice(0, 12).map(row => {
+    const op = String(row.op || "");
+    const path = String(row.path || "");
+    let vals = "";
+    if (op === "added") vals = `<span class="vals">+ ${escapeHtml(fmtVal(row.after))}</span>`;
+    else if (op === "removed") vals = `<span class="vals">− ${escapeHtml(fmtVal(row.before))}</span>`;
+    else vals = `<span class="vals">${escapeHtml(fmtVal(row.before))} → ${escapeHtml(fmtVal(row.after))}</span>`;
+    return `<div class="diff-row"><span class="op ${escapeHtml(op)}">${escapeHtml(op)}</span><span class="path">${escapeHtml(path)}</span>${vals}</div>`;
+  }).join("");
+  const more = diff.length > 12
+    ? `<div class="diff-row"><span class="op">…</span><span class="path">${diff.length - 12} more</span></div>`
+    : "";
+  return `<div class="diff">${rows}${more}</div>`;
+}
+
+function fillSelect(el, values, blankLabel) {
+  el.innerHTML = "";
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = blankLabel;
+  el.appendChild(blank);
+  for (const v of values) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = v;
+    el.appendChild(opt);
+  }
+}
+
+let optionsLoaded = false;
+
+async function load() {
+  const loading = document.getElementById("loadingCard");
+  const card = document.getElementById("entriesCard");
+  const empty = document.getElementById("emptyState");
+  const error = document.getElementById("errorState");
+  const list = document.getElementById("entriesList");
+  const count = document.getElementById("count");
+  loading.style.display = "block";
+  card.style.display = "none";
+  empty.style.display = "none";
+  error.style.display = "none";
+
+  const params = new URLSearchParams();
+  const action = document.getElementById("f-action").value;
+  const entity = document.getElementById("f-entity").value;
+  const actor = document.getElementById("f-actor").value.trim();
+  const order = document.getElementById("f-order").value;
+  if (action) params.set("action", action);
+  if (entity) params.set("entity_type", entity);
+  if (actor) params.set("actor_coder_id", actor);
+  if (order) params.set("order", order);
+
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/events?${params.toString()}`);
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try { const b = await r.json(); if (b.detail) msg = b.detail; } catch (_) {}
+      throw new Error(msg);
+    }
+    const data = await r.json();
+    if (!optionsLoaded) {
+      fillSelect(document.getElementById("f-action"), data.available_actions || [], "— any —");
+      fillSelect(document.getElementById("f-entity"), data.available_entity_types || [], "— any —");
+      // Restore current values (since fillSelect reset them)
+      document.getElementById("f-action").value = action || "";
+      document.getElementById("f-entity").value = entity || "";
+      optionsLoaded = true;
+    }
+    loading.style.display = "none";
+    const events = data.events || [];
+    const total = data.total ?? events.length;
+    count.textContent = `${total} event${total === 1 ? "" : "s"}` + (data.truncated ? " (showing latest)" : "");
+    document.getElementById("entriesCount").textContent = `· ${events.length}`;
+    if (!events.length) {
+      empty.style.display = "block";
+      return;
+    }
+    card.style.display = "block";
+    list.innerHTML = events.map(ev => {
+      const eid = ev.entity_id ? `· id ${escapeHtml(shortId(ev.entity_id))}` : "";
+      const actorTxt = ev.actor_coder_id
+        ? `· actor ${escapeHtml(shortId(ev.actor_coder_id))}`
+        : "· system";
+      const notes = ev.notes
+        ? `<div class="notes">${escapeHtml(ev.notes)}</div>`
+        : "";
+      return `<li class="audit-row" data-event-id="${escapeHtml(ev.id)}">
+        <span class="when">${escapeHtml(fmtDate(ev.created_at))}</span>
+        <span><span class="pill ${escapeHtml(ev.action)}">${escapeHtml(ev.action)}</span></span>
+        <div class="summary">
+          <strong>${escapeHtml(ev.entity_type)}</strong>
+          ${eid}
+          ${actorTxt}
+          ${notes}
+          ${renderDiff(ev.diff)}
+          <span class="meta">event ${escapeHtml(shortId(ev.id))}</span>
+        </div>
+      </li>`;
+    }).join("");
+  } catch (e) {
+    loading.style.display = "none";
+    error.style.display = "block";
+    error.textContent = `Failed to load events: ${e.message || e}`;
+  }
+}
+
+document.getElementById("reload").addEventListener("click", load);
+for (const id of ["f-action", "f-entity", "f-order"]) {
+  document.getElementById(id).addEventListener("change", load);
+}
+document.getElementById("f-actor").addEventListener("change", load);
+
+load();
+</script>
+{% endblock %}

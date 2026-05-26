@@ -627,27 +627,23 @@ async def project_ai_page(request: Request, project_id: str) -> HTMLResponse:
 
 @app.get("/projects/{project_id}/audit", response_class=HTMLResponse)
 async def project_audit_page(request: Request, project_id: str) -> HTMLResponse:
-    return _render_subpage(
-        request, project_id,
-        page_kind="audit",
-        page_title="Audit timeline",
-        description="Append-only event log: codes, applications, definitions, memos, AI invocations.",
-        feature_refs=["F9.1", "F9.2", "F9.4", "F9.6", "F9.7", "F9.8"],
-        wireframe_blocks=[
-            {"heading": "Timeline", "lines": [
-                "Chronological feed with event-type filter, actor filter, date range. Each row links to its target.",
-            ]},
-            {"heading": "Time-travel", "lines": [
-                "&quot;Show project as it was on 2026-04-12&quot; — read-only snapshot view (F9.8).",
-            ]},
-            {"heading": "Checkpoints", "lines": [
-                "Named project-wide checkpoints (F9.4). Restore (read-only).",
-            ]},
-            {"heading": "Export", "lines": [
-                "CSV · Markdown · RTF audit log for thesis appendices (F9.7).",
-            ]},
-        ],
-    )
+    """Audit timeline page (F9.1 user-facing surface).
+
+    The pure module ``scribe.event_log`` shipped the data plane in
+    7e4250d (Event dataclass, append-only persistence, filter helpers),
+    but the original commit explicitly deferred the HTTP / FastAPI
+    surface. This route + the two ``/api/projects/<pid>/events``
+    endpoints below close that loop: a chronological, filterable feed
+    of every operation on the project — the canonical F9.1 surface.
+
+    Future graduations layer onto this same page: F9.4 checkpoints
+    list, F9.7 export menu, F9.8 time-travel viewer.
+    """
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "audit.html", {
+        "project_id": pid,
+        "page_title": "Audit timeline",
+    })
 
 
 @app.get("/projects/{project_id}/settings", response_class=HTMLResponse)
@@ -6742,6 +6738,152 @@ async def get_project_ai_event_endpoint(
             )
         except FileNotFoundError:
             raise HTTPException(404, "AI event not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({"event": ev.to_dict()})
+
+
+# --------------------------------------------------------------------------- #
+# F9.1 — generic project event log
+#
+# F9.1 ships ``scribe.event_log``: the append-only project-wide audit
+# trail (every code created, application added, memo edited, codebook
+# locked, source attached, snapshot taken — sibling-but-distinct from
+# the F8.9 AI event log). The original commit (7e4250d) explicitly
+# deferred the HTTP / FastAPI surface; until these endpoints landed,
+# the only path to read the F9.1 log was via the Python module.
+#
+# Two endpoints close that loop:
+#
+#   GET /api/projects/<pid>/events
+#     List the project's event log. Optional filters:
+#       ?action=<one of EVENT_ACTIONS>
+#       ?entity_type=<one of EVENT_ENTITY_TYPES>
+#       ?entity_id=<12-char hex>
+#       ?actor_coder_id=<12-char hex>
+#       ?since=<ISO-8601>     — inclusive lower bound on created_at
+#       ?until=<ISO-8601>     — inclusive upper bound on created_at
+#       ?limit=<int>          — caps the response (0 = no cap)
+#       ?order=desc|asc       — defaults to ``desc`` (newest first)
+#
+#   GET /api/projects/<pid>/events/<eid>
+#     Fetch a single event by id. 404 when missing.
+#
+# The response shape mirrors the F8.9 ``/api/.../ai/events`` endpoint
+# so the audit timeline UI can paginate / order / count consistently
+# across both feeds.
+# --------------------------------------------------------------------------- #
+
+from . import event_log as _event_log  # noqa: E402
+
+
+def _events_response_payload(events, *, order: str, limit):
+    """Shape an Event list into the wire payload.
+
+    ``events`` is the chronological-asc list returned by
+    :func:`scribe.event_log.list_events`. ``order='desc'`` reverses
+    it for the UI's newest-first feed. ``limit`` (when non-None) caps
+    the response *after* ordering, so newest events survive truncation
+    when ``order='desc'``.
+    """
+    items = list(events)
+    if order == "desc":
+        items.reverse()
+    total = len(items)
+    truncated = False
+    if limit is not None and total > limit:
+        items = items[:limit]
+        truncated = True
+    return {
+        "events": [ev.to_dict() for ev in items],
+        "total": total,
+        "returned": len(items),
+        "order": order,
+        "truncated": truncated,
+        "available_actions": list(_event_log.EVENT_ACTIONS),
+        "available_entity_types": list(_event_log.EVENT_ENTITY_TYPES),
+    }
+
+
+@app.get("/api/projects/{project_id}/events")
+async def list_project_events_endpoint(
+    project_id: str,
+    action: str = "",
+    entity_type: str = "",
+    entity_id: str = "",
+    actor_coder_id: str = "",
+    since: str = "",
+    until: str = "",
+    limit: int = 200,
+    order: str = "desc",
+) -> JSONResponse:
+    """List F9.1 events for a project (read surface).
+
+    Filters AND-combine. ``order=desc`` (default) returns newest-first
+    so the audit timeline can render a recent-activity feed; pass
+    ``order=asc`` for forensic chronological reading. ``limit`` caps
+    the response; pass ``0`` to disable truncation.
+    """
+    _check_project_id(project_id)
+    if order not in ("asc", "desc"):
+        raise HTTPException(400, "order must be 'asc' or 'desc'")
+    try:
+        limit_val = int(limit)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "limit must be a non-negative integer")
+    if limit_val < 0:
+        raise HTTPException(400, "limit must be a non-negative integer")
+    effective_limit = None if limit_val == 0 else limit_val
+
+    act = action or None
+    ent_type = entity_type or None
+    ent_id = entity_id or None
+    actor = actor_coder_id or None
+    since_v = since or None
+    until_v = until or None
+
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            events = _event_log.list_events(
+                _projects_root(),
+                project_id,
+                action=act,
+                entity_type=ent_type,
+                entity_id=ent_id,
+                actor_coder_id=actor,
+                since=since_v,
+                until=until_v,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse(
+        _events_response_payload(events, order=order, limit=effective_limit)
+    )
+
+
+@app.get("/api/projects/{project_id}/events/{event_id}")
+async def get_project_event_endpoint(
+    project_id: str, event_id: str
+) -> JSONResponse:
+    """Fetch a single F9.1 event by id."""
+    _check_project_id(project_id)
+    if not _event_log.EVENT_ID_RE.match(event_id):
+        raise HTTPException(400, "Invalid event id")
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            ev = _event_log.load_event(
+                _projects_root(), project_id, event_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Event not found")
         except _projects.ProjectValidationError as e:
             raise HTTPException(400, str(e))
     return JSONResponse({"event": ev.to_dict()})
