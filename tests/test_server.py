@@ -201,9 +201,10 @@ class TestEditorPage:
         r = client.get("/edit/abc123def456")
         assert r.status_code == 200
         body = r.text
-        # The action stack and its three buttons exist in the rendered template.
+        # The action stack and its four inline buttons exist in the rendered template.
         assert "seg-actions" in body
         assert "seg-split-btn" in body
+        assert "seg-mergeup-btn" in body  # ⬆ — added when merge-up was promoted to inline
         assert "seg-note-btn" in body
         assert "seg-menu-btn" in body
         # The split / annotate menu items have been removed from the dropdown
@@ -213,6 +214,19 @@ class TestEditorPage:
         # The remaining dropdown items are still present.
         for act in ("merge-prev", "merge-next", "insert-after", "reassign", "delete"):
             assert f'data-act="{act}"' in body
+
+    def test_speaker_reassign_uses_inline_popover(self, server_env) -> None:
+        """The "Set speaker" modal has been replaced by an inline
+        popover anchored to the clicked speaker label. The page no
+        longer relies on opening the assignModal centred on screen."""
+        srv, client, _ = server_env
+        _new_job(srv, status="done")
+        r = client.get("/edit/abc123def456")
+        assert r.status_code == 200
+        body = r.text
+        # New popover styling and JS must be present.
+        assert "speaker-popover" in body
+        assert "openAssign" in body
 
     def test_find_and_replace_controls_rendered(self, server_env) -> None:
         """F11.2 — the editor's search bar exposes a Replace input,

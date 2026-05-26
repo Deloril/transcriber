@@ -167,7 +167,7 @@
     .segment {
       position: relative;
       display: grid;
-      grid-template-columns: 110px 1fr 60px;
+      grid-template-columns: 110px 1fr 84px;
       gap: 12px;
       padding: 10px 8px 12px;
       border-radius: 10px;
@@ -255,6 +255,7 @@
     .seg-actions button:hover { color: var(--text); background: var(--panel-2); }
     .seg-actions .seg-split-btn:hover { color: var(--accent); }
     .seg-actions .seg-note-btn:hover { color: var(--accent-2); }
+    .seg-actions .seg-mergeup-btn:hover { color: var(--ok); }
     .seg-menu {
       position: absolute;
       right: 8px; top: 36px;
@@ -279,6 +280,41 @@
     }
     .seg-menu button:hover { background: var(--panel-3); }
     .seg-menu .danger { color: var(--err); }
+
+    /* Inline speaker-reassign popover. Positioned in JS by anchoring
+       to whatever element the user clicked (segment speaker label, or
+       the ⋮ menu button in the dropdown's "Reassign" path). */
+    .speaker-popover {
+      position: absolute;
+      z-index: 20;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 4px;
+      min-width: 180px;
+      max-height: 360px; overflow-y: auto;
+      display: none;
+    }
+    .speaker-popover.open { display: block; }
+    .speaker-popover .sp-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 10px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text);
+    }
+    .speaker-popover .sp-row:hover { background: var(--panel-3); }
+    .speaker-popover .sp-row.current { color: var(--accent); }
+    .speaker-popover .sp-row.current::after { content: " ✓"; color: var(--accent); margin-left: auto; }
+    .speaker-popover .swatch { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .speaker-popover .divider { height: 1px; background: var(--border); margin: 4px 0; }
+    .speaker-popover .sp-add {
+      padding: 6px 10px; cursor: pointer; font-size: 12px;
+      color: var(--muted); border-radius: 5px;
+    }
+    .speaker-popover .sp-add:hover { background: var(--panel-3); color: var(--text); }
 
     /* Modals */
     .modal-overlay {
@@ -856,7 +892,7 @@ import {
     sp.className = `seg-speaker ${speakerClass(seg.speaker)}`;
     sp.innerHTML = `<span class="swatch ${swatchClass(seg.speaker)}"></span>${escapeHtml(speakerLabel(seg.speaker))}`;
     sp.title = "Click to reassign speaker";
-    sp.addEventListener("click", () => openAssign(idx));
+    sp.addEventListener("click", (e) => { e.stopPropagation(); openAssign(idx, sp); });
     meta.appendChild(t);
     meta.appendChild(sp);
     div.appendChild(meta);
@@ -913,6 +949,23 @@ import {
     });
     actions.appendChild(splitBtn);
 
+    // ⬆ Merge into the previous segment — same handler as the dropdown's
+    // "Merge with previous" item. Hidden on the first segment because
+    // there's nothing to merge into.
+    const mergeUpBtn = document.createElement("button");
+    mergeUpBtn.className = "seg-mergeup-btn";
+    mergeUpBtn.type = "button";
+    mergeUpBtn.title = "Merge this line into the line above";
+    mergeUpBtn.setAttribute("aria-label", "Merge into previous segment");
+    mergeUpBtn.textContent = "⬆";
+    if (idx === 0) mergeUpBtn.style.visibility = "hidden";
+    mergeUpBtn.addEventListener("mousedown", (e) => e.preventDefault());
+    mergeUpBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      handleSegmentAction(idx, "merge-prev", text);
+    });
+    actions.appendChild(mergeUpBtn);
+
     const noteBtn = document.createElement("button");
     noteBtn.className = "seg-note-btn";
     noteBtn.type = "button";
@@ -955,7 +1008,9 @@ import {
     menu.addEventListener("click", (e) => {
       const btn = e.target.closest("button"); if (!btn) return;
       div.classList.remove("menu-open");
-      handleSegmentAction(idx, btn.dataset.act, text);
+      // The menu's ⋮ button is a reasonable anchor for popover-style
+      // actions like "reassign speaker".
+      handleSegmentAction(idx, btn.dataset.act, text, menuBtn);
     });
     div.appendChild(menu);
 
@@ -1198,7 +1253,7 @@ import {
   });
 
   // ---- Segment actions ----
-  function handleSegmentAction(idx, act, textNode) {
+  function handleSegmentAction(idx, act, textNode, anchorEl) {
     const seg = state.segments[idx];
     if (!seg) return;
     if (act === "split") return splitAtCursor(idx, textNode);
@@ -1206,7 +1261,7 @@ import {
     if (act === "merge-next") return mergeWithNext(idx);
     if (act === "insert-after") return openInsert(idx);
     if (act === "delete") return deleteSegment(idx);
-    if (act === "reassign") return openAssign(idx);
+    if (act === "reassign") return openAssign(idx, anchorEl);
     if (act === "add-note") return openNoteFor(idx, textNode);
   }
 
@@ -1349,31 +1404,107 @@ import {
     render(); markDirty();
   });
 
-  // ---- Assign speaker modal ----
-  let assigningIdx = -1;
-  function openAssign(idx) {
-    assigningIdx = idx;
-    const sel = $("assignSelect");
-    sel.innerHTML = "";
-    state.speakers.forEach(sp => {
-      const opt = document.createElement("option");
-      opt.value = sp;
-      opt.textContent = speakerLabel(sp);
-      if (state.segments[idx].speaker === sp) opt.selected = true;
-      sel.appendChild(opt);
-    });
-    $("assignModal").classList.add("open");
+  // ---- Assign speaker popover (replaces the old centre-screen modal) ----
+  // Anchors to whatever element the user clicked — either the speaker
+  // label on the segment row or the ⋮ menu button when the user reaches
+  // it via the dropdown's "Reassign" item. Cuts the click count from
+  // 3 (open modal · pick from select · click Save) to 1 per reassign.
+  let _speakerPopover = null;
+
+  function closeSpeakerPopover() {
+    if (_speakerPopover) {
+      _speakerPopover.remove();
+      _speakerPopover = null;
+      document.removeEventListener("mousedown", _onSpeakerOutsideClick, true);
+      document.removeEventListener("keydown", _onSpeakerKeydown, true);
+    }
   }
-  $("assignCancel").addEventListener("click", () => $("assignModal").classList.remove("open"));
-  $("assignSave").addEventListener("click", () => {
-    const v = $("assignSelect").value;
-    if (assigningIdx < 0) return;
-    pushUndo();
-    state.segments[assigningIdx].speaker = v;
-    (state.segments[assigningIdx].words || []).forEach(w => w.speaker = v);
-    $("assignModal").classList.remove("open");
-    render(); markDirty();
-  });
+  function _onSpeakerOutsideClick(e) {
+    if (_speakerPopover && !_speakerPopover.contains(e.target)) closeSpeakerPopover();
+  }
+  function _onSpeakerKeydown(e) {
+    if (e.key === "Escape") { e.preventDefault(); closeSpeakerPopover(); }
+  }
+
+  function openAssign(idx, anchorEl) {
+    closeSpeakerPopover();
+    const seg = state.segments[idx];
+    if (!seg) return;
+    const pop = document.createElement("div");
+    pop.className = "speaker-popover open";
+
+    state.speakers.forEach(sp => {
+      const row = document.createElement("div");
+      row.className = "sp-row" + (seg.speaker === sp ? " current" : "");
+      row.innerHTML = `<span class="swatch ${swatchClass(sp)}"></span><span class="row-label">${escapeHtml(speakerLabel(sp))}</span>`;
+      row.addEventListener("click", () => {
+        if (seg.speaker !== sp) {
+          pushUndo();
+          seg.speaker = sp;
+          (seg.words || []).forEach(w => w.speaker = sp);
+          render(); markDirty();
+        }
+        closeSpeakerPopover();
+      });
+      pop.appendChild(row);
+    });
+
+    // "+ Add new speaker" row — falls back to the existing prompt-driven
+    // create flow so we don't reinvent that UI here.
+    const sep = document.createElement("div"); sep.className = "divider";
+    pop.appendChild(sep);
+    const add = document.createElement("div");
+    add.className = "sp-add";
+    add.textContent = "+ Add new speaker…";
+    add.addEventListener("click", () => {
+      closeSpeakerPopover();
+      const v = prompt("New speaker label (e.g. Guest)");
+      if (!v || !v.trim()) return;
+      pushUndo();
+      const newId = `SPEAKER_${String(state.speakers.length).padStart(2, "0")}`;
+      state.speakers.push(newId);
+      state.speaker_names = state.speaker_names || {};
+      state.speaker_names[newId] = v.trim();
+      // Assign the just-created speaker to this segment so the click
+      // sequence "+ Add → name" lands in one shot.
+      seg.speaker = newId;
+      (seg.words || []).forEach(w => w.speaker = newId);
+      render(); markDirty();
+    });
+    pop.appendChild(add);
+
+    document.body.appendChild(pop);
+    _speakerPopover = pop;
+
+    // Position relative to the anchor. Default: just below + slightly
+    // right of the clicked element. Flip up if there isn't room.
+    const anchor = anchorEl || document.querySelector(`.segment[data-idx="${idx}"] .seg-speaker`);
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+      const popH = pop.offsetHeight || 200;
+      const popW = pop.offsetWidth || 200;
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const top = (spaceBelow < popH + 12 ? rect.top + window.scrollY - popH - 6
+                                          : rect.bottom + window.scrollY + 6);
+      // Keep within viewport horizontally.
+      let left = rect.left + window.scrollX;
+      const overflowRight = (left + popW) - (window.scrollX + document.documentElement.clientWidth);
+      if (overflowRight > 0) left -= (overflowRight + 8);
+      pop.style.top = `${Math.max(8, top)}px`;
+      pop.style.left = `${Math.max(8, left)}px`;
+    } else {
+      // No anchor (shouldn't happen in practice) — centre fallback.
+      pop.style.top = "20%"; pop.style.left = "50%";
+      pop.style.transform = "translateX(-50%)";
+    }
+
+    // Close on outside click / Esc. Use capture so we get the event
+    // before any segment-level handlers.
+    setTimeout(() => {
+      document.addEventListener("mousedown", _onSpeakerOutsideClick, true);
+      document.addEventListener("keydown", _onSpeakerKeydown, true);
+    }, 0);
+  }
 
   // ---- Insert modal ----
   let insertAfterIdx = -1;

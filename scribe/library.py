@@ -102,18 +102,40 @@ def _coerce_speakers(result: Any) -> list[str]:
     """Pull a clean list of speaker labels out of a ``result`` dict.
 
     The on-disk shape is ``result["speakers"]`` (plural) — written
-    by :class:`TranscriptionResult.to_dict`. Falls back to the empty
-    list if missing or malformed; never raises.
+    by :class:`TranscriptionResult.to_dict` or by the editor's PUT
+    pass-through of the edited transcript JSON.
+
+    The editor lets the user rename a speaker without changing its
+    canonical id: e.g. SPEAKER_00 stays SPEAKER_00 in
+    ``result["speakers"]`` but the user-visible label is mapped via
+    ``result["speaker_names"]`` (``{"SPEAKER_00": "Luke"}``). The
+    library row should show the *renamed* label so a user who
+    relabels their speakers in the editor sees those names in the
+    list, not the raw model-assigned ids. Anything in
+    ``speaker_names`` overrides the matching id; missing entries
+    fall through to the canonical id.
+
+    Falls back to the empty list if missing or malformed; never raises.
     """
     if not isinstance(result, dict):
         return []
     raw = result.get("speakers")
     if not isinstance(raw, list):
         return []
+    name_map = result.get("speaker_names")
+    if not isinstance(name_map, dict):
+        name_map = {}
     out: list[str] = []
     for s in raw:
-        if isinstance(s, str) and s.strip():
-            out.append(s.strip()[:_FIELD_CAP])
+        if not isinstance(s, str) or not s.strip():
+            continue
+        canonical = s.strip()
+        # Prefer the user-renamed label when it's a non-empty string.
+        renamed = name_map.get(canonical)
+        if isinstance(renamed, str) and renamed.strip():
+            out.append(renamed.strip()[:_FIELD_CAP])
+        else:
+            out.append(canonical[:_FIELD_CAP])
     return out
 
 

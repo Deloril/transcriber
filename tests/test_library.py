@@ -141,6 +141,54 @@ class TestSummariseJobSpeakers:
             assert row["speakers"] == []
             assert row["speaker_count"] == 0
 
+    def test_speaker_names_override_canonical_ids(self) -> None:
+        # Editor stores user renames in result["speaker_names"] without
+        # mutating the canonical "speakers" list. The library should
+        # show the renames so the row reflects what the user has
+        # labelled the speakers.
+        result = {
+            "language": "en", "mode": "diarize",
+            "speakers": ["SPEAKER_00", "SPEAKER_01"],
+            "speaker_names": {"SPEAKER_00": "Luke", "SPEAKER_01": "Maria"},
+            "segments": [],
+        }
+        row = library.summarise_job(_job_state(result=result))
+        assert row["speakers"] == ["Luke", "Maria"]
+
+    def test_partial_speaker_names_falls_through(self) -> None:
+        # Only one speaker has been renamed; the other still appears as
+        # its canonical id.
+        result = {
+            "language": "en", "mode": "diarize",
+            "speakers": ["SPEAKER_00", "SPEAKER_01"],
+            "speaker_names": {"SPEAKER_00": "Luke"},
+            "segments": [],
+        }
+        row = library.summarise_job(_job_state(result=result))
+        assert row["speakers"] == ["Luke", "SPEAKER_01"]
+
+    def test_empty_speaker_name_does_not_override(self) -> None:
+        # An empty string in speaker_names shouldn't blank out the row.
+        result = {
+            "language": "en", "mode": "diarize",
+            "speakers": ["SPEAKER_00"],
+            "speaker_names": {"SPEAKER_00": "   "},
+            "segments": [],
+        }
+        row = library.summarise_job(_job_state(result=result))
+        assert row["speakers"] == ["SPEAKER_00"]
+
+    def test_speaker_names_not_a_dict_is_ignored(self) -> None:
+        # Defensive: hand-edited file with the wrong shape doesn't crash.
+        result = {
+            "language": "en", "mode": "diarize",
+            "speakers": ["SPEAKER_00"],
+            "speaker_names": "not-a-dict",
+            "segments": [],
+        }
+        row = library.summarise_job(_job_state(result=result))
+        assert row["speakers"] == ["SPEAKER_00"]
+
 
 class TestSummariseJobDuration:
     def test_returns_max_segment_end(self) -> None:
