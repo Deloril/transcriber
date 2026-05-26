@@ -1153,6 +1153,136 @@ async def import_project_archive_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# REFI-QDA / QDPX project import (F6.6) — interoperable inverse of F6.4
+#
+# The pure builder shipped in 0426e44 (``scribe.refi_qda_import``) and a
+# CLI wrapper in ``scribe.scripts.import_qdpx``. F6.6's reachability gate
+# requires an HTTP surface — without it researchers can only import
+# QDPX archives by typing a Python invocation, which is hostile UX
+# given that REFI-QDA is meant to be Scribe's **no-lock-in** interchange
+# format. This endpoint mirrors F1.5's ``import-archive`` shape:
+#
+#   * Multipart upload accepting a single ``archive`` file part.
+#   * 201 on success with ``{"project_id": "...", "redirect": "...",
+#     ...summary counts...}`` so the projects list JS can ``location =
+#     redirect`` after upload.
+#   * 400 on a malformed archive (not a zip / no project.qde / bad
+#     XML).
+#   * The endpoint always **mints a fresh project id** — the import
+#     module does the same. Two installs sharing a workstation can't
+#     silently collide, even on Scribe-origin QDPX.
+# --------------------------------------------------------------------------- #
+
+
+from . import refi_qda_import as _refi_qda_import  # noqa: E402
+from .scripts import import_qdpx as _import_qdpx_script  # noqa: E402
+
+
+@app.post("/api/projects/import-qdpx")
+async def import_project_qdpx_endpoint(
+    archive: UploadFile = File(...),
+) -> JSONResponse:
+    """Import a project from a REFI-QDA / QDPX (.qdpx) archive (F6.6).
+
+    Accepts a multipart upload with a single ``archive`` file part.
+
+    The archive is parsed with :func:`scribe.refi_qda_import.import_qdpx`
+    and persisted via :func:`scribe.scripts.import_qdpx.persist_import_result`
+    under ``PROJECTS_DIR/<new-project-id>/``. The new project id is
+    always freshly minted (so two installs sharing a workstation can't
+    collide); within the new project, individual entity ids are
+    preserved when the archive was Scribe-origin (the F6.4 export pads
+    ids into REFI-QDA GUIDs in a reversible way) and freshly minted
+    otherwise.
+
+    Status codes:
+      * ``201`` — import succeeded. Body::
+
+          {
+            "project_id": "...",
+            "name": "...",
+            "redirect": "/projects/<id>",
+            "sources": int,
+            "codes": int,
+            "coders": int,
+            "memos": int,
+            "applications": int,
+            "warnings": [str, ...]   # truncated to 20 entries
+          }
+
+      * ``400`` — malformed archive (not a zip / no ``project.qde`` /
+        unparseable XML).
+      * ``413`` — upload exceeded the soft size limit (50 MB; QDPX
+        archives in the wild are sub-megabyte, so this is a sanity
+        bound rather than a per-tool quota).
+    """
+    # Soft cap: QDPX files are tiny in practice. Anything over 50 MB
+    # is almost certainly a misclick (someone uploading raw audio).
+    SOFT_LIMIT = 50 * 1024 * 1024
+
+    import tempfile
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="scribe-qdpx-import-"))
+    upload_path = tmp_dir / "upload.qdpx"
+    try:
+        size = 0
+        with upload_path.open("wb") as dst:
+            while True:
+                chunk = await archive.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > SOFT_LIMIT:
+                    raise HTTPException(
+                        413,
+                        f"QDPX upload exceeds soft limit of "
+                        f"{SOFT_LIMIT // (1024 * 1024)} MB",
+                    )
+                dst.write(chunk)
+
+        try:
+            with PROJECTS_LOCK:
+                result = _refi_qda_import.import_qdpx(upload_path)
+                projects_root = _projects_root()
+                _import_qdpx_script.persist_import_result(
+                    projects_root, result
+                )
+        except HTTPException:
+            raise
+        except (ValueError, TypeError) as exc:
+            # ValueError: bad zip / no project.qde / bad XML.
+            # TypeError: refi_qda_import rejected the input shape (only
+            #     fires on programmer error here, but we surface 400
+            #     so it doesn't leak as a 500).
+            raise HTTPException(400, f"Invalid QDPX archive: {exc}")
+        except Exception as exc:  # zipfile.BadZipFile, json errors, …
+            raise HTTPException(400, f"Invalid QDPX archive: {exc}")
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:  # pragma: no cover — defensive
+            pass
+
+    # Truncate warnings to a UI-friendly cap; the CLI does the same.
+    warnings_out = list(result.warnings[:20])
+    return JSONResponse(
+        {
+            "project_id": result.project.id,
+            "name": result.project.name,
+            "redirect": f"/projects/{result.project.id}",
+            "sources": len(result.sources),
+            "codes": len(result.codes),
+            "coders": len(result.coders),
+            "memos": len(result.memos),
+            "applications": len(result.applications),
+            "warnings": warnings_out,
+            "warnings_truncated": len(result.warnings) > len(warnings_out),
+        },
+        status_code=201,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Sources (F1.2) — primary-data items attached to a project
 #
 # A source is most commonly a Scribe transcript (linked via

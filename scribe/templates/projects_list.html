@@ -14,6 +14,22 @@
   </button>
   <input type="file" id="importArchiveInput" accept=".zip,.scribe,.scribe.zip,application/zip"
          style="display:none">
+  {# F6.6: REFI-QDA / QDPX import — interoperable inverse of F6.4. The
+     QDPX import is a separate button (rather than overloading the
+     existing one) because the file extension, MIME type, and target
+     endpoint are all different, and conflating them would force the
+     server to sniff the upload before routing — fragile when other
+     QDA tools' QDPX files have idiosyncratic zip layouts. Same hidden-
+     <input type="file"> pattern as F1.5; POSTs multipart to
+     /api/projects/import-qdpx and follows the redirect on 201. #}
+  <button type="button" class="btn secondary" id="importQdpxBtn"
+          data-test-feature="F6.6"
+          title="Import a project from a REFI-QDA / QDPX (.qdpx) archive — the no-lock-in interchange format any QDA tool can produce.">
+    ⬆ Import QDPX
+  </button>
+  <input type="file" id="importQdpxInput"
+         accept=".qdpx,.zip,application/x-qdpx,application/zip"
+         style="display:none">
   <a class="btn" href="/projects/new">+ New project</a>
 {% endblock %}
 
@@ -183,6 +199,54 @@ if (importBtn && importInput) {
       importBtn.disabled = false;
       importBtn.textContent = "⬆ Import archive";
       importInput.value = "";
+    }
+  });
+}
+
+// ----------------------------------------------------------------------
+// F6.6 — import a REFI-QDA / QDPX archive.
+//
+// Mirrors the F1.5 handler but POSTs to /api/projects/import-qdpx.
+// The endpoint always mints a fresh project id (Scribe doesn't reuse
+// project ids across installs even on its own QDPX exports) so the
+// server's response.redirect is the source of truth for navigation.
+// Warnings, when present, are surfaced via the existing errorState
+// card in non-blocking ("Imported with warnings") form rather than as
+// a hard error — REFI-QDA imports from foreign tools commonly produce
+// best-effort warnings (unresolved CodeRefs, foreign GUID kinds) and
+// the user should still land in the imported project.
+// ----------------------------------------------------------------------
+const importQdpxBtn = document.getElementById("importQdpxBtn");
+const importQdpxInput = document.getElementById("importQdpxInput");
+if (importQdpxBtn && importQdpxInput) {
+  importQdpxBtn.addEventListener("click", () => importQdpxInput.click());
+  importQdpxInput.addEventListener("change", async () => {
+    const file = importQdpxInput.files && importQdpxInput.files[0];
+    if (!file) return;
+    const error = document.getElementById("errorState");
+    error.style.display = "none";
+    error.textContent = "";
+    importQdpxBtn.disabled = true;
+    importQdpxBtn.textContent = "Importing…";
+    try {
+      const fd = new FormData();
+      fd.append("archive", file);
+      const r = await fetch("/api/projects/import-qdpx", {
+        method: "POST",
+        body: fd,
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        throw new Error(data.detail || `HTTP ${r.status}`);
+      }
+      window.location.href = data.redirect || `/projects/${data.project_id}`;
+    } catch (e) {
+      error.textContent = `QDPX import failed: ${e.message}`;
+      error.style.display = "";
+    } finally {
+      importQdpxBtn.disabled = false;
+      importQdpxBtn.textContent = "⬆ Import QDPX";
+      importQdpxInput.value = "";
     }
   });
 }
