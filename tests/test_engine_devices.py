@@ -567,6 +567,141 @@ class TestApplyRocmRuntimeWorkaroundsPublic:
         assert "CT2_CUDA_ALLOCATOR" not in _os.environ
 
 
+class TestNeedsHsaOverride:
+    """G4.2: detector for ``HSA_OVERRIDE_GFX_VERSION=10.3.0``.
+
+    The override has to be in the environment *before* the HIP runtime
+    initialises, so we can't auto-apply it from Python (torch is already
+    loaded by the time this code runs). The detector drives the
+    informational hint surfaced by ``scribe.devices`` and ``setup.sh``.
+    """
+
+    def test_false_on_cuda(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.needs_hsa_override() is False
+
+    def test_false_on_cpu(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cpu")
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.needs_hsa_override() is False
+
+    def test_false_on_mps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "mps")
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.needs_hsa_override() is False
+
+    def test_false_on_rocm_gfx1030(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # gfx1030 (Navi 21, RX 6800/6900-series) is the canonical RDNA 2
+        # target ROCm ships kernels for. It doesn't need the override.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1030")
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.needs_hsa_override() is False
+
+    @pytest.mark.parametrize("gfx", [
+        "gfx1031",  # Navi 22 — RX 6700/6750 XT
+        "gfx1032",  # Navi 23 — RX 6600/6650 XT
+        "gfx1033",  # Van Gogh APU (Steam Deck)
+        "gfx1034",  # Navi 24 — RX 6400/6500 XT
+        "gfx1035",  # Rembrandt APU (Ryzen 6000-series mobile)
+        "gfx1036",  # Rembrandt-R APU (Ryzen 7035-series mobile)
+    ])
+    def test_true_on_non_gfx1030_rdna2(
+        self, monkeypatch: pytest.MonkeyPatch, gfx: str
+    ) -> None:
+        # Every other RDNA 2 die needs HSA_OVERRIDE_GFX_VERSION=10.3.0
+        # to map onto gfx1030 — that's the whole point of the override.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: gfx)
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.needs_hsa_override() is True
+
+    @pytest.mark.parametrize("gfx", [
+        "gfx1100",  # RDNA 3 — Navi 31
+        "gfx1101",  # RDNA 3 — Navi 32
+        "gfx1102",  # RDNA 3 — Navi 33
+        "gfx1200",  # RDNA 4 — Navi 44
+        "gfx1201",  # RDNA 4 — Navi 48
+        "gfx1010",  # RDNA 1 — Navi 10 (Tier 3, not RDNA 2)
+        "gfx900",   # Vega — not RDNA at all
+        "gfx940",   # CDNA 3 — datacentre
+    ])
+    def test_false_on_non_rdna2_rocm(
+        self, monkeypatch: pytest.MonkeyPatch, gfx: str
+    ) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: gfx)
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.needs_hsa_override() is False
+
+    def test_false_when_user_already_set_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # If the user has already exported the variable we must not
+        # second-guess it: their value is authoritative even when it's
+        # "wrong" by our recommendation.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1032")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+        assert engine.needs_hsa_override() is False
+
+    def test_false_when_user_set_override_to_wrong_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Even if the user picked a non-recommended value we treat it
+        # as authoritative — they may know something about their setup
+        # we don't. Documenting the recommendation is not the same as
+        # forcing it.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1032")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
+        assert engine.needs_hsa_override() is False
+
+    def test_false_when_arch_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # If we couldn't read a gfx target we don't know what we're
+        # looking at — recommending an override blindly could break a
+        # working setup. Cautious default is False.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: None)
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.needs_hsa_override() is False
+
+
+class TestRecommendedHsaOverrideValue:
+    """G4.2: thin wrapper that returns ``"10.3.0"`` when needed, else None."""
+
+    def test_returns_none_on_cuda(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "cuda")
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.recommended_hsa_override_value() is None
+
+    def test_returns_none_on_gfx1030(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1030")
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.recommended_hsa_override_value() is None
+
+    def test_returns_10_3_0_on_gfx1032(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1032")
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.recommended_hsa_override_value() == "10.3.0"
+
+    def test_returns_none_when_user_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1032")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+        assert engine.recommended_hsa_override_value() is None
+
+    def test_constant_matches_documented_value(self) -> None:
+        # The constant feeds setup.sh and the devices report; a typo
+        # would silently break the recommendation everywhere it's used.
+        assert engine.HSA_OVERRIDE_RDNA2_VALUE == "10.3.0"
+
+
 class TestPackageExports:
     """G4.1: ROCm helpers reachable from the top-level ``scribe`` namespace.
 
@@ -584,6 +719,23 @@ class TestPackageExports:
         import scribe
         assert scribe.is_rdna2 is engine.is_rdna2
         assert "is_rdna2" in scribe.__all__
+
+    def test_needs_hsa_override_reexported(self) -> None:
+        # G4.2: the detector and the recommended-value helper need to be
+        # importable from the top level so a downstream installer or
+        # diagnostic script can render a hint without poking at
+        # ``scribe.engine`` directly.
+        import scribe
+        assert scribe.needs_hsa_override is engine.needs_hsa_override
+        assert "needs_hsa_override" in scribe.__all__
+
+    def test_recommended_hsa_override_value_reexported(self) -> None:
+        import scribe
+        assert (
+            scribe.recommended_hsa_override_value
+            is engine.recommended_hsa_override_value
+        )
+        assert "recommended_hsa_override_value" in scribe.__all__
 
 
 class TestPatchPyannoteLstmDropout:

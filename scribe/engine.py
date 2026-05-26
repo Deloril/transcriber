@@ -671,6 +671,67 @@ def _apply_rocm_runtime_workarounds() -> None:
 apply_rocm_runtime_workarounds()
 
 
+# G4.2: ``HSA_OVERRIDE_GFX_VERSION=10.3.0`` is the second RDNA 2 workaround.
+# AMD's ROCm runtime only ships pre-built kernels for ``gfx1030`` (Navi 21,
+# RX 6800/6900-series and the W6800 workstation card). Every other RDNA 2
+# die — gfx1031 (RX 6700), gfx1032 (RX 6600), gfx1034 (RX 6400/6500), and
+# the APUs gfx1033/1035/1036 — needs the user to export
+# ``HSA_OVERRIDE_GFX_VERSION=10.3.0`` *before* the HIP runtime initialises
+# so that HIP treats the device as if it were gfx1030. Unlike the
+# CT2_CUDA_ALLOCATOR fix above, we can't auto-apply this from Python: the
+# override has to be in the environment before ``import torch`` runs the
+# HIP runtime, and by the time this module is loaded torch has already
+# imported. So G4.2 is a *detector* only — we surface the recommendation
+# in ``scribe.devices`` and in ``setup.sh --rocm`` so users hitting
+# illegal-memory-access faults see the fix without trawling AMD's matrix.
+HSA_OVERRIDE_RDNA2_VALUE: str = "10.3.0"
+"""The HSA_OVERRIDE_GFX_VERSION value that maps any RDNA 2 die onto
+``gfx1030`` so AMD's only RDNA 2 ROCm kernel set runs. See
+:func:`recommended_hsa_override_value`."""
+
+
+def needs_hsa_override() -> bool:
+    """G4.2: True iff the active hardware benefits from
+    ``HSA_OVERRIDE_GFX_VERSION=10.3.0`` and the user hasn't already set it.
+
+    Returns True only when *all* of the following hold:
+
+    1. the active backend is ROCm (anything else has no HIP runtime to
+       override; on CUDA / MPS / CPU the variable is meaningless);
+    2. a gfx target is detected via ``gpu_arch_name()`` (we won't recommend
+       an override for hardware we couldn't identify — cautious default);
+    3. the gfx target is in the RDNA 2 family (``gfx103x``) but is *not*
+       ``gfx1030`` itself — gfx1030 is the only RDNA 2 die ROCm ships
+       kernels for, so it doesn't need the override;
+    4. ``HSA_OVERRIDE_GFX_VERSION`` is unset — a user-supplied value is
+       treated as authoritative and never overruled.
+
+    Returns False on every other configuration. Cheap to call repeatedly;
+    no torch state mutation."""
+    if not is_rocm():
+        return False
+    if os.environ.get("HSA_OVERRIDE_GFX_VERSION"):
+        return False
+    arch = gpu_arch_name()
+    if not arch:
+        return False
+    if arch == "gfx1030":
+        return False
+    return arch in _RDNA2_GFX_TARGETS
+
+
+def recommended_hsa_override_value() -> str | None:
+    """G4.2: the ``HSA_OVERRIDE_GFX_VERSION`` value Scribe recommends, or
+    None when no override is needed.
+
+    Returns ``"10.3.0"`` when :func:`needs_hsa_override` is True (i.e. on
+    a ROCm machine running a non-gfx1030 RDNA 2 die with the env var
+    unset). Returns None on every other configuration, including ROCm
+    machines where the override is already exported (the caller should
+    treat the user value as authoritative and not second-guess it)."""
+    return HSA_OVERRIDE_RDNA2_VALUE if needs_hsa_override() else None
+
+
 def _iter_lstm_modules(obj: Any, _visited: set[int] | None = None) -> Any:
     """
     Yield every ``torch.nn.LSTM`` reachable from ``obj``.

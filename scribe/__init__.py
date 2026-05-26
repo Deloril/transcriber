@@ -10,7 +10,9 @@ from .engine import (
     is_mps,
     is_rdna2,
     is_rocm,
+    needs_hsa_override,
     patch_pyannote_lstm_dropout,
+    recommended_hsa_override_value,
 )
 
 __version__ = "0.1.0"
@@ -26,5 +28,7 @@ __all__ = [
     "is_mps",
     "is_rdna2",
     "is_rocm",
+    "needs_hsa_override",
     "patch_pyannote_lstm_dropout",
+    "recommended_hsa_override_value",
 ]

@@ -8,6 +8,7 @@ import sys
 import torch
 
 from .engine import (
+    HSA_OVERRIDE_RDNA2_VALUE,
     _cuda_vram_gb,
     _diarization_device,
     _is_rdna2,
@@ -122,6 +123,28 @@ def main() -> int:
                 print(f"  Allocator:        CT2_CUDA_ALLOCATOR={allocator} (user-overridden)")
             else:
                 print("  Allocator:        CT2_CUDA_ALLOCATOR unset — call apply_rocm_runtime_workarounds() before CT2 import")
+        # G4.2: surface the HSA_OVERRIDE_GFX_VERSION state on ROCm. RDNA 2
+        # dies that aren't gfx1030 (i.e. RX 6700 / 6600 / 6500 / 6400 and
+        # the RDNA 2 APUs) need ``HSA_OVERRIDE_GFX_VERSION=10.3.0`` exported
+        # *before* HIP initialises, so we surface it as a recommendation
+        # (we can't auto-set it from Python — by the time this module loads,
+        # torch has already brought the HIP runtime up). When the user has
+        # already set the variable we just echo the value so support
+        # bundles show the active configuration; on gfx1030 (the one
+        # officially-supported RDNA 2 target) the line is omitted.
+        if backend == "rocm":
+            import os as _os
+            hsa_value = _os.environ.get("HSA_OVERRIDE_GFX_VERSION")
+            arch_for_hsa = gpu_arch_name()
+            if hsa_value:
+                print(
+                    f"  HSA override:     HSA_OVERRIDE_GFX_VERSION={hsa_value} (user-set)"
+                )
+            elif _is_rdna2() and arch_for_hsa and arch_for_hsa != "gfx1030":
+                print(
+                    f"  HSA override:     HSA_OVERRIDE_GFX_VERSION unset — "
+                    f"recommend export HSA_OVERRIDE_GFX_VERSION={HSA_OVERRIDE_RDNA2_VALUE} for {arch_for_hsa}"
+                )
         # G2.3: classify the Linux distro against AMD's official matrix.
         # Only meaningful on ROCm — on CUDA / MPS / CPU the user doesn't
         # care which Radeon-supporting distro they're on.

@@ -195,8 +195,15 @@ for u in rocm_wheel_zip_urls('$CT2_VERSION'):
 >> Tier 1 (RDNA 3/4): you should be ready to go.
 >> Tier 2 (RDNA 2 / RX 6000):  Scribe will auto-apply
 >>   CT2_CUDA_ALLOCATOR=cub_caching for you.
->>   You may also need:
+>>   For RX 6700 / 6600 / 6500 / 6400 and RDNA 2 APUs (Steam Deck,
+>>   Ryzen 6000+ mobile) — gfx1031 / 1032 / 1033 / 1034 / 1035 / 1036 —
+>>   you also need to export this *before* launching scribe:
 >>     export HSA_OVERRIDE_GFX_VERSION=10.3.0
+>>   This maps the die onto gfx1030 so AMD's only RDNA 2 ROCm kernel
+>>   set runs. The RX 6800 / 6900-series (gfx1030) is the one die
+>>   ROCm ships kernels for natively and does NOT need this override.
+>>   \`python -m scribe.devices\` will recommend the export with the
+>>   exact gfx target it detected if it sees you need it.
 >>   See docs/research/amd-rocm-research.md for hardware notes.
 >> Air-gapped install or corporate firewall? Set
 >>   export SCRIBE_CT2_ROCM_FALLBACK_URLS=https://your-mirror/wheel.zip
