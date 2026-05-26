@@ -7224,6 +7224,232 @@ async def export_project_snapshot_codebook_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# F9.4 — Project checkpoints (git-like full-project bookmarks)
+# --------------------------------------------------------------------------- #
+# F9.4 ships ``scribe.project_checkpoints``: the full-project sibling
+# of an F9.3 codebook snapshot. Where F9.3 freezes only the codebook,
+# F9.4 freezes *everything* — project record, sources, participants,
+# sampling log, codebook + version history, applications, memos,
+# speaker maps, saved queries, audit events — into a name-stamped,
+# hash-verified, immutable archive that lives inside the project. The
+# pure module shipped in 37f47ff with full validation, atomic save,
+# and an F9.1 audit-event emission, but no HTTP / FastAPI surface and
+# no UI; this block closes that loop.
+#
+# Endpoints:
+#
+#   GET  /api/projects/{pid}/checkpoints
+#       List all checkpoints (cheap summary form), oldest-first by
+#       ``created_at`` per the module's natural reading order. The
+#       UI reverses this for newest-first display, mirroring the F9.3
+#       snapshots panel and the F9.1 events feed.
+#
+#   POST /api/projects/{pid}/checkpoints
+#       Create one. Body: {"name": str, "description"?: str,
+#       "actor_coder_id"?: 12-char-hex,
+#       "parent_checkpoint_id"?: 12-char-hex}. Returns the created
+#       checkpoint summary. Calls
+#       :func:`scribe.project_checkpoints.create_project_checkpoint`,
+#       which exports the full project tree into
+#       ``checkpoints/<id>.scribe.zip``, hashes it, writes the
+#       metadata sidecar, and emits an F9.1 event with action='checkpoint'
+#       so the new bookmark also appears on the audit timeline.
+#
+#   GET  /api/projects/{pid}/checkpoints/{cid}
+#       Fetch one checkpoint's full metadata sidecar. Useful for
+#       a "show details" disclosure.
+#
+#   GET  /api/projects/{pid}/checkpoints/{cid}/archive
+#       Download the checkpoint's archive body (.scribe.zip). The
+#       researcher / supervisor uses this to verify the SHA-256 or
+#       to keep an off-site copy.
+#
+# Checkpoints are append-only by convention. Mirrors F9.1 / F9.2 /
+# F9.3: there is no DELETE / PUT surface, only create + read.
+# --------------------------------------------------------------------------- #
+
+
+from . import project_checkpoints as _project_checkpoints  # noqa: E402
+
+
+@app.get("/api/projects/{project_id}/checkpoints")
+async def list_project_checkpoints_endpoint(project_id: str) -> JSONResponse:
+    """List F9.4 project checkpoints for a project (read surface).
+
+    Returns the cheap summary form (``checkpoint_summary``) so callers
+    can render a long history without reading every metadata sidecar
+    a second time. UI orders newest-first; the wire payload keeps the
+    module's natural ascending order so a numeric-index reader can
+    re-derive insertion order.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            summaries = _project_checkpoints.list_checkpoint_summaries(
+                _projects_root(), project_id
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({
+        "checkpoints": summaries,
+        "total": len(summaries),
+    })
+
+
+@app.post("/api/projects/{project_id}/checkpoints")
+async def create_project_checkpoint_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    """Create a named F9.4 project checkpoint.
+
+    Body schema (JSON):
+
+    * ``name`` (required, ≤ 200 chars after trim) — bookmark label,
+      e.g. ``"Pre-merge of duplicate codes"``.
+    * ``description`` (optional, ≤ 4000 chars) — the *why* (the
+      methodological reason).
+    * ``actor_coder_id`` (optional, 12-char hex) — coder taking the
+      checkpoint. Empty string for system-issued checkpoints.
+    * ``parent_checkpoint_id`` (optional, 12-char hex) — the previous
+      checkpoint this one supersedes. Lets a project carry a chain of
+      parent pointers.
+
+    Persists via :func:`create_project_checkpoint`, which also writes
+    the F9.1 audit event and back-fills the checkpoint's ``event_id``.
+    Returns ``201`` with the checkpoint summary on success; ``400`` for
+    validation errors (e.g. blank name, malformed actor id).
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Body must be JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Body must be a JSON object")
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(400, "name is required (non-empty string)")
+    description = body.get("description", "") or ""
+    if not isinstance(description, str):
+        raise HTTPException(400, "description must be a string")
+    actor = body.get("actor_coder_id", "") or ""
+    if not isinstance(actor, str):
+        raise HTTPException(400, "actor_coder_id must be a string")
+    parent = body.get("parent_checkpoint_id", "") or ""
+    if not isinstance(parent, str):
+        raise HTTPException(400, "parent_checkpoint_id must be a string")
+
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            cp = _project_checkpoints.create_project_checkpoint(
+                _projects_root(),
+                project_id,
+                name=name,
+                description=description,
+                actor_coder_id=actor,
+                parent_checkpoint_id=parent,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except FileExistsError as e:
+            # The append-only contract was violated server-side; this
+            # would be a server bug, not user input. 500 is correct.
+            raise HTTPException(500, str(e))
+
+    return JSONResponse(
+        {
+            "checkpoint": _project_checkpoints.checkpoint_summary(cp),
+        },
+        status_code=201,
+    )
+
+
+@app.get("/api/projects/{project_id}/checkpoints/{checkpoint_id}")
+async def get_project_checkpoint_endpoint(
+    project_id: str, checkpoint_id: str
+) -> JSONResponse:
+    """Fetch one F9.4 project checkpoint's full metadata sidecar."""
+    _check_project_id(project_id)
+    if not _project_checkpoints.CHECKPOINT_ID_RE.match(checkpoint_id):
+        raise HTTPException(400, "Invalid checkpoint id")
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            cp = _project_checkpoints.load_checkpoint(
+                _projects_root(), project_id, checkpoint_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Checkpoint not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({"checkpoint": cp.to_dict()})
+
+
+@app.get("/api/projects/{project_id}/checkpoints/{checkpoint_id}/archive")
+async def download_project_checkpoint_archive_endpoint(
+    project_id: str, checkpoint_id: str
+) -> Response:
+    """Download the F9.4 checkpoint's archive body (``.scribe.zip``).
+
+    The researcher / supervisor uses this to keep an off-site copy
+    or to verify the SHA-256 against the value embedded in the
+    metadata sidecar. We never modify the archive after creation, so
+    the bytes returned here always match the recorded hash.
+    """
+    _check_project_id(project_id)
+    if not _project_checkpoints.CHECKPOINT_ID_RE.match(checkpoint_id):
+        raise HTTPException(400, "Invalid checkpoint id")
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(
+                _projects_root(), project_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            cp = _project_checkpoints.load_checkpoint(
+                _projects_root(), project_id, checkpoint_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Checkpoint not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        archive_path = _project_checkpoints.checkpoint_archive_path(
+            _projects_root(), project_id, checkpoint_id
+        )
+        if not archive_path.exists():
+            raise HTTPException(
+                404, "Checkpoint archive missing on disk"
+            )
+        body = archive_path.read_bytes()
+
+    # Filename: <project-slug>-checkpoint-<short>.scribe.zip
+    slug = re.sub(r"[^a-z0-9]+", "-", (project.name or "project").lower())
+    slug = re.sub(r"-+", "-", slug).strip("-") or "project"
+    short = checkpoint_id[:8]
+    filename = f"{slug}-checkpoint-{short}.scribe.zip"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(
+        content=body,
+        media_type="application/zip",
+        headers=headers,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # AI code suggestions (F8.3 / F8.4)
 #
 # Two related endpoints expose the existing scribe.code_suggestions and

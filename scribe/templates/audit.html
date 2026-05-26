@@ -301,6 +301,68 @@
   .snap-row .snap-dl a:hover { background: var(--panel); }
   .snap-empty { color: var(--muted); font-style: italic; padding: 8px 4px; }
   .snap-error { color: var(--err); margin-top: 6px; }
+
+  /* F9.4: Project checkpoints panel.
+     Sits below the F9.3 snapshots panel — same layout idiom, but a
+     checkpoint is the *full* project (not just the codebook), so the
+     row exposes archive size + a download link to the .scribe.zip
+     so a researcher can keep an off-site copy. */
+  .ck-panel { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  .ck-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr 220px;
+    gap: 8px;
+    align-items: start;
+  }
+  @media (max-width: 800px) {
+    .ck-form { grid-template-columns: 1fr; }
+  }
+  .ck-form input,
+  .ck-form textarea {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 11px; font: inherit; font-size: 13px;
+    box-sizing: border-box;
+  }
+  .ck-form textarea { min-height: 38px; max-height: 160px; resize: vertical; }
+  .ck-form .ck-actions {
+    display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap;
+  }
+  .ck-list {
+    list-style: none; padding: 0; margin: 0;
+    display: flex; flex-direction: column;
+  }
+  .ck-row {
+    border-top: 1px solid var(--border);
+    padding: 10px 4px;
+    display: grid;
+    grid-template-columns: 150px 1fr auto;
+    gap: 12px;
+    align-items: center;
+  }
+  .ck-row:first-child { border-top: 0; }
+  .ck-row .when {
+    color: var(--muted); font-size: 12px; font-family: var(--mono);
+  }
+  .ck-row .name { color: var(--text); font-weight: 600; }
+  .ck-row .meta {
+    display: block; color: var(--muted); font-size: 11.5px;
+    font-family: var(--mono); margin-top: 4px;
+  }
+  .ck-row .desc {
+    display: block; color: var(--text); font-style: italic;
+    font-family: var(--serif); margin-top: 4px;
+    line-height: 1.45; max-width: 60ch;
+  }
+  .ck-row .ck-dl { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+  .ck-row .ck-dl a {
+    font-size: 12px; padding: 4px 8px; border-radius: 6px;
+    border: 1px solid var(--border); color: var(--text);
+    text-decoration: none; background: var(--panel-2);
+  }
+  .ck-row .ck-dl a:hover { background: var(--panel); }
+  .ck-empty { color: var(--muted); font-style: italic; padding: 8px 4px; }
+  .ck-error { color: var(--err); margin-top: 6px; }
 {% endblock %}
 
 {% block body %}
@@ -404,6 +466,81 @@
   </div>
   <ul id="snap-list" class="snap-list"
       data-test-id="snap-list"></ul>
+</div>
+
+{#
+  F9.4 — Project checkpoints panel.
+
+  A checkpoint is the *full-project* sibling of an F9.3 codebook
+  snapshot. Where F9.3 freezes only the codebook, F9.4 freezes
+  *everything* — project record, sources, participants, sampling
+  log, codebook + version history, applications, memos, speaker
+  maps, saved queries, audit events — into a name-stamped, hash-
+  verified, immutable archive that lives inside the project at
+  ``checkpoints/<id>.scribe.zip``. Use one before any risky operation
+  (merging dozens of codes; locking the codebook; running an AI
+  sweep) so a researcher can verify and roll back.
+
+  The pure module ``scribe.project_checkpoints`` shipped in 37f47ff
+  with full validation, atomic save, sha256 verification, and an
+  F9.1 audit-event emission. Until this panel + the four
+  ``/api/projects/<pid>/checkpoints`` routes landed, the only path
+  to take or read a checkpoint was via the Python module directly.
+
+  Reads:
+    GET  /api/projects/<pid>/checkpoints                — list
+    POST /api/projects/<pid>/checkpoints                — create
+    GET  /api/projects/<pid>/checkpoints/<cid>          — single
+    GET  /api/projects/<pid>/checkpoints/<cid>/archive  — download body
+#}
+<div class="card" data-test-feature="F9.4" data-test-id="checkpoints-panel"
+     style="margin-top:16px">
+  <h2 style="margin-top:0">Project checkpoints</h2>
+  <p class="hint" style="margin-top:0">
+    A checkpoint freezes the <em>entire</em> project — codes,
+    applications, memos, sources, audit events, the lot — under a
+    chosen name. Take one before any risky operation (merging
+    dozens of codes, locking the codebook, running an AI sweep) so
+    you can verify state later or roll back. Each checkpoint is
+    SHA-256-hashed and immutable; once taken, it can never be
+    edited or deleted.
+  </p>
+  <form id="ck-form" class="ck-form" data-test-id="ck-form"
+        autocomplete="off"
+        onsubmit="return false;">
+    <input
+      id="ck-name"
+      type="text"
+      maxlength="200"
+      placeholder="Checkpoint name (e.g. ‘Pre-merge of duplicate codes’)"
+      data-test-id="ck-name-input"
+      required>
+    <textarea
+      id="ck-desc"
+      maxlength="4000"
+      placeholder="Optional description — the why"
+      data-test-id="ck-desc-input"
+      rows="1"></textarea>
+    <div class="ck-actions">
+      <button type="submit"
+              id="ck-save"
+              class="btn"
+              data-test-id="ck-save-btn">💾 Save checkpoint</button>
+    </div>
+  </form>
+  <div id="ck-error" class="ck-error" style="display:none"
+       data-test-id="ck-error" role="alert"></div>
+
+  <h3 style="margin:18px 0 6px 0; font-size: 14px;">
+    History <span id="ck-count" class="hint" style="font-weight:400"></span>
+  </h3>
+  <div id="ck-empty" class="ck-empty"
+       data-test-id="ck-empty" style="display:none">
+    No checkpoints taken yet. Take one before a risky operation so
+    you can verify state later or roll back.
+  </div>
+  <ul id="ck-list" class="ck-list"
+      data-test-id="ck-list"></ul>
 </div>
 
 <div id="loadingCard" class="card hint" style="margin-top:16px">Loading audit timeline…</div>
@@ -710,6 +847,171 @@ if (snapForm) {
 }
 
 loadSnapshots();
+
+// ---------------------------------------------------------------- //
+// F9.4 — Project checkpoints panel                                 //
+// ---------------------------------------------------------------- //
+// Lists existing checkpoints newest-first; creates a new checkpoint
+// on form submit; renders per-row download links to the archive
+// body (.scribe.zip) at /api/projects/<pid>/checkpoints/<cid>/archive.
+// Same UX idiom as the F9.3 snapshots panel above; key difference:
+// each row also surfaces the archive size so the researcher knows
+// what they're downloading, plus the short SHA-256 prefix as a
+// monospace badge so they can spot-check that two clicks gave them
+// the same bytes.
+const ckForm = document.getElementById("ck-form");
+const ckNameInput = document.getElementById("ck-name");
+const ckDescInput = document.getElementById("ck-desc");
+const ckSaveBtn = document.getElementById("ck-save");
+const ckErrorEl = document.getElementById("ck-error");
+const ckList = document.getElementById("ck-list");
+const ckEmpty = document.getElementById("ck-empty");
+const ckCount = document.getElementById("ck-count");
+
+function setCkError(msg) {
+  if (!ckErrorEl) return;
+  if (!msg) {
+    ckErrorEl.style.display = "none";
+    ckErrorEl.textContent = "";
+    return;
+  }
+  ckErrorEl.style.display = "block";
+  ckErrorEl.textContent = msg;
+}
+
+function fmtBytes(n) {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  // 1 decimal for sub-100 MB sizes, 0 for huge ones.
+  const fixed = v >= 100 ? 0 : 1;
+  return `${v.toFixed(fixed)} ${units[i]}`;
+}
+
+function renderCkRow(c) {
+  const dl = `/api/projects/${PROJECT_ID}/checkpoints/${encodeURIComponent(c.id)}/archive`;
+  const stage = c.codebook_stage || "initial";
+  const actorTxt = c.actor_coder_id
+    ? `actor ${escapeHtml(shortId(c.actor_coder_id))}`
+    : "system";
+  const desc = c.description
+    ? `<span class="desc">${escapeHtml(c.description)}</span>`
+    : "";
+  const sha = c.archive_sha256 ? c.archive_sha256.slice(0, 12) : "";
+  const shaTxt = sha ? ` · sha ${escapeHtml(sha)}` : "";
+  const sizeTxt = fmtBytes(c.archive_bytes);
+  // Component-counts: show codes / applications / memos if present
+  // so the row doubles as a coarse "what's in this archive?" hint
+  // without needing the user to click through.
+  const counts = c.component_counts || {};
+  const countParts = [];
+  if (Number.isFinite(counts.codes)) {
+    countParts.push(`${counts.codes} code${counts.codes === 1 ? "" : "s"}`);
+  }
+  if (Number.isFinite(counts.applications)) {
+    countParts.push(`${counts.applications} app${counts.applications === 1 ? "" : "s"}`);
+  }
+  if (Number.isFinite(counts.memos)) {
+    countParts.push(`${counts.memos} memo${counts.memos === 1 ? "" : "s"}`);
+  }
+  const countsTxt = countParts.length ? ` · ${escapeHtml(countParts.join(" · "))}` : "";
+  return `<li class="ck-row" data-checkpoint-id="${escapeHtml(c.id)}">
+    <span class="when">${escapeHtml(fmtDate(c.created_at))}</span>
+    <div>
+      <span class="name">${escapeHtml(c.name)}</span>
+      ${desc}
+      <span class="meta">
+        ${escapeHtml(sizeTxt)}
+        · stage ${escapeHtml(stage)}
+        · ${actorTxt}
+        · id ${escapeHtml(shortId(c.id))}${shaTxt}${countsTxt}
+      </span>
+    </div>
+    <span class="ck-dl" data-test-id="ck-dl-${escapeHtml(c.id)}">
+      <a href="${dl}"
+         data-test-id="ck-archive-link-${escapeHtml(c.id)}"
+         download
+         title="Download the full project archive (.scribe.zip)">⬇ Archive</a>
+    </span>
+  </li>`;
+}
+
+async function loadCheckpoints() {
+  setCkError("");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/checkpoints`);
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try { const b = await r.json(); if (b.detail) msg = b.detail; } catch (_) {}
+      throw new Error(msg);
+    }
+    const body = await r.json();
+    const cks = Array.isArray(body.checkpoints) ? body.checkpoints : [];
+    // Newest-first for display; the wire payload is asc.
+    const newestFirst = cks.slice().reverse();
+    ckCount.textContent = `· ${cks.length}`;
+    if (!cks.length) {
+      ckEmpty.style.display = "block";
+      ckList.innerHTML = "";
+      return;
+    }
+    ckEmpty.style.display = "none";
+    ckList.innerHTML = newestFirst.map(renderCkRow).join("");
+  } catch (e) {
+    setCkError(`Failed to load checkpoints: ${e.message || e}`);
+  }
+}
+
+if (ckForm) {
+  ckForm.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    setCkError("");
+    const name = (ckNameInput.value || "").trim();
+    if (!name) {
+      setCkError("Checkpoint name is required.");
+      ckNameInput.focus();
+      return;
+    }
+    const description = (ckDescInput.value || "").trim();
+    ckSaveBtn.disabled = true;
+    // The archive write may take a couple of seconds on a large
+    // project — surface progress so the click doesn't feel dead.
+    const original = ckSaveBtn.textContent;
+    ckSaveBtn.textContent = "Saving…";
+    try {
+      const r = await fetch(`/api/projects/${PROJECT_ID}/checkpoints`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({name, description}),
+      });
+      if (!r.ok) {
+        let msg = `HTTP ${r.status}`;
+        try { const b = await r.json(); if (b.detail) msg = b.detail; } catch (_) {}
+        throw new Error(msg);
+      }
+      // Reset form, refresh the checkpoint list, and refresh the
+      // events feed (the checkpoint creation emits an F9.1 event the
+      // timeline should pick up).
+      ckNameInput.value = "";
+      ckDescInput.value = "";
+      await loadCheckpoints();
+      load();
+    } catch (e) {
+      setCkError(`Could not save checkpoint: ${e.message || e}`);
+    } finally {
+      ckSaveBtn.disabled = false;
+      ckSaveBtn.textContent = original;
+    }
+  });
+}
+
+loadCheckpoints();
 
 // ---------------------------------------------------------------- //
 // F9.2 — Definition-at-apply download dropdown                     //
