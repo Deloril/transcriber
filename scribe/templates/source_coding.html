@@ -7,6 +7,19 @@
 {% block actions %}
   <a class="btn secondary" href="/projects/{{ project_id }}/sources">← Sources</a>
   <a id="editLink" class="btn secondary" target="_blank" rel="noopener" href="#" style="display:none">Open in editor ↗</a>
+  {# F5.2 — keyboard / discoverability surface for the right-click
+     composer. The button opens the same modal as right-clicking the
+     source heading, with target_type=source pre-populated. The
+     ``data-test-feature="F5.2"`` marker lets the integration test
+     prove the surface exists without scraping the JS. #}
+  <button id="newMemoBtn"
+          class="btn secondary"
+          type="button"
+          data-test-feature="F5.2"
+          data-test-id="src-new-memo"
+          title="Write a memo about this source (or right-click any application / code chip for a more specific link)">
+    📝 New memo
+  </button>
   {# F4.5 — orphan queue review surface. The badge is hydrated by JS
      so a coder always sees the live count without a refresh. The
      link is rendered unconditionally so the test harness can find
@@ -457,6 +470,111 @@
   }
   .spk-row .spk-role { flex: 0 0 110px; }
   .spk-list .hint { font-size: 11px; }
+
+  /* F5.2 — right-click memo composer. The same modal is reused for
+     "memo about this code", "memo about this quote", "memo about this
+     source", and so on. ``data-test-feature="F5.2"`` on every
+     reachable surface lets the integration test prove every entity
+     surface is wired without a brittle text match. */
+  .ctx-mini-menu {
+    position: fixed;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    z-index: 90;
+    display: none;
+    min-width: 200px;
+    padding: 4px;
+    font-size: 12px;
+  }
+  .ctx-mini-menu.open { display: block; }
+  .ctx-mini-menu .ctx-item {
+    background: transparent;
+    color: var(--text);
+    border: 0;
+    text-align: left;
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: block;
+    font: inherit;
+    font-size: 12px;
+  }
+  .ctx-mini-menu .ctx-item:hover { background: var(--panel-2); color: var(--accent); }
+
+  .memo-modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(8,10,14,.55);
+    backdrop-filter: blur(2px);
+    display: none;
+    align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .memo-modal-overlay.open { display: flex; }
+  .memo-modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    padding: 18px 20px;
+    width: min(520px, 96vw);
+  }
+  .memo-modal h3 { margin: 0 0 10px; font-size: 15px; color: var(--text); }
+  .memo-modal label {
+    display: block;
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    margin-bottom: 4px;
+    margin-top: 8px;
+  }
+  .memo-modal input, .memo-modal select, .memo-modal textarea {
+    width: 100%;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font: inherit;
+    font-size: 13px;
+    box-sizing: border-box;
+  }
+  .memo-modal textarea { min-height: 110px; resize: vertical; }
+  .memo-modal .target-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    font-size: 11.5px;
+    color: var(--text);
+  }
+  .memo-modal .target-pill .target-kind {
+    color: var(--muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .memo-modal .actions {
+    margin-top: 14px;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    align-items: center;
+  }
+  .memo-modal .actions .status {
+    flex: 1;
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .memo-modal .actions .status.err { color: var(--err); }
+  .memo-modal .actions .status.ok { color: var(--accent); }
+  .memo-modal .hint { font-size: 11px; color: var(--muted); }
 {% endblock %}
 
 {% block body %}
@@ -614,6 +732,79 @@
   <!-- Inline AI panel — hidden until "Suggest with AI" is clicked. -->
   <div id="aiPanel" class="ai-panel" style="display:none"></div>
 </div>
+
+<!-- F5.2 — right-click context menu. Hidden until contextmenu fires
+     on a memo-eligible surface (.app-row / .cb-row / source heading).
+     Hosts a single "📝 New memo" action that opens the composer
+     modal with the right link pre-populated. The two-step (menu →
+     modal) flow mirrors NVivo / Atlas.ti and gives us a single
+     discoverable surface for future per-target actions. -->
+<div id="memoCtxMenu"
+     class="ctx-mini-menu"
+     role="menu"
+     aria-label="Memo context menu"
+     data-test-feature="F5.2"
+     data-test-id="src-memo-ctx-menu">
+  <button type="button"
+          class="ctx-item"
+          data-act="memo"
+          data-test-id="src-memo-ctx-new">📝 New memo<span id="memoCtxLabel" style="color:var(--muted);font-size:11px"></span></button>
+</div>
+
+<!-- F5.2 — memo composer modal. The target-pill at the top is the
+     key affordance: it shows "Memo about this <type>" so the user
+     never has to guess what the link points at. Submit posts a
+     ``context``-shaped body to /api/projects/<pid>/memos which routes
+     through scribe.memo_context.build_memo_draft_from_context — the
+     server enforces validation and we don't reimplement the rules. -->
+<div id="memoModal"
+     class="memo-modal-overlay"
+     role="dialog"
+     aria-modal="true"
+     aria-label="New memo"
+     data-test-feature="F5.2"
+     data-test-id="src-memo-modal">
+  <div class="memo-modal">
+    <h3>New memo</h3>
+    <span class="target-pill"
+          data-test-id="src-memo-target-pill">
+      <span class="target-kind" id="memoTargetKind">about</span>
+      <span id="memoTargetLabel">…</span>
+    </span>
+    <label for="memoTypeSelect">Type</label>
+    <select id="memoTypeSelect" data-test-id="src-memo-type">
+      {# Match scribe.memos.MEMO_TYPES order. The server validates
+         the eight values; this list is the closed vocabulary. #}
+      <option value="code">code</option>
+      <option value="theoretical">theoretical</option>
+      <option value="methodological">methodological</option>
+      <option value="reflexive">reflexive</option>
+      <option value="quote">quote</option>
+      <option value="source">source</option>
+      <option value="project">project</option>
+      <option value="free">free</option>
+    </select>
+    <label for="memoTitleInput">Title <span class="hint">(optional)</span></label>
+    <input id="memoTitleInput" type="text" data-test-id="src-memo-title" maxlength="200">
+    <label for="memoBodyInput">Body</label>
+    <textarea id="memoBodyInput"
+              data-test-id="src-memo-body"
+              placeholder="Write a quick analytic note. Markdown is fine."></textarea>
+    <label for="memoTagsInput">Tags <span class="hint">(comma-separated)</span></label>
+    <input id="memoTagsInput" type="text" data-test-id="src-memo-tags" placeholder="e.g. axial, low-confidence">
+    <div class="actions">
+      <span id="memoStatus" class="status" data-test-id="src-memo-status"></span>
+      <button id="memoCancelBtn"
+              type="button"
+              class="btn secondary"
+              data-test-id="src-memo-cancel">Cancel</button>
+      <button id="memoSaveBtn"
+              type="button"
+              class="btn"
+              data-test-id="src-memo-save">Save memo</button>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -637,11 +828,25 @@ import {
   snapToParagraph,
   playbackRangeForApplication,
   buildWordTimeMap,
+  buildMemoContextPayload,
+  defaultMemoTypeForTarget,
+  MEMO_TYPES,
+  MEMO_LINK_TARGET_TYPES,
 } from "/static/js/helpers.mjs";
 window.__snap = { snapToWord, snapToSentence, snapToParagraph };
 window.__playback = { playbackRangeForApplication, buildWordTimeMap };
+// F5.2 — expose the right-click memo helpers on window so the
+// classic-script handler below can build payloads through the same
+// pure helpers as tests/js/memo-context.test.mjs.
+window.__memoCtx = {
+  buildMemoContextPayload,
+  defaultMemoTypeForTarget,
+  MEMO_TYPES,
+  MEMO_LINK_TARGET_TYPES,
+};
 window.dispatchEvent(new CustomEvent("scribe:snap-ready"));
 window.dispatchEvent(new CustomEvent("scribe:playback-ready"));
+window.dispatchEvent(new CustomEvent("scribe:memo-ctx-ready"));
 </script>
 <script>
 const PROJECT_ID = {{ project_id | tojson }};
@@ -2393,9 +2598,267 @@ function renderCodebookSummary() {
     summary.innerHTML = `<span class="hint">No codes yet. <a href="/projects/${PROJECT_ID}/codebook">Add some →</a></span>`;
     return;
   }
-  const top = CODES.slice(0, 6).map(c => `<div>${escapeHtml(c.name)}</div>`).join("");
+  // F5.2 — expose each code chip in the summary as a right-click
+  // memo target. data-memo-target-{type,id} is the contract the
+  // contextmenu listener reads to know which entity to link.
+  const top = CODES.slice(0, 6).map(c => {
+    const colours = codeColours(c);
+    return `<div class="code-chip"
+                 data-memo-target-type="code"
+                 data-memo-target-id="${escapeHtml(c.id)}"
+                 data-test-feature="F5.2"
+                 data-test-id="src-code-chip"
+                 title="Right-click to write a memo about &quot;${escapeHtml(c.name)}&quot;">
+      <span class="swatch" style="background:${colours.swatch};display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;vertical-align:middle"></span>
+      ${escapeHtml(c.name)}
+    </div>`;
+  }).join("");
   summary.innerHTML = top + (CODES.length > 6 ? `<div class="hint">+ ${CODES.length - 6} more</div>` : "");
 }
+
+// --------------------------------------------------------------------------- //
+// F5.2 — Right-click memo creation from any context.
+//
+// The PRD: "the user clicks on any entity (a code chip, a quote
+// highlight, a participant card, a memo card in F5.3's canvas), Scribe
+// opens a 'new memo' composer with the link to that target already
+// populated, and saves the memo straight to the project on submit."
+//
+// In the source-coding view that surface is:
+//
+//   * .app-row    → memo about an application (default type=quote)
+//   * .code-chip  → memo about a code           (default type=code)
+//   * .lane-bar   → memo about an application   (default type=quote)
+//   * #hdrName    → memo about the source       (default type=source)
+//
+// All four routes funnel through openMemoComposer(targetType, targetId)
+// which opens the modal with the link pill prefilled and the type
+// dropdown set to scribe.memo_context.DEFAULT_MEMO_TYPE_BY_TARGET[t].
+// On Save the modal POSTs a context-shaped body to
+// /api/projects/<pid>/memos; the server runs build_memo_draft_from_context
+// so the payload validation rules match the JS helper one-for-one.
+// --------------------------------------------------------------------------- //
+let _MEMO_CTX = null;  // {targetType, targetId, label}
+
+function _memoTargetLabel(targetType, targetId) {
+  // Best-effort human label for the pill — falls back to the short id
+  // when we can't find a richer name.
+  const idShort = (targetId || "").slice(0, 8);
+  if (targetType === "application") {
+    const app = APPS.find(a => a.id === targetId);
+    if (!app) return `application ${idShort}`;
+    const code = CODES.find(c => c.id === app.code_id);
+    return code ? `${code.name} — quote ${idShort}` : `quote ${idShort}`;
+  }
+  if (targetType === "code") {
+    const code = CODES.find(c => c.id === targetId);
+    return code ? `${code.name}` : `code ${idShort}`;
+  }
+  if (targetType === "source") {
+    return SOURCE && SOURCE.name ? SOURCE.name : `source ${idShort}`;
+  }
+  return `${targetType} ${idShort}`;
+}
+
+function openMemoComposer(targetType, targetId, role) {
+  if (!targetType || !targetId) return;
+  const helpers = window.__memoCtx;
+  if (!helpers) return;
+  if (!helpers.MEMO_LINK_TARGET_TYPES.includes(targetType)) return;
+  _MEMO_CTX = {
+    targetType,
+    targetId,
+    role: role || "",
+    label: _memoTargetLabel(targetType, targetId),
+  };
+  // Prime the form fields.
+  const overlay = document.getElementById("memoModal");
+  const typeSel = document.getElementById("memoTypeSelect");
+  const titleEl = document.getElementById("memoTitleInput");
+  const bodyEl = document.getElementById("memoBodyInput");
+  const tagsEl = document.getElementById("memoTagsInput");
+  const statusEl = document.getElementById("memoStatus");
+  const labelEl = document.getElementById("memoTargetLabel");
+  const kindEl = document.getElementById("memoTargetKind");
+  if (kindEl) kindEl.textContent = `about this ${targetType}`;
+  if (labelEl) labelEl.textContent = _MEMO_CTX.label;
+  // Default memo type for this target — same mapping as the Python
+  // module + the JS helper.
+  if (typeSel) {
+    const def = helpers.defaultMemoTypeForTarget(targetType);
+    typeSel.value = def;
+  }
+  if (titleEl) titleEl.value = "";
+  if (bodyEl) bodyEl.value = "";
+  if (tagsEl) tagsEl.value = "";
+  if (statusEl) {
+    statusEl.textContent = "";
+    statusEl.className = "status";
+  }
+  overlay.classList.add("open");
+  // Focus the body field — most users will start typing there.
+  if (bodyEl) {
+    setTimeout(() => { try { bodyEl.focus(); } catch (_) {} }, 30);
+  }
+}
+
+function closeMemoComposer() {
+  const overlay = document.getElementById("memoModal");
+  if (overlay) overlay.classList.remove("open");
+  _MEMO_CTX = null;
+}
+
+async function submitMemoComposer() {
+  if (!_MEMO_CTX) return;
+  const helpers = window.__memoCtx;
+  if (!helpers) return;
+  const typeSel = document.getElementById("memoTypeSelect");
+  const titleEl = document.getElementById("memoTitleInput");
+  const bodyEl = document.getElementById("memoBodyInput");
+  const tagsEl = document.getElementById("memoTagsInput");
+  const statusEl = document.getElementById("memoStatus");
+  const saveBtn = document.getElementById("memoSaveBtn");
+
+  const tagsRaw = (tagsEl.value || "").split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  let payload;
+  try {
+    payload = helpers.buildMemoContextPayload({
+      targetType: _MEMO_CTX.targetType,
+      targetId: _MEMO_CTX.targetId,
+      role: _MEMO_CTX.role || "",
+      type: typeSel.value || null,
+      title: titleEl.value || "",
+      body: bodyEl.value || "",
+      tags: tagsRaw,
+    });
+  } catch (err) {
+    statusEl.textContent = err.message || String(err);
+    statusEl.className = "status err";
+    return;
+  }
+
+  // Body is required by scribe.memos so reject the empty case here.
+  if (!payload.body || !String(payload.body).trim()) {
+    statusEl.textContent = "Body is required.";
+    statusEl.className = "status err";
+    return;
+  }
+
+  saveBtn.disabled = true;
+  statusEl.textContent = "Saving…";
+  statusEl.className = "status";
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(PROJECT_ID)}/memos`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try {
+        const j = await r.json();
+        if (j && j.detail) detail = j.detail;
+      } catch (_) { /* swallow */ }
+      throw new Error(detail);
+    }
+    statusEl.textContent = "Saved. View on the memos page →";
+    statusEl.className = "status ok";
+    // Auto-close after a beat so the user sees the confirmation.
+    setTimeout(() => { closeMemoComposer(); }, 600);
+  } catch (err) {
+    statusEl.textContent = err.message || "Couldn't save the memo.";
+    statusEl.className = "status err";
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+function _hideMemoCtxMenu() {
+  const m = document.getElementById("memoCtxMenu");
+  if (m) m.classList.remove("open");
+}
+
+function _showMemoCtxMenu(x, y, targetType, targetId, role) {
+  const m = document.getElementById("memoCtxMenu");
+  const lab = document.getElementById("memoCtxLabel");
+  if (!m) return;
+  // Stash the pending target on the menu element so the click handler
+  // doesn't need a closure.
+  m.dataset.targetType = targetType;
+  m.dataset.targetId = targetId;
+  m.dataset.role = role || "";
+  if (lab) {
+    lab.textContent = ` — ${_memoTargetLabel(targetType, targetId)}`;
+  }
+  // Position with right-edge clamping so the menu doesn't fall off the
+  // viewport on a far-right click.
+  m.style.left = `${Math.max(0, Math.min(x, window.innerWidth - 220))}px`;
+  m.style.top = `${Math.max(0, Math.min(y, window.innerHeight - 60))}px`;
+  m.classList.add("open");
+}
+
+// Page-wide contextmenu listener — checks the click target for the
+// data-memo-target-{type,id} attributes (set on .app-row, .code-chip,
+// .lane-bar) or for the source heading.
+document.addEventListener("contextmenu", (e) => {
+  // .app-row carries data-app-id; resolve it to (application, app.id).
+  const appRow = e.target.closest(".app-row[data-app-id]");
+  const codeChip = e.target.closest(".code-chip[data-memo-target-id]");
+  const laneBar = e.target.closest(".lane-bar[data-app-id]");
+  const hdr = e.target.closest("#hdrName");
+  let targetType = null, targetId = null;
+  if (appRow) { targetType = "application"; targetId = appRow.dataset.appId; }
+  else if (laneBar) { targetType = "application"; targetId = laneBar.dataset.appId; }
+  else if (codeChip) {
+    targetType = codeChip.dataset.memoTargetType || "code";
+    targetId = codeChip.dataset.memoTargetId;
+  } else if (hdr) {
+    targetType = "source";
+    targetId = SOURCE_ID;
+  }
+  if (!targetType || !targetId) return;
+  e.preventDefault();
+  _showMemoCtxMenu(e.clientX, e.clientY, targetType, targetId);
+});
+
+// One context-menu item: "📝 New memo". Clicking opens the modal.
+document.getElementById("memoCtxMenu").addEventListener("click", (e) => {
+  const btn = e.target.closest(".ctx-item[data-act='memo']");
+  if (!btn) return;
+  const m = document.getElementById("memoCtxMenu");
+  const tt = m.dataset.targetType;
+  const tid = m.dataset.targetId;
+  const role = m.dataset.role || "";
+  _hideMemoCtxMenu();
+  openMemoComposer(tt, tid, role);
+});
+
+// Outside-click + Escape close the context menu.
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#memoCtxMenu")) _hideMemoCtxMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    _hideMemoCtxMenu();
+    const overlay = document.getElementById("memoModal");
+    if (overlay && overlay.classList.contains("open")) closeMemoComposer();
+  }
+});
+
+// "📝 New memo" button in the page actions — opens with target=source.
+document.getElementById("newMemoBtn").addEventListener("click", () => {
+  openMemoComposer("source", SOURCE_ID);
+});
+
+// Modal Save / Cancel + click-outside-to-close.
+document.getElementById("memoSaveBtn").addEventListener("click", submitMemoComposer);
+document.getElementById("memoCancelBtn").addEventListener("click", closeMemoComposer);
+document.getElementById("memoModal").addEventListener("click", (e) => {
+  if (e.target.id === "memoModal") closeMemoComposer();
+});
 
 loadAll();
 </script>
