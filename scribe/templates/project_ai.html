@@ -217,17 +217,79 @@
   </div>
 </div>
 
-<div class="card ai-card" data-test-feature="F8.10">
-  <h2>AI gate status</h2>
+<div class="card ai-card" data-test-feature="F8.10" data-test-id="ai-gate-card">
+  <h2>AI gate <span class="ai-pill">F8.10</span></h2>
   <p class="ai-help">
-    F8.10 disables AI suggestions until the codebook has hand-coded shape (default
-    ≥8 codes, ≥2 transcripts). Edit the threshold or override on the
-    <a href="/projects/{{ project_id }}/settings">project settings</a> page.
+    F8.10 protects the inductive opening of grounded theory: AI suggestions are
+    disabled until the codebook has hand-coded shape. Defaults are ≥8 codes AND
+    ≥2 transcripts hand-coded. Adjust the thresholds, force the gate open or
+    closed, or disable the policy entirely from this card.
   </p>
   <div id="ai-gate-status" class="ai-section ai-status-row" data-test-id="ai-gate-status">
     <span class="dot"></span>
     <span class="text">Loading…</span>
   </div>
+  <p id="ai-gate-progress" class="ai-help" data-test-id="ai-gate-progress" style="margin-top:8px"></p>
+
+  <form id="aiGateForm" class="ai-section" autocomplete="off"
+        data-test-id="ai-gate-form" style="margin-top:16px">
+    <div class="ai-field-row">
+      <div>
+        <label for="ai-gate-min-codes" class="ai-field-label">Minimum codes</label>
+        <input id="ai-gate-min-codes" type="number" min="0" max="10000" step="1"
+               class="ai-field-input" data-test-id="ai-gate-min-codes">
+        <p class="ai-help">
+          How many codes the codebook must contain before AI suggestions unlock.
+          Default 8.
+        </p>
+      </div>
+      <div>
+        <label for="ai-gate-min-hand" class="ai-field-label">Minimum hand-coded transcripts</label>
+        <input id="ai-gate-min-hand" type="number" min="0" max="10000" step="1"
+               class="ai-field-input" data-test-id="ai-gate-min-hand">
+        <p class="ai-help">
+          How many sources must have at least one human-authored Application before
+          the gate opens. Default 2.
+        </p>
+      </div>
+    </div>
+
+    <div class="ai-field-row" style="margin-top:12px">
+      <div>
+        <label for="ai-gate-override" class="ai-field-label">Override</label>
+        <select id="ai-gate-override" class="ai-field-input"
+                data-test-id="ai-gate-override">
+          <option value="auto">auto — honour the thresholds</option>
+          <option value="force_on">force_on — bypass the thresholds (open)</option>
+          <option value="force_off">force_off — keep AI off regardless</option>
+        </select>
+        <p class="ai-help">
+          <code>force_on</code> is the inline-override target when 412 fires from
+          the source-coding view. The audit trail still records that this project
+          bypassed the gate.
+        </p>
+      </div>
+      <div>
+        <label for="ai-gate-enabled" class="ai-field-label">Policy</label>
+        <label class="checkbox-row" style="display:flex;align-items:center;gap:8px;padding:9px 0">
+          <input id="ai-gate-enabled" type="checkbox" data-test-id="ai-gate-enabled">
+          <span>Gate <strong>enabled</strong> — uncheck to drop the policy entirely
+            (deductive / framework / pre-coded corpora).</span>
+        </label>
+      </div>
+    </div>
+
+    <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <button id="ai-gate-save-btn" class="btn" type="submit"
+              data-test-id="ai-gate-save">Save gate config</button>
+      <button id="ai-gate-force-on-btn" class="btn secondary" type="button"
+              data-test-id="ai-gate-force-on">Force open (override = force_on)</button>
+      <button id="ai-gate-reset-btn" class="btn secondary" type="button"
+              data-test-id="ai-gate-reset">Reset to defaults (8 / 2 / auto)</button>
+      <span id="ai-gate-msg" class="hint" role="alert" aria-live="polite"
+            data-test-id="ai-gate-msg"></span>
+    </div>
+  </form>
 </div>
 
 {# F8.9 — AI provenance + AIEvent log (read surface).
@@ -736,23 +798,123 @@ async function listModels() {
   }
 }
 
+function _formatGateProgress(s) {
+  // Pure helper: render the "3/8 codes, 1/2 hand-coded" progress string
+  // from an AIGateStatus dict. Exposed on window for the Vitest suite.
+  if (!s || typeof s !== "object") return "";
+  const codes = `codes ${s.code_count || 0}/${s.min_codes || 0}`;
+  const hand = `hand-coded ${s.hand_coded_source_count || 0}/${s.min_hand_coded_sources || 0}`;
+  const override = s.override ? `override = ${s.override}` : "";
+  const enabled = (s.enabled === false) ? "policy disabled" : "";
+  const reason = s.reason ? `reason = ${s.reason}` : "";
+  return [codes, hand, override, enabled, reason].filter(Boolean).join(" · ");
+}
+window._formatGateProgress = _formatGateProgress;
+
+function _populateGateForm(cfg) {
+  // Pure helper: copy AIGateConfig fields into the form inputs. Returns
+  // the form element so tests can introspect.
+  if (!cfg || typeof cfg !== "object") return null;
+  const minCodes = $("ai-gate-min-codes");
+  const minHand = $("ai-gate-min-hand");
+  const override = $("ai-gate-override");
+  const enabled = $("ai-gate-enabled");
+  if (minCodes) minCodes.value = cfg.min_codes ?? 8;
+  if (minHand) minHand.value = cfg.min_hand_coded_sources ?? 2;
+  if (override) override.value = cfg.override || "auto";
+  if (enabled) enabled.checked = cfg.enabled !== false;
+  return $("aiGateForm");
+}
+window._populateGateForm = _populateGateForm;
+
 async function loadGate() {
   const row = $("ai-gate-status");
+  const progress = $("ai-gate-progress");
   try {
     const r = await fetch(`/api/projects/${PROJECT_ID}/ai/gate`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const body = await r.json();
     const s = body.status || {};
+    const cfg = body.config || {};
     if (s.allowed) {
       setStatusRow(row, "ok",
-        `Open — codes ${s.code_count || 0}/${s.min_codes || 0}, hand-coded ${s.hand_coded_source_count || 0}/${s.min_hand_coded_sources || 0}`);
+        `Open — ${s.message || "AI suggestions allowed"}`);
     } else {
       setStatusRow(row, "bad",
         `Closed — ${s.message || "AI suggestions disabled"}`);
     }
+    if (progress) progress.textContent = _formatGateProgress(s);
+    _populateGateForm(cfg);
   } catch (e) {
     setStatusRow(row, "bad", `Couldn't read gate: ${e.message}`);
   }
+}
+
+async function saveGate(payload, msgKind) {
+  const msg = $("ai-gate-msg");
+  const saveBtn = $("ai-gate-save-btn");
+  const forceBtn = $("ai-gate-force-on-btn");
+  const resetBtn = $("ai-gate-reset-btn");
+  if (saveBtn) saveBtn.disabled = true;
+  if (forceBtn) forceBtn.disabled = true;
+  if (resetBtn) resetBtn.disabled = true;
+  setMsg(msg, "Saving…", "muted");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/ai/gate`, {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      const inner = (detail && detail.detail) || detail;
+      const text = (typeof inner === "object" && inner)
+        ? (inner.detail || JSON.stringify(inner))
+        : (inner || `HTTP ${r.status}`);
+      throw new Error(text);
+    }
+    setMsg(msg, msgKind || "Saved", "ok");
+    await loadGate();
+  } catch (err) {
+    setMsg(msg, `Couldn't save: ${err.message}`, "err");
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+    if (forceBtn) forceBtn.disabled = false;
+    if (resetBtn) resetBtn.disabled = false;
+  }
+}
+
+async function submitGateForm(e) {
+  e.preventDefault();
+  const minCodes = parseInt($("ai-gate-min-codes").value, 10);
+  const minHand = parseInt($("ai-gate-min-hand").value, 10);
+  const payload = {
+    min_codes: Number.isFinite(minCodes) ? minCodes : 8,
+    min_hand_coded_sources: Number.isFinite(minHand) ? minHand : 2,
+    override: $("ai-gate-override").value || "auto",
+    enabled: !!$("ai-gate-enabled").checked,
+  };
+  await saveGate(payload, "Saved");
+}
+
+async function forceOnGate() {
+  // One-click "open the gate now" — preserves the rest of the config.
+  const minCodes = parseInt($("ai-gate-min-codes").value, 10);
+  const minHand = parseInt($("ai-gate-min-hand").value, 10);
+  const payload = {
+    min_codes: Number.isFinite(minCodes) ? minCodes : 8,
+    min_hand_coded_sources: Number.isFinite(minHand) ? minHand : 2,
+    override: "force_on",
+    enabled: !!$("ai-gate-enabled").checked,
+  };
+  await saveGate(payload, "Gate forced open");
+}
+
+async function resetGate() {
+  await saveGate(
+    { min_codes: 8, min_hand_coded_sources: 2, override: "auto", enabled: true },
+    "Reset to defaults",
+  );
 }
 
 async function loadEmbeddingIndex() {
@@ -837,6 +999,15 @@ document.getElementById("ai-test-btn").addEventListener("click", testConnection)
 document.getElementById("ai-list-btn").addEventListener("click", listModels);
 document.getElementById("embed-index-refresh-btn").addEventListener("click", refreshEmbeddingIndex);
 document.getElementById("embed-index-clear-btn").addEventListener("click", clearEmbeddingIndex);
+
+(function wireGateForm() {
+  const form = document.getElementById("aiGateForm");
+  const force = document.getElementById("ai-gate-force-on-btn");
+  const reset = document.getElementById("ai-gate-reset-btn");
+  if (form) form.addEventListener("submit", submitGateForm);
+  if (force) force.addEventListener("click", forceOnGate);
+  if (reset) reset.addEventListener("click", resetGate);
+})();
 
 loadBackend();
 loadGate();

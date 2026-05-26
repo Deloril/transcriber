@@ -2880,3 +2880,69 @@ export function parseAnonymisedRulesText(raw) {
   }
   return { rules: out, error: null };
 }
+
+
+// ----------------------------------------------------------------------
+// F8.10 — AI gate config helpers (project_ai.html)
+//
+// The gate's status JSON looks like::
+//
+//   { allowed: bool, reason: str, message: str, code_count, hand_coded_source_count,
+//     min_codes, min_hand_coded_sources, override, enabled, feature, feature_exempt }
+//
+// The page renders a 'progress' line under the status row so the user
+// can see how close they are to the gate opening (e.g. "codes 3/8 ·
+// hand-coded 1/2 · override = auto"). These helpers are the canonical
+// formatter + form-payload builder, exercised both inline by the page
+// script and from the Vitest suite.
+// ----------------------------------------------------------------------
+
+export function formatGateProgress(s) {
+  if (!s || typeof s !== "object") return "";
+  const codes = `codes ${s.code_count || 0}/${s.min_codes || 0}`;
+  const hand = `hand-coded ${s.hand_coded_source_count || 0}/${s.min_hand_coded_sources || 0}`;
+  const override = s.override ? `override = ${s.override}` : "";
+  const enabled = (s.enabled === false) ? "policy disabled" : "";
+  const reason = s.reason ? `reason = ${s.reason}` : "";
+  return [codes, hand, override, enabled, reason].filter(Boolean).join(" · ");
+}
+
+export function gateFormPayload(form) {
+  // Pure helper: read an HTMLFormElement (or compatible duck-typed
+  // object with .elements) and return the JSON body the PUT
+  // /api/projects/<pid>/ai/gate endpoint expects. Coerces numeric
+  // fields, defaults missing values to spec defaults (8 / 2 / auto).
+  function _read(name) {
+    if (!form || !form.elements) return null;
+    const el = form.elements.namedItem ? form.elements.namedItem(name) : form.elements[name];
+    return el || null;
+  }
+  const minCodesEl = _read("min_codes");
+  const minHandEl = _read("min_hand_coded_sources");
+  const overrideEl = _read("override");
+  const enabledEl = _read("enabled");
+  const minCodes = minCodesEl ? parseInt(minCodesEl.value, 10) : NaN;
+  const minHand = minHandEl ? parseInt(minHandEl.value, 10) : NaN;
+  return {
+    min_codes: Number.isFinite(minCodes) ? minCodes : 8,
+    min_hand_coded_sources: Number.isFinite(minHand) ? minHand : 2,
+    override: (overrideEl && overrideEl.value) || "auto",
+    enabled: enabledEl ? !!enabledEl.checked : true,
+  };
+}
+
+export function gateForceOnPayload(currentCfg) {
+  // Build the payload for the inline 'force_on' button: keep current
+  // thresholds + enabled, flip override to force_on. Defaults to spec
+  // when the input cfg is null.
+  const cfg = currentCfg && typeof currentCfg === "object" ? currentCfg : {};
+  const minCodes = Number.isFinite(cfg.min_codes) ? cfg.min_codes : 8;
+  const minHand = Number.isFinite(cfg.min_hand_coded_sources) ? cfg.min_hand_coded_sources : 2;
+  return {
+    min_codes: minCodes,
+    min_hand_coded_sources: minHand,
+    override: "force_on",
+    enabled: cfg.enabled === false ? false : true,
+  };
+}
+
