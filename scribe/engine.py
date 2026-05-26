@@ -156,14 +156,29 @@ class TranscriptionResult:
     mode: Literal["multi-track", "diarize"]
     speaker_labels: list[str]
     audio_path: Path
+    # Optional rename map persisted by the editor (``state.speaker_names``).
+    # Maps a canonical id (``SPEAKER_00``) to a display label (``Luke``).
+    # The writers consult this so the user-set name lands in
+    # .txt / .srt / .vtt exports — without it, downloads still
+    # show the raw model-assigned ids.
+    speaker_names: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "language": self.language,
             "mode": self.mode,
             "speakers": self.speaker_labels,
+            "speaker_names": dict(self.speaker_names),
             "segments": [s.to_dict() for s in self.segments],
         }
+
+    def speaker_label(self, canonical: str) -> str:
+        """Return the display label for ``canonical``: the rename map's
+        entry if it has a non-empty string, otherwise ``canonical`` itself."""
+        renamed = self.speaker_names.get(canonical) if self.speaker_names else None
+        if isinstance(renamed, str) and renamed.strip():
+            return renamed.strip()
+        return canonical
 
 
 # --------------------------------------------------------------------------- #

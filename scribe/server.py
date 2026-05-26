@@ -4071,10 +4071,17 @@ def _result_from_payload(payload: dict[str, Any], *, input_path: Path) -> Transc
                 words=words,
             )
         )
+    raw_names = payload.get("speaker_names")
+    if isinstance(raw_names, dict):
+        speaker_names = {str(k): str(v) for k, v in raw_names.items()
+                         if isinstance(v, str) and v.strip()}
+    else:
+        speaker_names = {}
     return TranscriptionResult(
         segments=segs,
         language=payload.get("language", "en"),
         mode=payload.get("mode", "diarize"),
         speaker_labels=payload.get("speakers", speakers_seen),
         audio_path=input_path,
+        speaker_names=speaker_names,
     )

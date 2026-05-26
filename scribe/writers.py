@@ -34,42 +34,43 @@ def write_json(result: TranscriptionResult, out_path: Path) -> None:
 
 
 def write_txt(result: TranscriptionResult, out_path: Path) -> None:
-    """Group consecutive same-speaker segments into paragraphs."""
+    """One timestamped paragraph per segment.
+
+    The editor splits long monologues into paragraphs (e.g. the
+    grammar bot turns one run of speech into several segments, one
+    per paragraph). The earlier "group consecutive same-speaker
+    segments together" behaviour collapsed those paragraph splits and
+    only emitted the first segment's start time — losing both the
+    paragraph structure *and* the per-paragraph timing the user can
+    use to navigate audio. We now emit one timestamped block per
+    segment so both survive.
+
+    Speaker labels honour ``result.speaker_names`` so renames in the
+    editor land in the export instead of raw ``SPEAKER_00`` ids.
+    """
     lines: list[str] = []
-    current_speaker: str | None = None
-    current_chunks: list[str] = []
-    block_start: float = 0.0
-
-    def flush() -> None:
-        if current_speaker is None or not current_chunks:
-            return
-        text = " ".join(c.strip() for c in current_chunks if c.strip())
-        if not text:
-            return
-        lines.append(f"[{_fmt_clock(block_start)}] {current_speaker}: {text}")
-
     for seg in result.segments:
-        if seg.speaker != current_speaker:
-            flush()
-            current_speaker = seg.speaker
-            current_chunks = []
-            block_start = seg.start
-        current_chunks.append(seg.text)
-    flush()
-
+        text = (seg.text or "").strip()
+        if not text:
+            continue
+        speaker = result.speaker_label(seg.speaker)
+        lines.append(f"[{_fmt_clock(seg.start)}] {speaker}: {text}")
     out_path.write_text("\n\n".join(lines) + ("\n" if lines else ""))
 
 
 def write_srt(result: TranscriptionResult, out_path: Path) -> None:
     parts: list[str] = []
-    for i, seg in enumerate(result.segments, start=1):
+    n = 0
+    for seg in result.segments:
         text = seg.text.strip()
         if not text:
             continue
+        n += 1
+        speaker = result.speaker_label(seg.speaker)
         parts.append(
-            f"{i}\n"
+            f"{n}\n"
             f"{_fmt_time(seg.start)} --> {_fmt_time(seg.end)}\n"
-            f"{seg.speaker}: {text}\n"
+            f"{speaker}: {text}\n"
         )
     out_path.write_text("\n".join(parts))
 
@@ -80,9 +81,10 @@ def write_vtt(result: TranscriptionResult, out_path: Path) -> None:
         text = seg.text.strip()
         if not text:
             continue
+        speaker = result.speaker_label(seg.speaker)
         parts.append(
             f"{_fmt_time(seg.start, sep='.')} --> {_fmt_time(seg.end, sep='.')}\n"
-            f"<v {seg.speaker}>{text}\n"
+            f"<v {speaker}>{text}\n"
         )
     out_path.write_text("\n".join(parts))
 

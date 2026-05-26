@@ -118,6 +118,22 @@ class TestWriteJson:
         assert loaded["segments"][0]["text"] == "Hello there."
         assert loaded["segments"][0]["words"][0]["text"] == "Hello"
 
+    def test_roundtrips_speaker_names(self, tmp_path: Path) -> None:
+        # speaker_names lives in the JSON sidecar so the editor can
+        # reload renames after a page refresh without needing the
+        # job's edited.json.
+        result = TranscriptionResult(
+            segments=[Segment(text="hi", start=0.0, end=1.0, speaker="SPEAKER_00", words=[])],
+            language="en", mode="diarize",
+            speaker_labels=["SPEAKER_00"],
+            audio_path=Path("/tmp/dummy.wav"),
+            speaker_names={"SPEAKER_00": "Luke"},
+        )
+        out = tmp_path / "x.json"
+        write_json(result, out)
+        loaded = json.loads(out.read_text())
+        assert loaded["speaker_names"] == {"SPEAKER_00": "Luke"}
+
     def test_unicode_preserved(self, tmp_path: Path) -> None:
         result = _build_result([
             Segment(text="Café — résumé naïve", start=0.0, end=1.0, speaker="A", words=[]),
@@ -136,14 +152,21 @@ class TestWriteJson:
 
 
 class TestWriteTxt:
-    def test_groups_consecutive_speaker(
+    def test_one_block_per_segment_with_timestamp(
         self, tmp_path: Path, single_speaker_consecutive: TranscriptionResult
     ) -> None:
+        # Two consecutive same-speaker segments → two timestamped
+        # blocks. Earlier behaviour collapsed them, which dropped the
+        # second segment's start time and merged paragraphs the editor
+        # had deliberately split (e.g. via the grammar bot).
         out = tmp_path / "x.txt"
         write_txt(single_speaker_consecutive, out)
         text = out.read_text()
-        # All non-empty content collapses into one paragraph.
-        assert text == "[00:00] A: One two three four\n"
+        blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
+        assert blocks == [
+            "[00:00] A: One two",
+            "[00:01] A: three four",
+        ]
 
     def test_separates_speaker_changes(
         self, tmp_path: Path, two_speaker_result: TranscriptionResult
@@ -151,7 +174,6 @@ class TestWriteTxt:
         out = tmp_path / "x.txt"
         write_txt(two_speaker_result, out)
         text = out.read_text()
-        # Each speaker turn is its own block separated by a blank line.
         blocks = [b for b in text.split("\n\n") if b.strip()]
         assert len(blocks) == 3
         assert blocks[0].startswith("[00:00] LUKE:")
@@ -166,14 +188,68 @@ class TestWriteTxt:
         ])
         out = tmp_path / "x.txt"
         write_txt(result, out)
-        # The block-start for the first non-empty content is at 0.0 because
-        # the speaker hadn't changed between the two segments.
-        assert out.read_text() == "[00:00] A: real\n"
+        # Empty first segment is skipped; "real" starts at 1.0s.
+        assert out.read_text() == "[00:01] A: real\n"
 
     def test_empty_result(self, tmp_path: Path) -> None:
         out = tmp_path / "x.txt"
         write_txt(_build_result([]), out)
         assert out.read_text() == ""
+
+    def test_uses_speaker_names_for_renames(self, tmp_path: Path) -> None:
+        # The editor stores user renames in result.speaker_names; the
+        # exporter must show the user-set label, not the canonical id.
+        result = TranscriptionResult(
+            segments=[
+                Segment(text="hi", start=0.0, end=1.0, speaker="SPEAKER_00", words=[]),
+                Segment(text="hey", start=1.0, end=2.0, speaker="SPEAKER_01", words=[]),
+            ],
+            language="en",
+            mode="diarize",
+            speaker_labels=["SPEAKER_00", "SPEAKER_01"],
+            audio_path=Path("/tmp/dummy.wav"),
+            speaker_names={"SPEAKER_00": "Luke", "SPEAKER_01": "Maria"},
+        )
+        out = tmp_path / "x.txt"
+        write_txt(result, out)
+        text = out.read_text()
+        assert "Luke: hi" in text
+        assert "Maria: hey" in text
+        # Canonical ids must not leak into the export.
+        assert "SPEAKER_00" not in text
+        assert "SPEAKER_01" not in text
+
+    def test_partial_rename_falls_through(self, tmp_path: Path) -> None:
+        # Only one speaker has been renamed; the other still appears as
+        # the canonical id rather than blanking out.
+        result = TranscriptionResult(
+            segments=[
+                Segment(text="hi", start=0.0, end=1.0, speaker="SPEAKER_00", words=[]),
+                Segment(text="hey", start=1.0, end=2.0, speaker="SPEAKER_01", words=[]),
+            ],
+            language="en", mode="diarize",
+            speaker_labels=["SPEAKER_00", "SPEAKER_01"],
+            audio_path=Path("/tmp/dummy.wav"),
+            speaker_names={"SPEAKER_00": "Luke"},
+        )
+        out = tmp_path / "x.txt"
+        write_txt(result, out)
+        text = out.read_text()
+        assert "Luke: hi" in text
+        assert "SPEAKER_01: hey" in text
+
+    def test_blank_rename_does_not_override(self, tmp_path: Path) -> None:
+        result = TranscriptionResult(
+            segments=[Segment(text="hi", start=0.0, end=1.0, speaker="SPEAKER_00", words=[])],
+            language="en", mode="diarize",
+            speaker_labels=["SPEAKER_00"],
+            audio_path=Path("/tmp/dummy.wav"),
+            speaker_names={"SPEAKER_00": "   "},
+        )
+        out = tmp_path / "x.txt"
+        write_txt(result, out)
+        # Whitespace-only rename treated as "no rename"; canonical id stays.
+        assert "SPEAKER_00: hi" in out.read_text()
 
 
 # --------------------------------------------------------------------------- #
@@ -202,12 +278,23 @@ class TestWriteSrt:
         out = tmp_path / "x.srt"
         write_srt(result, out)
         text = out.read_text()
-        # Only one cue.
+        # Only one cue, numbered from 1 (skipped segments don't burn an index).
         assert text.count(" --> ") == 1
-        # Numbering starts at 2 because we still increment the counter
-        # before checking for empty text — that's the current behaviour.
-        # If this changes, this test will catch it.
-        assert text.startswith("2\n")
+        assert text.startswith("1\n")
+
+    def test_uses_speaker_names_for_renames(self, tmp_path: Path) -> None:
+        result = TranscriptionResult(
+            segments=[Segment(text="hi", start=0.0, end=1.0, speaker="SPEAKER_00", words=[])],
+            language="en", mode="diarize",
+            speaker_labels=["SPEAKER_00"],
+            audio_path=Path("/tmp/dummy.wav"),
+            speaker_names={"SPEAKER_00": "Luke"},
+        )
+        out = tmp_path / "x.srt"
+        write_srt(result, out)
+        text = out.read_text()
+        assert "Luke: hi" in text
+        assert "SPEAKER_00" not in text
 
 
 # --------------------------------------------------------------------------- #
@@ -242,6 +329,20 @@ class TestWriteVtt:
         # WebVTT uses a period before milliseconds, not a comma.
         assert "00:00:00.000 --> 00:00:02.000" in text
         assert "00:00:00,000" not in text
+
+    def test_uses_speaker_names_for_renames(self, tmp_path: Path) -> None:
+        result = TranscriptionResult(
+            segments=[Segment(text="hi", start=0.0, end=1.0, speaker="SPEAKER_00", words=[])],
+            language="en", mode="diarize",
+            speaker_labels=["SPEAKER_00"],
+            audio_path=Path("/tmp/dummy.wav"),
+            speaker_names={"SPEAKER_00": "Luke"},
+        )
+        out = tmp_path / "x.vtt"
+        write_vtt(result, out)
+        text = out.read_text()
+        assert "<v Luke>hi" in text
+        assert "SPEAKER_00" not in text
 
 
 # --------------------------------------------------------------------------- #
