@@ -110,6 +110,40 @@
     max-width: 280px;
   }
   .apply-popover.open { display: block; }
+  /* F4.4 — snap toolbar. Three small buttons that drop the current
+     selection to a clean analytic boundary (whole words / whole
+     sentences / whole speaker turn) before the user picks a code.
+     Mirrors scribe.selection_snap; the JS handler reuses the same
+     helpers.mjs functions the parallel vitest suite exercises. */
+  .apply-popover .snap-toolbar {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    padding: 0 2px 6px;
+    border-bottom: 1px dashed var(--border);
+    margin-bottom: 6px;
+    font-size: 11px;
+    flex-wrap: wrap;
+  }
+  .apply-popover .snap-toolbar .snap-label {
+    color: var(--muted);
+    margin-right: 2px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .apply-popover .snap-btn {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .apply-popover .snap-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .apply-popover .snap-btn:active { background: var(--panel); }
+  .apply-popover .snap-btn:disabled { opacity: .5; cursor: not-allowed; }
   .apply-popover .pop-search {
     width: 100%;
     background: var(--panel-2); color: var(--text);
@@ -464,6 +498,31 @@
 
 <!-- Floating popover for applying a code -->
 <div id="applyPopover" class="apply-popover" role="dialog" aria-label="Apply code">
+  <!-- F4.4: snap-to-word / sentence / paragraph helpers. Each button
+       expands the current selection to a clean boundary before the
+       coder applies a code. snapToWord drops sub-word offsets;
+       snapToSentence extends to the sentence containing each
+       endpoint within its segment; snapToParagraph extends to the
+       whole speaker turn. The handlers reuse helpers.mjs's snap
+       functions — same logic the parallel vitest suite covers in
+       tests/js/selection-snap.test.mjs. -->
+  <div id="snapToolbar" class="snap-toolbar"
+       role="toolbar" aria-label="Snap selection"
+       data-test-feature="F4.4">
+    <span class="snap-label">Snap:</span>
+    <button type="button" class="snap-btn"
+            data-snap="word"
+            data-test-id="snap-word"
+            title="Snap selection to whole words (drop sub-word offsets)">Word</button>
+    <button type="button" class="snap-btn"
+            data-snap="sentence"
+            data-test-id="snap-sentence"
+            title="Extend selection to whole sentences within each endpoint's segment">Sentence</button>
+    <button type="button" class="snap-btn"
+            data-snap="paragraph"
+            data-test-id="snap-paragraph"
+            title="Extend selection to the whole speaker turn (paragraph)">Paragraph</button>
+  </div>
   <input id="popSearch" class="pop-search" type="text" placeholder="Filter codes…" aria-label="Filter codes">
   <div id="popList" class="pop-list"></div>
   <!-- Inline AI panel — hidden until "Suggest with AI" is clicked. -->
@@ -472,6 +531,22 @@
 {% endblock %}
 
 {% block scripts %}
+<!-- F4.4 — bring the helpers.mjs snap functions into the inline script
+     via a tiny module shim. We expose them on window.__snap so the
+     classic-script handler below can call into them without
+     duplicating logic. The functions themselves are unit-tested in
+     tests/js/selection-snap.test.mjs against the same fixtures as
+     tests/test_selection_snap.py, so the JS-side and Python-side
+     snap behaviour stay byte-for-byte aligned. -->
+<script type="module">
+import {
+  snapToWord,
+  snapToSentence,
+  snapToParagraph,
+} from "/static/js/helpers.mjs";
+window.__snap = { snapToWord, snapToSentence, snapToParagraph };
+window.dispatchEvent(new CustomEvent("scribe:snap-ready"));
+</script>
 <script>
 const PROJECT_ID = {{ project_id | tojson }};
 const SOURCE_ID = {{ source_id | tojson }};
@@ -1708,6 +1783,122 @@ document.addEventListener("mousedown", (e) => {
   // will retarget.
   if (e.target.closest(".word")) return;
   hidePopover();
+});
+
+// ---------- F4.4: snap-to-word / sentence / paragraph ----------
+//
+// Pure logic lives in scribe.selection_snap (Python) and
+// helpers.mjs::snapTo* (JS). The module-script block at the top of
+// this file imports the JS versions and exposes them as window.__snap;
+// we call into them here so the in-page handler stays a thin
+// adapter — selection state in/out, no algorithmic divergence.
+//
+// The user flow is: drag-select → popover opens → click a snap
+// button → CURRENT_SELECTION widens to the chosen analytic boundary,
+// the in-text highlight repaints, and the popover stays open over
+// the new range. The user can then pick a code (existing, new, or
+// AI-suggested) and apply it to the snapped span.
+
+function _snapModule() {
+  return (typeof window !== "undefined" && window.__snap) || null;
+}
+
+function snapCurrentSelection(kind) {
+  if (!CURRENT_SELECTION) return false;
+  const mod = _snapModule();
+  if (!mod) {
+    // helpers.mjs failed to load — fail gracefully without breaking
+    // the apply-code flow.
+    // eslint-disable-next-line no-console
+    console.warn("F4.4 snap: helpers.mjs not loaded; ignoring snap click");
+    return false;
+  }
+  const segments = (TRANSCRIPT && TRANSCRIPT.segments) || [];
+  const sel = {
+    startWordId: CURRENT_SELECTION.startWordId,
+    endWordId: CURRENT_SELECTION.endWordId,
+    startCharOffset: null,
+    endCharOffset: null,
+  };
+  let snapped;
+  try {
+    if (kind === "word") {
+      snapped = mod.snapToWord(sel);
+    } else if (kind === "sentence") {
+      snapped = mod.snapToSentence(sel, segments);
+    } else if (kind === "paragraph") {
+      snapped = mod.snapToParagraph(sel, segments);
+    } else {
+      return false;
+    }
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`F4.4 snap-to-${kind} failed:`, e);
+    return false;
+  }
+  // Clear the in-selection paint on the previous range, then update
+  // CURRENT_SELECTION + repaint over the new (wider or equal) span.
+  unpaintRange(
+    CURRENT_SELECTION.startWordId,
+    CURRENT_SELECTION.endWordId,
+    "in-selection",
+  );
+  CURRENT_SELECTION = {
+    startWordId: snapped.startWordId,
+    endWordId: snapped.endWordId,
+    snippet: quoteSnippet(snapped.startWordId, snapped.endWordId),
+  };
+  paintRange(
+    CURRENT_SELECTION.startWordId,
+    CURRENT_SELECTION.endWordId,
+    "in-selection",
+  );
+
+  // Sync the browser selection + popover position so the visible
+  // highlight matches CURRENT_SELECTION. If anything goes wrong the
+  // selection state is still correct; the popover just stays put.
+  try {
+    const lo = document.querySelector(
+      `.word[data-word-id="${CSS.escape(snapped.startWordId)}"]`,
+    );
+    const hi = document.querySelector(
+      `.word[data-word-id="${CSS.escape(snapped.endWordId)}"]`,
+    );
+    if (lo && hi) {
+      const range = document.createRange();
+      range.setStartBefore(lo);
+      range.setEndAfter(hi);
+      const selection = window.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+      const pop = document.getElementById("applyPopover");
+      if (pop && pop.classList.contains("open")) {
+        const rect = range.getBoundingClientRect();
+        const top = rect.top + window.scrollY - pop.offsetHeight - 8;
+        const left = rect.left + window.scrollX;
+        pop.style.top = `${Math.max(window.scrollY + 8, top)}px`;
+        pop.style.left = `${Math.max(8, left)}px`;
+      }
+    }
+  } catch (_) {
+    /* noop — visual sync is best-effort */
+  }
+  return true;
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".snap-btn");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const kind = btn.dataset.snap;
+  snapCurrentSelection(kind);
+  // Keep the popover open + return focus to the search input so the
+  // researcher can continue typing a code name without a re-click.
+  const search = document.getElementById("popSearch");
+  if (search) search.focus();
 });
 
 // F2.5: read the active coder id from localStorage (set by the coders
