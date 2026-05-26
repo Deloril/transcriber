@@ -6620,6 +6620,134 @@ async def put_project_ai_gate_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# AI events log (F8.9)
+#
+# F8.9 ships the AIProvenance schema + the append-only AIEvent log at
+# ``projects/<pid>/ai_events/<eid>.json``. The original commit (7fc8b24)
+# explicitly deferred the HTTP surface; in the meantime F8.5 / F8.6 /
+# F8.7 / F8.8 *write* events to that store via the F9.6 invocation-log
+# helpers, but no UI could read them. These two endpoints close the
+# loop:
+#
+#   GET /api/projects/<pid>/ai/events
+#     List events for the project. Optional filters:
+#       ?feature=<one of AI_FEATURES>
+#       ?kind=<one of AI_EVENT_KINDS>
+#       ?actor_coder_id=<12-char hex>
+#       ?limit=<int>     — caps the response (newest-last by default)
+#       ?order=desc|asc  — defaults to ``desc`` (newest first) so the
+#                          UI can render a recent-activity feed.
+#
+#   GET /api/projects/<pid>/ai/events/<eid>
+#     Fetch a single event by id. 404 when the file is missing.
+#
+# The F8.9 panel on ``project_ai.html`` consumes these to render a
+# project-wide AI activity feed; the same routes are cited by F9.6's
+# audit-log UI work.
+# --------------------------------------------------------------------------- #
+
+
+def _ai_events_response_payload(events, *, order: str, limit):
+    """Shape an AIEvent list into the wire payload.
+
+    ``events`` is the chronological-asc list returned by
+    :func:`scribe.ai_provenance.list_ai_events`. ``order='desc'`` gives
+    the UI a newest-first view. ``limit`` caps the response after
+    ordering so newest events survive truncation when ``order='desc'``.
+    """
+    items = list(events)
+    if order == "desc":
+        items.reverse()
+    total = len(items)
+    truncated = False
+    if limit is not None and total > limit:
+        items = items[:limit]
+        truncated = True
+    return {
+        "events": [ev.to_dict() for ev in items],
+        "total": total,
+        "returned": len(items),
+        "order": order,
+        "truncated": truncated,
+        "available_features": list(_ai_provenance.AI_FEATURES),
+        "available_kinds": list(_ai_provenance.AI_EVENT_KINDS),
+    }
+
+
+@app.get("/api/projects/{project_id}/ai/events")
+async def list_project_ai_events_endpoint(
+    project_id: str,
+    feature: str = "",
+    kind: str = "",
+    actor_coder_id: str = "",
+    limit: int = 200,
+    order: str = "desc",
+) -> JSONResponse:
+    """List AI events for a project (F8.9 read surface).
+
+    Filters AND-combine. ``order=desc`` (default) returns newest-first
+    so the project-AI page can render a recent-activity feed; pass
+    ``order=asc`` for forensic chronological reading. ``limit`` caps
+    the response — pass ``0`` to disable truncation.
+    """
+    _check_project_id(project_id)
+    if order not in ("asc", "desc"):
+        raise HTTPException(400, "order must be 'asc' or 'desc'")
+    try:
+        limit_val = int(limit)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "limit must be a non-negative integer")
+    if limit_val < 0:
+        raise HTTPException(400, "limit must be a non-negative integer")
+    effective_limit = None if limit_val == 0 else limit_val
+    feat = feature or None
+    knd = kind or None
+    actor = actor_coder_id or None
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            events = _ai_provenance.list_ai_events(
+                _projects_root(),
+                project_id,
+                feature=feat,
+                kind=knd,
+                actor_coder_id=actor,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse(
+        _ai_events_response_payload(events, order=order, limit=effective_limit)
+    )
+
+
+@app.get("/api/projects/{project_id}/ai/events/{event_id}")
+async def get_project_ai_event_endpoint(
+    project_id: str, event_id: str
+) -> JSONResponse:
+    """Fetch a single AI event by id (F8.9)."""
+    _check_project_id(project_id)
+    if not _ai_provenance.AI_EVENT_ID_RE.match(event_id):
+        raise HTTPException(400, "Invalid AI event id")
+    with PROJECTS_LOCK:
+        try:
+            _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            ev = _ai_provenance.load_ai_event(
+                _projects_root(), project_id, event_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "AI event not found")
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({"event": ev.to_dict()})
+
+
+# --------------------------------------------------------------------------- #
 # AI code suggestions (F8.3 / F8.4)
 #
 # Two related endpoints expose the existing scribe.code_suggestions and

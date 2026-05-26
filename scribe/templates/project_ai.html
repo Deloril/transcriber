@@ -230,6 +230,84 @@
   </div>
 </div>
 
+{# F8.9 — AI provenance + AIEvent log (read surface).
+
+   The schema + persistence layer shipped in 7fc8b24; the F8.5 / F8.6 /
+   F8.7 / F8.8 endpoints write events into the project store via the
+   F9.6 invocation-log helpers. Until this card landed there was no UI
+   surface for the data: rejected suggestions, request invocations,
+   and decision events all went straight to disk.
+
+   This panel renders a project-wide AI activity feed — newest first,
+   filterable by feature / kind. It's intentionally a *read* view: the
+   F9.6 audit page (W1.6) will graduate this into a richer timeline
+   with per-engine drilldowns; for now it makes the F8.9 store
+   reachable without curl and gives the researcher a one-glance view
+   of what the AI has been doing.
+
+   Reads:
+     GET /api/projects/<pid>/ai/events
+       ?feature=…&kind=…&actor_coder_id=…&limit=…&order=…
+     GET /api/projects/<pid>/ai/events/<eid> (deep-link target)
+#}
+<div id="aiEventsCard" class="card ai-card"
+     data-test-feature="F8.9"
+     data-test-id="ai-events-card">
+  <h2>AI activity log <span class="ai-pill">F8.9</span></h2>
+  <p class="ai-help">
+    Every AI invocation — request, decision, application, error — lands
+    here as an append-only event with model + actor + provenance. The
+    same store backs the F9.6 invocation log (rejected suggestions are
+    kept as evidence) and the F9.7 audit-trail export. Local-only,
+    never deletable.
+  </p>
+
+  <div class="ai-section"
+       style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <div>
+      <label for="ai-events-filter-feature" class="ai-field-label"
+             style="margin:0">Feature</label>
+      <select id="ai-events-filter-feature" class="ai-field-input"
+              data-test-id="ai-events-filter-feature"
+              style="max-width:220px">
+        <option value="">All features</option>
+        <option value="code_suggestion">code_suggestion (F8.3)</option>
+        <option value="new_code_suggestion">new_code_suggestion (F8.4)</option>
+        <option value="quote_similarity">quote_similarity (F8.5)</option>
+        <option value="transcript_review">transcript_review (F8.6)</option>
+        <option value="second_coder">second_coder (F8.7)</option>
+        <option value="memo_draft">memo_draft (F8.8)</option>
+        <option value="other">other</option>
+      </select>
+    </div>
+    <div>
+      <label for="ai-events-filter-kind" class="ai-field-label"
+             style="margin:0">Kind</label>
+      <select id="ai-events-filter-kind" class="ai-field-input"
+              data-test-id="ai-events-filter-kind"
+              style="max-width:160px">
+        <option value="">All kinds</option>
+        <option value="request">request</option>
+        <option value="decision">decision</option>
+        <option value="application">application</option>
+        <option value="error">error</option>
+      </select>
+    </div>
+    <span id="ai-events-count" class="hint"
+          data-test-id="ai-events-count"></span>
+    <button id="ai-events-refresh-btn" class="btn secondary" type="button"
+            data-test-id="ai-events-refresh"
+            style="margin-left:auto">Refresh</button>
+  </div>
+
+  <div id="ai-events-list" class="ai-section"
+       data-test-id="ai-events-list" style="margin-top:8px"></div>
+
+  <div id="ai-events-error" class="ai-section" hidden
+       style="color:var(--err);font-size:13px"
+       data-test-id="ai-events-error"></div>
+</div>
+
 <div class="card ai-card" data-test-feature="F8.4" data-test-id="ai-surfaces-card">
   <h2>Suggestion surfaces</h2>
   <p class="ai-help">
@@ -1165,5 +1243,104 @@ document.getElementById("ai-md-list").addEventListener("click", async (ev) => {
 });
 
 loadMemoDrafts();
+
+// ---------- F8.9 — AI activity log -----------------------------------------
+
+function _aeKindBadge(kind) {
+  const palette = {
+    request: "var(--accent)",
+    decision: "var(--ok)",
+    application: "var(--accent-soft)",
+    error: "var(--err)",
+  };
+  const colour = palette[kind] || "var(--muted)";
+  return `<span class="ai-pill" style="background:transparent;border:1px solid ${colour};color:${colour}">${escapeHtml(kind)}</span>`;
+}
+
+function _aeRenderRow(ev) {
+  const when = (ev.created_at || "").slice(0, 19).replace("T", " ");
+  const feature = ev.feature || "";
+  const kind = ev.kind || "";
+  const prov = ev.provenance || {};
+  const model = prov.generation_model || prov.embedding_model || "";
+  const decision = prov.decision || "";
+  const decisionBadge = decision
+    ? ` <span class="ai-pill" style="background:transparent;border:1px solid var(--muted);color:var(--muted)">${escapeHtml(decision)}</span>`
+    : "";
+  const actor = ev.actor_coder_id
+    ? ` · actor <code>${escapeHtml(ev.actor_coder_id.slice(0, 8))}</code>`
+    : "";
+  const suggestionId = prov.suggestion_id
+    ? ` · suggestion <code>${escapeHtml(prov.suggestion_id.slice(0, 8))}</code>`
+    : "";
+  const modelLine = model
+    ? `<div class="meta">model <code>${escapeHtml(model)}</code></div>`
+    : "";
+  const featurePill = feature
+    ? `<span class="ai-pill">${escapeHtml(feature)}</span>`
+    : "";
+  return `
+    <div class="ai-model-row"
+         data-test-id="ai-events-row"
+         data-event-id="${escapeHtml(ev.id)}">
+      <div style="flex:1;min-width:0">
+        <div>${_aeKindBadge(kind)} ${featurePill}${decisionBadge}
+             <code>${escapeHtml(ev.id)}</code></div>
+        ${modelLine}
+        <div class="meta">
+          ${escapeHtml(when)}${actor}${suggestionId}
+        </div>
+      </div>
+    </div>`;
+}
+
+async function loadAIEvents() {
+  const featureSel = document.getElementById("ai-events-filter-feature");
+  const kindSel = document.getElementById("ai-events-filter-kind");
+  const errBox = document.getElementById("ai-events-error");
+  const list = document.getElementById("ai-events-list");
+  const count = document.getElementById("ai-events-count");
+  errBox.hidden = true;
+  list.innerHTML = `<div class="hint">Loading…</div>`;
+  try {
+    const params = new URLSearchParams();
+    if (featureSel.value) params.set("feature", featureSel.value);
+    if (kindSel.value) params.set("kind", kindSel.value);
+    params.set("order", "desc");
+    params.set("limit", "100");
+    const url = `/api/projects/${PROJECT_ID}/ai/events?${params.toString()}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const body = await r.json();
+    const events = body.events || [];
+    const total = body.total || 0;
+    const truncatedSuffix = body.truncated
+      ? ` (showing newest ${body.returned})`
+      : "";
+    count.textContent = `${total} event${total === 1 ? "" : "s"}${truncatedSuffix}`;
+    if (!events.length) {
+      list.innerHTML = `
+        <div class="hint" data-test-id="ai-events-empty">
+          No AI activity yet. Suggestion / review / second-coder / memo-draft
+          actions across the project will land here.
+        </div>`;
+      return;
+    }
+    list.innerHTML = events.map(_aeRenderRow).join("");
+  } catch (e) {
+    errBox.textContent = `Couldn't load AI events: ${e.message}`;
+    errBox.hidden = false;
+    list.innerHTML = "";
+  }
+}
+
+document.getElementById("ai-events-filter-feature")
+  .addEventListener("change", () => { loadAIEvents(); });
+document.getElementById("ai-events-filter-kind")
+  .addEventListener("change", () => { loadAIEvents(); });
+document.getElementById("ai-events-refresh-btn")
+  .addEventListener("click", () => { loadAIEvents(); });
+
+loadAIEvents();
 </script>
 {% endblock %}
