@@ -551,6 +551,141 @@
     font-style: italic;
   }
 
+  /* F9.9 — Per-application provenance popover.
+     Hover .app-row or gutter .lane-bar to surface
+     "who applied this code, when, under which definition, and was
+     an AI involved?" without leaving the page. The CSS classes
+     consumed by the body match scribe.application_provenance_display's
+     format_provenance_html output (same names as the helpers.mjs
+     JS mirror) so a single rule sheet styles both server-rendered
+     and client-rendered popovers. The popover is positioned by JS
+     near the trigger; it's hidden by ``hidden`` until then. */
+  .provenance-popover {
+    position: fixed;
+    z-index: 80;
+    max-width: 360px;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.4;
+    pointer-events: auto;
+  }
+  .provenance-popover[hidden] { display: none; }
+  .provenance-popover .provenance-display { display: block; }
+  .provenance-popover .provenance-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .provenance-popover .provenance-version {
+    color: var(--muted);
+    font-weight: 500;
+    font-size: 11px;
+    margin-left: 4px;
+  }
+  .provenance-popover .provenance-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    flex: 0 0 auto;
+  }
+  .provenance-popover .provenance-source {
+    color: var(--muted);
+    font-size: 11px;
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .provenance-popover dl.provenance-meta,
+  .provenance-popover dl.provenance-extra {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 2px 8px;
+    margin: 0 0 6px;
+    font-size: 11px;
+  }
+  .provenance-popover dl.provenance-meta dt,
+  .provenance-popover dl.provenance-extra dt {
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    font-size: 10px;
+  }
+  .provenance-popover dl.provenance-meta dd,
+  .provenance-popover dl.provenance-extra dd {
+    color: var(--text);
+    margin: 0;
+    word-break: break-word;
+  }
+  .provenance-popover .provenance-role {
+    color: var(--muted);
+    font-size: 10px;
+    margin-left: 4px;
+  }
+  .provenance-popover .provenance-warn,
+  .provenance-popover .provenance-drift {
+    margin: 6px 0;
+    padding: 4px 6px;
+    border-radius: 4px;
+    background: var(--panel-2);
+    border-left: 3px solid var(--accent-2);
+    color: var(--text);
+    font-size: 11px;
+  }
+  .provenance-popover .provenance-drift {
+    border-left-color: var(--err);
+  }
+  .provenance-popover .provenance-ai {
+    margin-top: 6px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    background: rgba(167, 139, 250, .08);
+    border: 1px solid rgba(167, 139, 250, .35);
+  }
+  .provenance-popover .provenance-ai-head {
+    font-weight: 600;
+    color: var(--accent-2);
+    font-size: 11px;
+    margin-bottom: 4px;
+  }
+  .provenance-popover .provenance-ai-notes {
+    color: var(--muted);
+    font-style: italic;
+    margin-top: 4px;
+    font-size: 11px;
+  }
+  .provenance-popover .provenance-note {
+    margin-top: 6px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    background: var(--panel-2);
+    border-left: 3px solid var(--border);
+  }
+  .provenance-popover .provenance-note-head {
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    font-size: 10px;
+    margin-bottom: 2px;
+  }
+  .provenance-popover .provenance-note-body {
+    color: var(--text);
+    font-size: 11px;
+  }
+
+  /* The .app-row marks itself as a hover trigger so the test harness
+     can find the affordance without scraping JS. */
+  .app-row[data-prov-hover] { position: relative; }
+
   /* F4.6 — inline media player. Hidden until the user clicks Play on
      any application. Sticks to the bottom of the side panel so the
      transcript text never reflows when the player appears. The dock
@@ -862,6 +997,24 @@
     <div id="codebookSummary" class="hint">Loading…</div>
     <a class="btn secondary" style="margin-top:8px" href="/projects/{{ project_id }}/codebook">Open codebook</a>
 
+    <!-- F9.9 — Per-application provenance popover. The container is
+         rendered up-front so the test harness can find it; positioned
+         absolutely + hidden until the user hovers an .app-row or a
+         gutter .lane-bar. The body is filled with the F9.9
+         format_provenance_html output (same shape as the JS mirror in
+         helpers.mjs). The hover delay (200ms enter, 120ms leave)
+         matches the editor's ⋮ menu so the surfaces feel consistent.
+         data-test-feature="F9.9" anchors the integration test. -->
+    <div id="provenancePopover"
+         class="provenance-popover"
+         role="tooltip"
+         aria-hidden="true"
+         data-test-feature="F9.9"
+         data-test-id="provenance-popover"
+         hidden>
+      <div class="provenance-popover-body" data-test-id="provenance-popover-body"></div>
+    </div>
+
     <!-- F4.6 — One-click playback of any coded segment. The dock is
          present in the rendered template so the test harness can find
          it; it is hidden until the user hits a Play button on any
@@ -1137,9 +1290,25 @@ import {
   extractGateStatus,
   renderInlineGateBlockHtml,
   gateForceOnPayload,
+  buildProvenanceDisplay,
+  formatProvenanceHtml,
+  formatProvenanceText,
+  provenanceSummaryLabel,
 } from "/static/js/helpers.mjs";
 window.__snap = { snapToWord, snapToSentence, snapToParagraph };
 window.__playback = { playbackRangeForApplication, buildWordTimeMap };
+// F9.9 — expose the JS mirror of scribe.application_provenance_display
+// so the hover popover can format an offline-cached display when the
+// route 404s during a transient race. The route is the headline path;
+// these helpers are the fallback. tests/js/application-provenance-
+// display.test.mjs pins them to the same fixtures as
+// tests/test_application_provenance_display.py.
+window.__provenance = {
+  buildProvenanceDisplay,
+  formatProvenanceHtml,
+  formatProvenanceText,
+  provenanceSummaryLabel,
+};
 // F5.2 — expose the right-click memo helpers on window so the
 // classic-script handler below can build payloads through the same
 // pure helpers as tests/js/memo-context.test.mjs.
@@ -1163,6 +1332,7 @@ window.dispatchEvent(new CustomEvent("scribe:snap-ready"));
 window.dispatchEvent(new CustomEvent("scribe:playback-ready"));
 window.dispatchEvent(new CustomEvent("scribe:memo-ctx-ready"));
 window.dispatchEvent(new CustomEvent("scribe:ai-gate-ready"));
+window.dispatchEvent(new CustomEvent("scribe:provenance-ready"));
 </script>
 <script>
 const PROJECT_ID = {{ project_id | tojson }};
@@ -1879,6 +2049,10 @@ function renderGutter() {
       bar.setAttribute("aria-label", `Play coded segment: ${codeName}`);
       bar.dataset.testFeature = "F4.6";
       bar.dataset.testId = "gutter-lane-bar";
+      // F9.9 — gutter bars are also a hover trigger for the provenance
+      // popover. The data attr is what the document-level hover
+      // delegate keys off of.
+      bar.dataset.provHover = "F9.9";
       gutter.appendChild(bar);
       painted += 1;
       const sd = stackOf.get(a.id) || 0;
@@ -2866,6 +3040,8 @@ function renderApps() {
     return `<div class="app-row"
                  data-app-id="${escapeHtml(a.id)}"
                  data-start="${escapeHtml(a.anchor_start_word_id)}"
+                 data-prov-hover="F9.9"
+                 data-test-id="app-row"
                  style="--code-border:${colours.border}">
       <span class="code-name"><span class="swatch" style="background:${colours.swatch}"></span>${escapeHtml(codeName)}${placeBadge}</span>
       <div class="quote">"${escapeHtml(snippet)}"</div>
@@ -3861,6 +4037,236 @@ document.getElementById("memoCancelBtn").addEventListener("click", closeMemoComp
 document.getElementById("memoModal").addEventListener("click", (e) => {
   if (e.target.id === "memoModal") closeMemoComposer();
 });
+
+// --------------------------------------------------------------------- //
+// F9.9 — Per-application provenance hover popover.
+//
+// Hovering an .app-row in the side panel or a .lane-bar in the gutter
+// fetches the F9.9 display payload from
+//   GET /api/projects/<pid>/applications/<aid>/provenance
+// and renders the pre-formatted HTML (server side: scribe.application_
+// provenance_display.format_provenance_html) into the #provenancePopover
+// container. The route is the canonical path; if it 404s during a
+// transient race, we fall back to the JS mirror exposed at
+// window.__provenance.{buildProvenanceDisplay,formatProvenanceHtml}
+// which mirrors the Python builder field-for-field.
+//
+// Rationale for delays:
+//  * 200 ms enter delay — avoids fetching when the cursor is just
+//    travelling across rows.
+//  * 120 ms leave delay — gives the user a moment to slide the
+//    cursor onto the popover itself (e.g. to select text).
+//
+// The popover is positioned next to the trigger using a simple
+// "fit on screen" placement: prefer right-of-trigger; fall back to
+// below + clamp to the viewport. CSS gives it z-index above .app-row
+// and the gutter, but below modals (60+).
+// --------------------------------------------------------------------- //
+
+const _PROV_CACHE = new Map();   // app_id -> {display, summary, text, html}
+let _provEnterTimer = null;
+let _provLeaveTimer = null;
+let _provFetchAbort = null;
+let _provCurrentAppId = null;
+
+function _provPopover() {
+  return document.getElementById("provenancePopover");
+}
+
+function _hideProvPopover() {
+  const pop = _provPopover();
+  if (!pop) return;
+  pop.hidden = true;
+  pop.setAttribute("aria-hidden", "true");
+  _provCurrentAppId = null;
+}
+
+function _placeProvPopover(triggerEl) {
+  const pop = _provPopover();
+  if (!pop || !triggerEl) return;
+  pop.hidden = false;
+  pop.setAttribute("aria-hidden", "false");
+  // Reset position so getBoundingClientRect picks up the natural size.
+  pop.style.left = "0px";
+  pop.style.top = "0px";
+  const rect = triggerEl.getBoundingClientRect();
+  const popRect = pop.getBoundingClientRect();
+  const gap = 8;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  // Prefer right of trigger; if it doesn't fit, fall to left of trigger.
+  let left = rect.right + gap;
+  if (left + popRect.width > vw - 8) {
+    left = Math.max(8, rect.left - popRect.width - gap);
+  }
+  let top = rect.top;
+  if (top + popRect.height > vh - 8) {
+    top = Math.max(8, vh - popRect.height - 8);
+  }
+  pop.style.left = `${left}px`;
+  pop.style.top = `${top}px`;
+}
+
+function _renderProvIntoPopover(payload) {
+  const pop = _provPopover();
+  if (!pop) return;
+  const body = pop.querySelector(".provenance-popover-body");
+  if (!body) return;
+  body.innerHTML = (payload && payload.html) || "";
+  if (payload && payload.summary) {
+    pop.dataset.summary = payload.summary;
+  }
+  if (payload && payload.application_id) {
+    pop.dataset.appId = payload.application_id;
+  }
+}
+
+async function _fetchProvenance(appId) {
+  const cached = _PROV_CACHE.get(appId);
+  if (cached) return cached;
+  if (_provFetchAbort) {
+    try { _provFetchAbort.abort(); } catch (_e) { /* ignore */ }
+  }
+  const ctrl = new AbortController();
+  _provFetchAbort = ctrl;
+  try {
+    const r = await fetch(
+      `/api/projects/${encodeURIComponent(PROJECT_ID)}/applications/${encodeURIComponent(appId)}/provenance`,
+      { signal: ctrl.signal },
+    );
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const body = await r.json();
+    _PROV_CACHE.set(appId, body);
+    return body;
+  } finally {
+    if (_provFetchAbort === ctrl) _provFetchAbort = null;
+  }
+}
+
+function _provFallbackPayload(appId) {
+  // Build a display payload from in-page state so the popover
+  // doesn't go silent if the route 404s mid-edit. Uses the JS
+  // mirror exposed on window.__provenance.
+  if (!window.__provenance || !window.__provenance.buildProvenanceDisplay) {
+    return null;
+  }
+  const a = APPS.find(x => x.id === appId);
+  if (!a) return null;
+  const code = CODES.find(c => c.id === a.code_id) || null;
+  try {
+    const display = window.__provenance.buildProvenanceDisplay(a, { code });
+    return {
+      application_id: a.id,
+      display,
+      summary: window.__provenance.provenanceSummaryLabel(display),
+      text: window.__provenance.formatProvenanceText(display),
+      html: window.__provenance.formatProvenanceHtml(display),
+    };
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function _showProvPopoverFor(triggerEl, appId) {
+  if (!triggerEl || !appId) return;
+  _provCurrentAppId = appId;
+  let payload = null;
+  try {
+    payload = await _fetchProvenance(appId);
+  } catch (_e) {
+    payload = _provFallbackPayload(appId);
+  }
+  // The user may have moved off the trigger by the time the fetch
+  // resolves; only render if we're still on the same row.
+  if (_provCurrentAppId !== appId) return;
+  if (!payload) {
+    payload = _provFallbackPayload(appId);
+  }
+  if (!payload) return;
+  _renderProvIntoPopover(payload);
+  _placeProvPopover(triggerEl);
+}
+
+function _scheduleProvShow(triggerEl, appId) {
+  if (_provLeaveTimer) {
+    clearTimeout(_provLeaveTimer);
+    _provLeaveTimer = null;
+  }
+  if (_provEnterTimer) clearTimeout(_provEnterTimer);
+  _provEnterTimer = setTimeout(() => {
+    _provEnterTimer = null;
+    _showProvPopoverFor(triggerEl, appId);
+  }, 200);
+}
+
+function _scheduleProvHide() {
+  if (_provEnterTimer) {
+    clearTimeout(_provEnterTimer);
+    _provEnterTimer = null;
+  }
+  if (_provLeaveTimer) clearTimeout(_provLeaveTimer);
+  _provLeaveTimer = setTimeout(() => {
+    _provLeaveTimer = null;
+    _hideProvPopover();
+  }, 120);
+}
+
+// Document-level delegate so newly-rendered .app-row / .lane-bar
+// elements get the hover behaviour without re-binding after every
+// renderApps() / renderGutter() call.
+document.addEventListener("mouseover", (e) => {
+  const trigger = e.target.closest(
+    ".app-row[data-app-id][data-prov-hover='F9.9'], .lane-bar[data-app-id][data-prov-hover='F9.9']",
+  );
+  if (!trigger) return;
+  const appId = trigger.dataset.appId;
+  if (!appId) return;
+  _scheduleProvShow(trigger, appId);
+});
+
+document.addEventListener("mouseout", (e) => {
+  const trigger = e.target.closest(
+    ".app-row[data-app-id][data-prov-hover='F9.9'], .lane-bar[data-app-id][data-prov-hover='F9.9']",
+  );
+  if (!trigger) return;
+  // If the cursor moved into the popover itself, don't hide.
+  const to = e.relatedTarget;
+  const pop = _provPopover();
+  if (pop && to && (pop === to || (to.nodeType === 1 && pop.contains(to)))) {
+    return;
+  }
+  _scheduleProvHide();
+});
+
+// Cancel hide when entering the popover; close on leave.
+(function _wireProvPopoverHover() {
+  const pop = _provPopover();
+  if (!pop) return;
+  pop.addEventListener("mouseenter", () => {
+    if (_provLeaveTimer) {
+      clearTimeout(_provLeaveTimer);
+      _provLeaveTimer = null;
+    }
+  });
+  pop.addEventListener("mouseleave", () => _scheduleProvHide());
+})();
+
+// Escape closes the popover (in addition to closing other modals).
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (_provEnterTimer) { clearTimeout(_provEnterTimer); _provEnterTimer = null; }
+    _hideProvPopover();
+  }
+});
+
+// Expose the closer for tests + future callers (the editor's
+// re-anchor flow may want to clear stale popovers when an
+// application's anchor changes).
+window.__provenancePopover = {
+  hide: _hideProvPopover,
+  showFor: _showProvPopoverFor,
+  cache: _PROV_CACHE,
+};
 
 loadAll();
 </script>

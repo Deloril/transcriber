@@ -4658,6 +4658,162 @@ async def get_application_endpoint(project_id: str, application_id: str) -> JSON
     return JSONResponse(a.to_dict())
 
 
+# --------------------------------------------------------------------------- #
+# F9.9 — Per-application provenance display on hover.
+#
+# The pure module :mod:`scribe.application_provenance_display` (shipped
+# in c316cd8, 55 unit tests) turns an Application + the related
+# Code / CodeVersion-at-apply / Coder / decided-by-Coder into a flat,
+# hashable :class:`ProvenanceDisplay` plus three formatters:
+#
+#   * ``provenance_summary_label`` — one-line "Alex · Human-coded ·
+#     2026-04-15" badge.
+#   * ``format_provenance_text`` — multi-line plain text suitable for
+#     a ``title=`` attribute.
+#   * ``format_provenance_html`` — escaped HTML for innerHTML in a
+#     hover popover.
+#
+# This endpoint exposes the builder so the coding view can pop a
+# tooltip on .app-row / gutter lane-bar hover with one HTTP call,
+# without hand-walking the entity graph in JS. The JS mirror in
+# ``scribe/static/js/helpers.mjs`` is still wired (window.__provenance)
+# so the page can format an offline-cached display when the route 404s
+# during a transient race, but the headline path is the route.
+#
+# Response shape::
+#
+#     {
+#       "application_id": "<aid>",
+#       "display":   { ... ProvenanceDisplay as a dict ... },
+#       "summary":   "Alex · Human-coded · 2026-04-15",
+#       "text":      "...\n...",       # plain text
+#       "html":      "<div ...>"        # innerHTML-safe
+#     }
+# --------------------------------------------------------------------------- #
+
+
+from . import application_provenance_display as _application_provenance_display  # noqa: E402
+
+
+@app.get("/api/projects/{project_id}/applications/{application_id}/provenance")
+async def application_provenance_endpoint(
+    project_id: str, application_id: str,
+) -> JSONResponse:
+    """Return the F9.9 provenance display for one application.
+
+    Walks the Application → Code → CodeVersion-at-apply → Coder
+    chain (with the AI-decision Coder if present), hands the loaded
+    entities to :func:`build_provenance_display`, and serialises
+    the structured display + the three pre-rendered formatters
+    (one-line summary, plain-text title, escaped HTML).
+
+    The endpoint is read-only and side-effect free — it never
+    mutates the project. Missing related entities (a deleted code,
+    a missing code-version snapshot, or a coder that no longer
+    exists) degrade gracefully: the display has the same field
+    set, with ``code_missing`` / ``snapshot_missing`` /
+    ``coder_name = "(unknown)"`` carrying the "why" so the renderer
+    can word the empty case correctly. Drift detection (F9.2) runs
+    only when both the current Code and the CodeVersion snapshot
+    resolve.
+
+    Errors:
+
+    * 400 — bad project / application id format.
+    * 404 — application not found, OR the parent project is gone.
+    """
+    _check_project_id(project_id)
+    _check_application_id(application_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            app_obj = _applications.load_application(
+                _projects_root(), project_id, application_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Application not found")
+
+        # Code (current). Treat a missing or invalid code as "deleted":
+        # the display surface still renders, with code_missing=True.
+        code: _codes.Code | None
+        try:
+            code = _codes.load_code(_projects_root(), project_id, app_obj.code_id)
+        except (FileNotFoundError, _projects.ProjectValidationError):
+            code = None
+
+        # CodeVersion at apply. Same defensive posture: a missing
+        # snapshot drops to snapshot_missing=True rather than 404,
+        # because the audit story is "show the user what's left".
+        version: _code_versions.CodeVersion | None = None
+        if code is not None and app_obj.definition_version_id_at_apply:
+            try:
+                version = _code_versions.find_code_version(
+                    _projects_root(),
+                    project_id,
+                    app_obj.code_id,
+                    app_obj.definition_version_id_at_apply,
+                )
+            except _projects.ProjectValidationError:
+                version = None
+
+        # Coder. Optional; missing coder -> "(unknown)" downstream.
+        coder: _coders.Coder | None = None
+        if app_obj.coder_id:
+            try:
+                coder = _coders.load_coder(
+                    _projects_root(), project_id, app_obj.coder_id,
+                )
+            except (FileNotFoundError, _projects.ProjectValidationError):
+                coder = None
+
+        # AI decision-maker (F8.9). Only present when ai_provenance is
+        # populated AND it carries a decided_by_coder_id.
+        decided_by_coder: _coders.Coder | None = None
+        aip = app_obj.ai_provenance
+        if aip is not None and aip.decided_by_coder_id:
+            try:
+                decided_by_coder = _coders.load_coder(
+                    _projects_root(),
+                    project_id,
+                    aip.decided_by_coder_id,
+                )
+            except (FileNotFoundError, _projects.ProjectValidationError):
+                decided_by_coder = None
+
+        # Source name (optional). Pulled from Source.name when the
+        # row still resolves; missing sources fall back to "" (the
+        # builder skips the row when source_name is empty).
+        source_name = ""
+        if app_obj.source_id:
+            try:
+                src = _sources.load_source(
+                    _projects_root(), project_id, app_obj.source_id,
+                )
+                source_name = src.name or ""
+            except (FileNotFoundError, _projects.ProjectValidationError):
+                source_name = ""
+
+    display = _application_provenance_display.build_provenance_display(
+        app_obj,
+        code=code,
+        code_version=version,
+        coder=coder,
+        decided_by_coder=decided_by_coder,
+        source_name=source_name,
+    )
+
+    # Convert the frozen dataclass + tuple fields to plain JSON-friendly
+    # types. asdict() walks tuples → lists.
+    display_dict = asdict(display)
+    return JSONResponse({
+        "application_id": app_obj.id,
+        "display": display_dict,
+        "summary": _application_provenance_display.provenance_summary_label(display),
+        "text": _application_provenance_display.format_provenance_text(display),
+        "html": _application_provenance_display.format_provenance_html(display),
+    })
+
+
 @app.delete("/api/projects/{project_id}/applications/{application_id}")
 async def delete_application_endpoint(project_id: str, application_id: str) -> JSONResponse:
     _check_project_id(project_id)
