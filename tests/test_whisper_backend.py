@@ -34,14 +34,55 @@ class TestModuleConstants:
     def test_default_backend_returns_faster_whisper(self) -> None:
         assert wb.default_backend_id() == "faster-whisper"
 
-    def test_default_backend_with_mps_still_faster_whisper_today(self) -> None:
-        # G7.3 will flip this for MPS once the cpp adapter ships;
-        # for G7.1 we keep the historical default deterministic
-        # regardless of the live device label.
-        assert wb.default_backend_id("mps") == "faster-whisper"
+    def test_default_backend_cuda_is_faster_whisper(self) -> None:
+        # G7.3 — the Apple-Silicon flip is mps-only; CUDA boxes stay
+        # on faster-whisper because CT2 has the better int8/fp16 tier
+        # there.
+        assert wb.default_backend_id("cuda") == "faster-whisper"
+
+    def test_default_backend_rocm_is_faster_whisper(self) -> None:
+        # G7.3 — AMD ROCm boxes stay on faster-whisper too; the CT2
+        # ROCm wheel is the right path there.
+        assert wb.default_backend_id("rocm") == "faster-whisper"
+
+    def test_default_backend_cpu_is_faster_whisper(self) -> None:
+        assert wb.default_backend_id("cpu") == "faster-whisper"
 
     def test_default_backend_with_unknown_device_still_works(self) -> None:
         assert wb.default_backend_id("unknown-arch") == "faster-whisper"
+
+    def test_default_backend_mps_flips_when_whisper_cpp_available(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # G7.3 — Apple Silicon: when pywhispercpp is importable
+        # (is_available() True), the default flips to whisper.cpp so
+        # the upload page lands with the Metal-accelerated path
+        # pre-selected.
+        cpp = wb.get_backend("whisper.cpp")
+        monkeypatch.setattr(cpp, "is_available", lambda: (True, ""))
+        assert wb.default_backend_id("mps") == "whisper.cpp"
+
+    def test_default_backend_mps_falls_back_when_whisper_cpp_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # G7.3 — if the user is on Apple Silicon but hasn't installed
+        # pywhispercpp, the default must fall back to faster-whisper;
+        # otherwise the page would land on a backend that can't run.
+        cpp = wb.get_backend("whisper.cpp")
+        monkeypatch.setattr(
+            cpp, "is_available", lambda: (False, "pywhispercpp not installed"),
+        )
+        assert wb.default_backend_id("mps") == "faster-whisper"
+
+    def test_default_backend_mps_uppercase_normalised(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Defensive — accept "MPS" / " mps " from callers that pass
+        # the label through unfiltered.
+        cpp = wb.get_backend("whisper.cpp")
+        monkeypatch.setattr(cpp, "is_available", lambda: (True, ""))
+        assert wb.default_backend_id("MPS") == "whisper.cpp"
+        assert wb.default_backend_id(" mps ") == "whisper.cpp"
 
 
 # --------------------------------------------------------------------------- #
@@ -81,6 +122,84 @@ class TestBackendInfo:
         d = info.to_dict()
         assert d["available"] is False
         assert d["unavailable_reason"] == "missing dep"
+
+
+# --------------------------------------------------------------------------- #
+# G7.3 — recommended_backend_for_device hint
+# --------------------------------------------------------------------------- #
+
+
+class TestRecommendedBackendForDevice:
+    def test_no_hint_for_cuda(self) -> None:
+        assert wb.recommended_backend_for_device("cuda") is None
+
+    def test_no_hint_for_rocm(self) -> None:
+        assert wb.recommended_backend_for_device("rocm") is None
+
+    def test_no_hint_for_cpu(self) -> None:
+        assert wb.recommended_backend_for_device("cpu") is None
+
+    def test_no_hint_for_none(self) -> None:
+        assert wb.recommended_backend_for_device(None) is None
+
+    def test_no_hint_for_unknown_label(self) -> None:
+        assert wb.recommended_backend_for_device("unknown-arch") is None
+
+    def test_mps_returns_dict_with_required_keys(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cpp = wb.get_backend("whisper.cpp")
+        monkeypatch.setattr(cpp, "is_available", lambda: (True, ""))
+        hint = wb.recommended_backend_for_device("mps")
+        assert hint is not None
+        for key in (
+            "device", "recommended_backend_id", "available",
+            "unavailable_reason", "headline", "detail",
+        ):
+            assert key in hint, f"missing key {key!r} in {hint!r}"
+
+    def test_mps_recommends_whisper_cpp(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cpp = wb.get_backend("whisper.cpp")
+        monkeypatch.setattr(cpp, "is_available", lambda: (True, ""))
+        hint = wb.recommended_backend_for_device("mps")
+        assert hint["recommended_backend_id"] == "whisper.cpp"
+        assert hint["device"] == "mps"
+        assert hint["available"] is True
+        assert hint["unavailable_reason"] == ""
+
+    def test_mps_when_unavailable_carries_reason(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cpp = wb.get_backend("whisper.cpp")
+        monkeypatch.setattr(
+            cpp,
+            "is_available",
+            lambda: (False, "pywhispercpp not installed"),
+        )
+        hint = wb.recommended_backend_for_device("mps")
+        assert hint is not None
+        assert hint["available"] is False
+        assert "pywhispercpp" in hint["unavailable_reason"]
+
+    def test_mps_detail_mentions_speedup(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The whole point of the banner is to surface the speedup
+        # number so the user understands *why* the default flipped.
+        cpp = wb.get_backend("whisper.cpp")
+        monkeypatch.setattr(cpp, "is_available", lambda: (True, ""))
+        hint = wb.recommended_backend_for_device("mps")
+        assert "5×" in hint["detail"] or "5x" in hint["detail"].lower()
+
+    def test_mps_uppercase_label_normalised(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cpp = wb.get_backend("whisper.cpp")
+        monkeypatch.setattr(cpp, "is_available", lambda: (True, ""))
+        assert wb.recommended_backend_for_device("MPS") is not None
+        assert wb.recommended_backend_for_device(" mps ") is not None
 
 
 # --------------------------------------------------------------------------- #

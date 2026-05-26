@@ -242,17 +242,33 @@ async def index(request: Request) -> HTMLResponse:
     # page can render an Engine selector. G7.2 also surfaces the
     # whisper.cpp quant catalogue inline so the user can pick GGUF
     # quantisation without a round-trip to /api/whisper-cpp/models.
+    # G7.3 — auto-recommend whisper.cpp on Apple Silicon: the page
+    # passes the active GPU backend label through to the helpers so
+    # ``default_backend_id()`` flips to whisper.cpp on mps and the
+    # template can render a recommendation banner.
     from .whisper_backend import (
         default_backend_id,
         describe_backends,
+        recommended_backend_for_device,
     )
+    from .engine import gpu_backend
     from . import whisper_cpp
+
+    active_backend = gpu_backend()
     return templates.TemplateResponse(
         request,
         "index.html",
         {
             "whisper_backends": describe_backends(),
-            "default_whisper_backend": default_backend_id(),
+            "default_whisper_backend": default_backend_id(active_backend),
+            # G7.3 — the active device label (cuda/rocm/mps/cpu) and a
+            # structured recommendation hint (or None). Template uses
+            # both: the label drives a data attribute on the engine
+            # row; the hint renders the banner.
+            "active_gpu_backend": active_backend,
+            "whisper_backend_recommendation": (
+                recommended_backend_for_device(active_backend)
+            ),
             # G7.2 — quant selector + supported model list for the
             # whisper.cpp panel.
             "whisper_cpp_supported_models": list(whisper_cpp.SUPPORTED_MODELS),
@@ -273,14 +289,25 @@ async def whisper_backends_endpoint() -> JSONResponse:
     flag that's ``False`` when the backend's prerequisites aren't
     installed (the UI greys out those options instead of hiding
     them, so the user knows they exist).
+
+    G7.3 — also returns the active GPU backend label and (when
+    applicable) a structured ``recommendation`` block. On Apple
+    Silicon the ``default`` flips to ``whisper.cpp`` and the
+    recommendation describes the speedup.
     """
     from .whisper_backend import (
         default_backend_id,
         describe_backends,
+        recommended_backend_for_device,
     )
+    from .engine import gpu_backend
+
+    active_backend = gpu_backend()
     return JSONResponse({
-        "default": default_backend_id(),
+        "default": default_backend_id(active_backend),
         "backends": describe_backends(),
+        "active_gpu_backend": active_backend,
+        "recommendation": recommended_backend_for_device(active_backend),
     })
 
 

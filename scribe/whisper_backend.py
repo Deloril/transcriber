@@ -350,20 +350,97 @@ def describe_backends() -> list[dict[str, Any]]:
 def default_backend_id(device_label: str | None = None) -> str:
     """Return the default backend id for a given device label.
 
-    Today this always returns ``faster-whisper`` because every shipped
-    backend is faster-whisper. G7.3 will flip this for ``mps``
-    (Apple Silicon) once :class:`WhisperCppBackend` is wired and the
-    Metal path is the obvious win.
+    G7.3 — when ``device_label == "mps"`` (Apple Silicon) AND the
+    :class:`WhisperCppBackend` reports available
+    (``pywhispercpp`` importable), prefer ``whisper.cpp``. Metal
+    acceleration via GGUF weights is roughly 5× faster than CT2's
+    CPU fallback on Apple Silicon, so the default flips for that
+    audience. faster-whisper stays in the registry — users can
+    A/B for accuracy — but the page lands with whisper.cpp pre-
+    selected.
 
-    Accepts ``None`` (no device known) and unknown labels — both fall
-    through to the historical default.
+    On every other backend (``cuda`` / ``rocm`` / ``cpu``) the
+    historical ``faster-whisper`` default holds. If whisper.cpp's
+    runtime check fails (e.g. ``pywhispercpp`` not installed), the
+    function falls back to ``faster-whisper`` so the page never
+    lands on a backend that can't actually run.
+
+    Accepts ``None`` (no device known) and unknown labels — both
+    fall through to the historical default.
     """
-    # Reserved hook for G7.3: when the active device is mps and a
-    # whisper.cpp backend reports available, prefer it. Today the
-    # whisper.cpp backend is always advertised as not-yet-wired so
-    # this function deterministically picks faster-whisper.
-    _ = device_label  # currently unused; kept for API stability
+    label = (device_label or "").strip().lower()
+    if label == "mps":
+        cpp = BACKEND_REGISTRY.get(BACKEND_WHISPER_CPP)
+        if cpp is not None:
+            try:
+                available, _reason = cpp.is_available()
+            except Exception:  # pragma: no cover - defensive
+                available = False
+            if available:
+                return BACKEND_WHISPER_CPP
     return BACKEND_FASTER_WHISPER
+
+
+# --------------------------------------------------------------------------- #
+# G7.3 — UI recommendation hint
+# --------------------------------------------------------------------------- #
+
+
+def recommended_backend_for_device(
+    device_label: str | None,
+) -> dict[str, Any] | None:
+    """Return a serialisable hint when the active device has a non-default
+    backend recommendation, else ``None``.
+
+    G7.3 — Apple Silicon (``mps``) gets a "whisper.cpp recommended"
+    banner above the engine selector with ~5× speedup messaging.
+    The hint is always rendered when the device matches, regardless
+    of whether ``pywhispercpp`` is installed; the
+    ``available`` / ``unavailable_reason`` fields tell the UI
+    whether to render an "install pywhispercpp" prompt or a "default
+    flipped" confirmation.
+
+    The dict shape is:
+
+    .. code-block:: json
+
+        {
+          "device": "mps",
+          "recommended_backend_id": "whisper.cpp",
+          "available": false,
+          "unavailable_reason": "...",
+          "headline": "Apple Silicon detected — whisper.cpp recommended",
+          "detail": "GPU-accelerated transcription, ~5× faster ..."
+        }
+
+    All other devices (``cuda`` / ``rocm`` / ``cpu`` / unknown / None)
+    return ``None`` because faster-whisper is already the right
+    default there and showing a banner would be noise.
+    """
+    label = (device_label or "").strip().lower()
+    if label != "mps":
+        return None
+    cpp = BACKEND_REGISTRY.get(BACKEND_WHISPER_CPP)
+    if cpp is None:
+        return None
+    try:
+        available, reason = cpp.is_available()
+    except Exception:  # pragma: no cover - defensive
+        available = False
+        reason = "whisper.cpp backend probe raised"
+    return {
+        "device": "mps",
+        "recommended_backend_id": BACKEND_WHISPER_CPP,
+        "available": bool(available),
+        "unavailable_reason": "" if available else (reason or ""),
+        "headline": "Apple Silicon detected — whisper.cpp recommended",
+        "detail": (
+            "GPU-accelerated transcription, ~5× faster than the "
+            "faster-whisper CPU fallback. whisper.cpp routes Whisper "
+            "through Metal via GGUF weights; faster-whisper stays "
+            "available for A/B comparisons."
+        ),
+    }
 
 
 def is_valid_backend_id(backend_id: str | None) -> bool:

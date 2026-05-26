@@ -549,9 +549,52 @@
          the GGUF quant selector (q5_0 / q8_0 / f16) and a hint that
          lists which whisper.cpp models are supported. The whole
          block is rendered always; JS toggles `.hidden` on the quant
-         column based on the engine selection. #}
+         column based on the engine selection.
+
+         G7.3 — when the active GPU backend is mps (Apple Silicon),
+         the server-side ``whisper_backend_recommendation`` carries a
+         "whisper.cpp recommended" hint with a ~5× speedup nudge. The
+         banner renders above the engine row and the engine ``<select>``
+         lands on whisper.cpp pre-selected (the server-side default
+         flips for mps). On other backends the banner is None and the
+         row renders as before. #}
       {% if whisper_backends %}
       <div style="height: 14px;"></div>
+      {% if whisper_backend_recommendation %}
+      <div class="card"
+           data-test-id="whisper-backend-recommendation"
+           data-active-gpu-backend="{{ active_gpu_backend }}"
+           data-recommended-backend="{{ whisper_backend_recommendation.recommended_backend_id }}"
+           data-recommendation-available="{{ 'true' if whisper_backend_recommendation.available else 'false' }}"
+           style="margin-top:0; margin-bottom:14px; padding:14px 16px; background:var(--accent-soft); border-color:var(--accent);">
+        <strong style="color:var(--text-strong); font-family:var(--serif);">
+          {{ whisper_backend_recommendation.headline }}
+        </strong>
+        <p class="hint" style="margin:6px 0 0 0;">
+          {{ whisper_backend_recommendation.detail }}
+          {% if not whisper_backend_recommendation.available %}
+            <br>
+            <span data-test-id="whisper-backend-recommendation-install"
+                  style="color:var(--warn);">
+              whisper.cpp isn't installed yet
+              ({{ whisper_backend_recommendation.unavailable_reason }}).
+              Install <code>pywhispercpp</code> to enable Metal-accelerated
+              transcription; the engine selector will pick it up
+              automatically. faster-whisper remains the active default
+              until then.
+            </span>
+          {% else %}
+            <br>
+            <span data-test-id="whisper-backend-recommendation-flipped"
+                  style="color:var(--accent-2);">
+              Default flipped to whisper.cpp for this session — switch back
+              to faster-whisper in the engine picker below if you'd like to
+              A/B for accuracy.
+            </span>
+          {% endif %}
+        </p>
+      </div>
+      {% endif %}
       <div class="row">
         <div>
           <label>Engine
