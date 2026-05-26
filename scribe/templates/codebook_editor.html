@@ -4,6 +4,61 @@
 
 {% block actions %}
   <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+  {#
+    F2.6 — codebook export menu. The four download targets are the
+    full F2.6 surface (CSV / Markdown / RTF / REFI-QDA Codebook XML).
+    The first three live behind /api/projects/<pid>/codebook/export
+    with a ``format=`` query param; the XML one has its own URL
+    (`/codebook/refi-qda-xml`) per F6.5's separate-surface design.
+    The dropdown is keyboard-accessible and closes on outside click —
+    same pattern as the per-row ⋮ lifecycle menus below.
+  #}
+  <span class="cb-export-wrap" data-test-feature="F2.6">
+    <button
+      type="button"
+      class="btn secondary"
+      id="cb-export-btn"
+      title="Download the codebook in CSV / Markdown / Word / REFI-QDA XML"
+      aria-haspopup="menu"
+      aria-expanded="false"
+    >📥 Export ▾</button>
+    <div
+      class="cb-export-menu"
+      id="cb-export-menu"
+      role="menu"
+      aria-label="Export codebook"
+    >
+      <a
+        role="menuitem"
+        class="cb-export-item"
+        href="/api/projects/{{ project_id }}/codebook/export?format=csv"
+        data-fmt="csv"
+        download
+      >CSV <span class="cb-export-hint">spreadsheet — RFC 4180</span></a>
+      <a
+        role="menuitem"
+        class="cb-export-item"
+        href="/api/projects/{{ project_id }}/codebook/export?format=markdown"
+        data-fmt="markdown"
+        download
+      >Markdown <span class="cb-export-hint">paste into thesis appendix</span></a>
+      <a
+        role="menuitem"
+        class="cb-export-item"
+        href="/api/projects/{{ project_id }}/codebook/export?format=rtf"
+        data-fmt="rtf"
+        download
+      >Word (RTF) <span class="cb-export-hint">opens in Word / LibreOffice</span></a>
+      <div class="cb-export-sep" role="separator"></div>
+      <a
+        role="menuitem"
+        class="cb-export-item"
+        href="/api/projects/{{ project_id }}/codebook/refi-qda-xml"
+        data-fmt="refi-qda-xml"
+        download
+      >REFI-QDA Codebook XML <span class="cb-export-hint">no-lock-in exchange format</span></a>
+    </div>
+  </span>
 {% endblock %}
 
 {% block extra_styles %}
@@ -252,6 +307,39 @@
   .cb-history-row .cb-history-fields code {
     background: var(--panel); padding: 1px 5px; border-radius: 3px;
     margin-right: 4px; font-size: 11px;
+  }
+
+  /* F2.6: codebook export dropdown (header-actions area) */
+  .cb-export-wrap { position: relative; display: inline-block; }
+  .cb-export-menu {
+    position: absolute; right: 0; top: calc(100% + 4px);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; min-width: 280px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.25);
+    z-index: 30;
+    display: none;
+    padding: 6px 0;
+  }
+  .cb-export-menu.open { display: block; }
+  .cb-export-item {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 14px;
+    padding: 8px 14px;
+    color: var(--text); text-decoration: none;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .cb-export-item:hover, .cb-export-item:focus {
+    background: var(--panel-2); outline: none;
+  }
+  .cb-export-item .cb-export-hint {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .cb-export-sep {
+    height: 1px; background: var(--border); margin: 4px 0;
   }
 {% endblock %}
 
@@ -1221,6 +1309,53 @@ document.getElementById("cb-lock-toggle-btn").addEventListener("click", () => {
 document.getElementById("cb-lock-log-btn").addEventListener("click", () => {
   document.getElementById("cb-lock-log").classList.toggle("open");
 });
+
+// --------------------------------------------------------------------- //
+// F2.6 — Codebook export menu
+//
+// The header dropdown links straight at the F6.1 endpoint
+// (/codebook/export?format=...) for CSV / Markdown / RTF and at the
+// F6.5 endpoint (/codebook/refi-qda-xml) for the XML one. The links
+// already have ``download`` set so the browser saves rather than
+// rendering. All this JS does is open / close the menu and close on
+// outside click + Escape — same pattern as the per-row ⋮ menus.
+// --------------------------------------------------------------------- //
+
+const cbExportBtn = document.getElementById("cb-export-btn");
+const cbExportMenu = document.getElementById("cb-export-menu");
+
+function closeExportMenu() {
+  if (!cbExportMenu) return;
+  cbExportMenu.classList.remove("open");
+  if (cbExportBtn) cbExportBtn.setAttribute("aria-expanded", "false");
+}
+
+if (cbExportBtn && cbExportMenu) {
+  cbExportBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const wasOpen = cbExportMenu.classList.contains("open");
+    closeExportMenu();
+    if (!wasOpen) {
+      cbExportMenu.classList.add("open");
+      cbExportBtn.setAttribute("aria-expanded", "true");
+    }
+  });
+  // Clicking an item should also dismiss the menu (the link itself
+  // navigates, but for keyboard users the menu should clear).
+  cbExportMenu.addEventListener("click", (e) => {
+    if (e.target.closest(".cb-export-item")) {
+      closeExportMenu();
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if (!cbExportMenu.contains(e.target) && e.target !== cbExportBtn) {
+      closeExportMenu();
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeExportMenu();
+  });
+}
 
 refreshCodes().catch(err => {
   document.getElementById("codesEmpty").style.display = "";
