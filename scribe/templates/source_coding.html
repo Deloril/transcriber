@@ -729,8 +729,18 @@
   </div>
   <input id="popSearch" class="pop-search" type="text" placeholder="Filter codes…" aria-label="Filter codes">
   <div id="popList" class="pop-list"></div>
-  <!-- Inline AI panel — hidden until "Suggest with AI" is clicked. -->
-  <div id="aiPanel" class="ai-panel" style="display:none"></div>
+  <!-- Inline AI panel — hidden until "Suggest with AI" is clicked.
+       The F8.3 / F8.4 surface lives here: the row template literal in
+       renderPopList() emits a "✨ Suggest existing code with AI" row
+       (mode=existing → F8.3) or a "✨ Propose a new code with AI" row
+       (mode=new → F8.4) that, when clicked, POSTs to
+       /api/projects/<pid>/ai/suggestions and renders the candidates
+       inside this panel. The data-test-feature="F8.3" marker anchors
+       the integration test that proves the surface is reachable. -->
+  <div id="aiPanel" class="ai-panel"
+       data-test-feature="F8.3"
+       data-test-id="ai-panel"
+       style="display:none"></div>
 </div>
 
 <!-- F5.2 — right-click context menu. Hidden until contextmenu fires
@@ -1816,13 +1826,21 @@ function renderPopList(filter) {
   }
   // "✨ Suggest with AI" — last row so picking an existing code stays
   // the easy default. The button changes mode based on whether the
-  // codebook is empty: with codes we suggest from the existing list;
-  // without codes we ask the model to propose new ones.
+  // codebook is empty: with codes we suggest from the existing list
+  // (F8.3); without codes we ask the model to propose new ones (F8.4).
+  // The data-test-feature toggles between the two so the F8.3
+  // integration test can scope-pick the existing-code row even when
+  // an empty codebook would render the new-code variant.
   const aiMode = CODES.length ? "existing" : "new";
   const aiLabel = aiMode === "existing"
     ? "✨ Suggest existing code with AI"
     : "✨ Propose a new code with AI";
-  html += `<div class="pop-row ai-row" data-ai-mode="${aiMode}">${aiLabel}</div>`;
+  const aiFeatureId = aiMode === "existing" ? "F8.3" : "F8.4";
+  const aiTestId = aiMode === "existing" ? "ai-suggest-existing" : "ai-suggest-new";
+  html += `<div class="pop-row ai-row"
+                data-ai-mode="${aiMode}"
+                data-test-feature="${aiFeatureId}"
+                data-test-id="${aiTestId}">${aiLabel}</div>`;
   list.innerHTML = html;
 }
 
