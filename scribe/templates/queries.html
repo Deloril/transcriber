@@ -1,0 +1,415 @@
+{#
+  Query builder + results (F3.5).
+
+  PLANNING.md F3.5:
+    > Query builder: code filter + source filter + participant attribute
+    > filter + speaker filter + boolean code combinator + proximity
+    > (within span / paragraph / source).
+
+  scribe/query.py shipped the pure data model + executor with passing
+  unit tests in ae528c2; this page is its user-facing surface. It
+  reads:
+
+    * GET  /api/projects/<pid>/codes                — populate code picker
+    * GET  /api/projects/<pid>/sources              — populate source picker
+    * POST /api/projects/<pid>/queries/run          — execute the query
+
+  Minimum viable surface ships now:
+    * Multi-select code filter (boolean OR — combine with the
+      runtime executor's CodeExpr "or" / "and" combinators).
+    * Multi-select source filter.
+    * Speaker-role filter (interviewer / interviewee / facilitator /
+      participant — the SPEAKER_ROLES vocabulary in scribe.speaker_map).
+    * Run button, results table grouped by source, count + warnings.
+
+  Future graduations (F3.6 matrix views, F3.7 saved queries, F6.2
+  retrieval reports) layer onto the same page — they consume the
+  same /queries/run endpoint and add their own controls / sections.
+#}
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Queries{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+{% endblock %}
+
+{% block subtitle_block %}
+  <span class="sub">F3.5 — code · source · participant · speaker · boolean · proximity. Saved queries (F3.7) and matrices (F3.6) graduate later.</span>
+{% endblock %}
+
+{% block extra_styles %}
+  .qb-grid {
+    display: grid;
+    grid-template-columns: minmax(260px, 1fr) 2fr;
+    gap: 22px;
+    align-items: stretch;
+  }
+  @media (max-width: 920px) {
+    .qb-grid { grid-template-columns: 1fr; }
+  }
+  .qb-builder .field {
+    display: flex; flex-direction: column;
+    gap: 4px; margin-bottom: 14px;
+  }
+  .qb-builder label {
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    font-weight: 600;
+  }
+  .qb-builder select.qb-multi {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 8px;
+    font: inherit;
+    font-size: 13px;
+    min-height: 110px;
+  }
+  .qb-builder select.qb-single {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 10px;
+    font: inherit;
+    font-size: 13px;
+  }
+  .qb-builder .qb-help {
+    color: var(--muted);
+    font-size: 12px;
+    margin: 2px 0 0;
+  }
+  .qb-actions { display: flex; gap: 8px; align-items: center; }
+  .qb-results {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .qb-summary {
+    color: var(--muted);
+    font-size: 12.5px;
+    margin-bottom: 12px;
+  }
+  .qb-warning {
+    background: color-mix(in srgb, var(--warn) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: 6px;
+    margin-bottom: 12px;
+    font-size: 12.5px;
+  }
+  .qb-result-group {
+    margin-bottom: 14px;
+    padding: 10px 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .qb-result-group h3 {
+    margin: 0 0 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-strong);
+  }
+  .qb-result-row {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 4px 0; border-bottom: 1px dashed var(--border);
+    font-size: 13px;
+  }
+  .qb-result-row:last-child { border-bottom: none; }
+  .qb-result-row .qb-code-pill {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 11px;
+    font-family: var(--mono);
+  }
+  .qb-result-row .qb-anchor {
+    color: var(--muted);
+    font-size: 11px;
+    font-family: var(--mono);
+  }
+  .qb-result-row a { color: var(--text); text-decoration: none; }
+  .qb-result-row a:hover { color: var(--accent); }
+  .qb-empty {
+    color: var(--muted); font-style: italic; padding: 12px 0;
+  }
+  .qb-error {
+    color: var(--err);
+    background: color-mix(in srgb, var(--err) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--err) 40%, var(--border));
+    padding: 8px 10px; border-radius: 6px;
+  }
+  .checkbox-row {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--text); font-size: 13px;
+  }
+{% endblock %}
+
+{% block body %}
+<div class="qb-grid" data-test-feature="F3.5">
+  {# ============================================================ #}
+  {# Builder column                                               #}
+  {# ============================================================ #}
+  <div class="card qb-builder">
+    <h2 style="margin-top:0">Build a query</h2>
+    <p class="hint" style="margin-top:-6px">Pick zero or more filters. An empty query returns every coded segment in the project.</p>
+
+    <div class="field">
+      <label for="qbCodes">Codes (any of)</label>
+      <select id="qbCodes" class="qb-multi" multiple
+              data-test-id="qb-codes-select"
+              size="6"></select>
+      <p class="qb-help">Hold ⌘ / Ctrl to select multiple. Combined with OR.</p>
+    </div>
+
+    <div class="field">
+      <label for="qbSources">Sources</label>
+      <select id="qbSources" class="qb-multi" multiple
+              data-test-id="qb-sources-select"
+              size="6"></select>
+      <p class="qb-help">Hold ⌘ / Ctrl to select multiple. Empty = every source.</p>
+    </div>
+
+    <div class="field">
+      <label for="qbSpeakerRole">Speaker role</label>
+      <select id="qbSpeakerRole" class="qb-single"
+              data-test-id="qb-speaker-role">
+        <option value="">— any —</option>
+        <option value="interviewer">interviewer</option>
+        <option value="interviewee">interviewee</option>
+        <option value="facilitator">facilitator</option>
+        <option value="participant">participant</option>
+      </select>
+      <p class="qb-help">F3.4 — uses each source's speaker map to resolve roles.</p>
+    </div>
+
+    <div class="qb-actions">
+      <button id="qbRun" class="btn"
+              data-test-id="qb-run">Run query</button>
+      <button id="qbReset" class="btn secondary"
+              data-test-id="qb-reset">Reset</button>
+    </div>
+  </div>
+
+  {# ============================================================ #}
+  {# Results column                                               #}
+  {# ============================================================ #}
+  <div class="qb-results" id="qbResults">
+    <div class="qb-summary" id="qbSummary">Run a query to see matching coded segments.</div>
+    <div id="qbWarnings"></div>
+    <div id="qbError" class="qb-error" style="display:none"></div>
+    <div id="qbGroups"></div>
+  </div>
+</div>
+
+<script type="module">
+// Pure helpers — buildQueryPayload + groupApplicationsBySource — are
+// in helpers.mjs so the JS-side translation from the form to the
+// scribe.query.Query shape is unit-tested by tests/js/query-builder.test.mjs.
+// Keeping them out of this template avoids the algebra drifting
+// between the runtime path and the test path.
+import {
+  buildQueryPayload,
+  groupApplicationsBySource,
+} from "/static/js/helpers.mjs";
+
+const PROJECT_ID = {{ project_id | tojson }};
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+
+const STATE = {
+  codes: [],   // [{id, name}]
+  sources: [], // [{id, name}]
+};
+
+async function loadCodes() {
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/codes`);
+    if (!r.ok) return;
+    const data = await r.json();
+    STATE.codes = (data.codes || []).map(c => ({ id: c.id, name: c.name || "(unnamed)" }));
+    const sel = document.getElementById("qbCodes");
+    sel.innerHTML = "";
+    STATE.codes.forEach(c => {
+      const o = document.createElement("option");
+      o.value = c.id; o.textContent = c.name;
+      sel.appendChild(o);
+    });
+  } catch (_) { /* tolerate */ }
+}
+
+async function loadSources() {
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/sources`);
+    if (!r.ok) return;
+    const data = await r.json();
+    STATE.sources = (data.sources || []).map(s => ({ id: s.id, name: s.name || "(unnamed)" }));
+    const sel = document.getElementById("qbSources");
+    sel.innerHTML = "";
+    STATE.sources.forEach(s => {
+      const o = document.createElement("option");
+      o.value = s.id; o.textContent = s.name;
+      sel.appendChild(o);
+    });
+  } catch (_) { /* tolerate */ }
+}
+
+function selectedValues(elt) {
+  return Array.from(elt.selectedOptions).map(o => o.value);
+}
+
+// Read the form's selections and hand them to the helpers.mjs
+// payload builder. The helper owns the boolean-algebra translation
+// (single code → leaf, many → OR, role/labels/pids → SpeakerFilter)
+// so the runtime path matches the unit-tested shape exactly.
+function readFormPayload() {
+  return buildQueryPayload({
+    projectId: PROJECT_ID,
+    codeIds: selectedValues(document.getElementById("qbCodes")),
+    sourceIds: selectedValues(document.getElementById("qbSources")),
+    speakerRole: document.getElementById("qbSpeakerRole").value,
+  });
+}
+
+function nameForCode(cid) {
+  const c = STATE.codes.find(x => x.id === cid);
+  return c ? c.name : cid.slice(0, 8);
+}
+function nameForSource(sid) {
+  const s = STATE.sources.find(x => x.id === sid);
+  return s ? s.name : sid.slice(0, 8);
+}
+
+function renderResults(report) {
+  const summary = document.getElementById("qbSummary");
+  const warnsEl = document.getElementById("qbWarnings");
+  const groupsEl = document.getElementById("qbGroups");
+  const errEl = document.getElementById("qbError");
+  errEl.style.display = "none";
+  warnsEl.innerHTML = "";
+
+  const apps = report.applications || [];
+  summary.innerHTML = `<strong data-test-id="qb-result-count">${apps.length}</strong> of ${report.total_applications} applications matched.`;
+
+  // Per-source missing-transcript notice — researcher needs to know
+  // why an expected match didn't show up.
+  const missing = report.sources_missing_transcript || [];
+  if (missing.length) {
+    const div = document.createElement("div");
+    div.className = "qb-warning";
+    div.dataset.testId = "qb-missing-transcripts";
+    div.textContent = `${missing.length} source(s) have no transcript on disk; their applications were considered but speaker / proximity filters silently excluded them: ${missing.map(m => m.slice(0, 8)).join(", ")}.`;
+    warnsEl.appendChild(div);
+  }
+  (report.warnings || []).forEach(w => {
+    const div = document.createElement("div");
+    div.className = "qb-warning";
+    div.textContent = w;
+    warnsEl.appendChild(div);
+  });
+
+  // Group matches by source for readability — first-seen order
+  // matches the executor's input order.
+  const groups = groupApplicationsBySource(apps);
+
+  groupsEl.innerHTML = "";
+  if (!apps.length) {
+    const empty = document.createElement("div");
+    empty.className = "qb-empty";
+    empty.dataset.testId = "qb-empty";
+    empty.textContent = apps.length === 0 && report.total_applications === 0
+      ? "No coded segments in this project yet. Add applications from a source's coding view."
+      : "No applications match this query. Loosen your filters or pick different codes.";
+    groupsEl.appendChild(empty);
+    return;
+  }
+
+  Array.from(groups.entries()).forEach(([sid, list]) => {
+    const wrap = document.createElement("div");
+    wrap.className = "qb-result-group";
+    wrap.dataset.sourceId = sid;
+    const h = document.createElement("h3");
+    h.innerHTML = `<a href="/projects/${PROJECT_ID}/sources/${escapeHtml(sid)}">${escapeHtml(nameForSource(sid))}</a> <span class="hint" style="font-weight:normal">— ${list.length} match(es)</span>`;
+    wrap.appendChild(h);
+    list.forEach(a => {
+      const row = document.createElement("div");
+      row.className = "qb-result-row";
+      row.dataset.appId = a.id;
+      row.innerHTML = `
+        <span class="qb-code-pill">${escapeHtml(nameForCode(a.code_id))}</span>
+        <span class="qb-anchor">${escapeHtml(a.anchor_start_word_id || "")} → ${escapeHtml(a.anchor_end_word_id || "")}</span>
+        <a href="/projects/${PROJECT_ID}/sources/${escapeHtml(sid)}#app-${escapeHtml(a.id)}">open in coding view ↗</a>
+      `;
+      wrap.appendChild(row);
+    });
+    groupsEl.appendChild(wrap);
+  });
+}
+
+async function runQuery() {
+  const summary = document.getElementById("qbSummary");
+  const errEl = document.getElementById("qbError");
+  errEl.style.display = "none";
+  summary.textContent = "Running…";
+  document.getElementById("qbGroups").innerHTML = "";
+  document.getElementById("qbWarnings").innerHTML = "";
+
+  try {
+    const payload = readFormPayload();
+    const r = await fetch(`/api/projects/${PROJECT_ID}/queries/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: payload }),
+    });
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try {
+        const e = await r.json();
+        if (e && e.detail) msg = String(e.detail);
+      } catch (_) { /* keep msg */ }
+      errEl.textContent = `Query failed: ${msg}`;
+      errEl.style.display = "";
+      summary.textContent = "Query failed.";
+      return;
+    }
+    const report = await r.json();
+    renderResults(report);
+  } catch (e) {
+    errEl.textContent = `Query failed: ${e.message || e}`;
+    errEl.style.display = "";
+    summary.textContent = "Query failed.";
+  }
+}
+
+function resetForm() {
+  document.getElementById("qbCodes").selectedIndex = -1;
+  document.getElementById("qbSources").selectedIndex = -1;
+  document.getElementById("qbSpeakerRole").value = "";
+  document.getElementById("qbSummary").textContent =
+    "Run a query to see matching coded segments.";
+  document.getElementById("qbGroups").innerHTML = "";
+  document.getElementById("qbWarnings").innerHTML = "";
+  document.getElementById("qbError").style.display = "none";
+}
+
+document.getElementById("qbRun").addEventListener("click", runQuery);
+document.getElementById("qbReset").addEventListener("click", resetForm);
+
+(async () => {
+  await Promise.all([loadCodes(), loadSources()]);
+})();
+</script>
+{% endblock %}

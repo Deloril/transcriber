@@ -399,6 +399,16 @@
   <div class="card ph-card">
     <h3>Coded segments <span class="count" id="appCount">…</span></h3>
     <div id="appList"><div class="ph-empty">Loading…</div></div>
+    {# F3.5: link to the query builder so the data layer (the
+       applications listed here) is queryable from one click. #}
+    <div class="ph-actions">
+      <a class="btn secondary"
+         href="/projects/{{ project_id }}/queries"
+         data-test-id="ph-queries-link"
+         title="Build a code / source / speaker filter and run it across the corpus.">
+        🔎 Query corpus
+      </a>
+    </div>
   </div>
 
   <div class="card ph-card">

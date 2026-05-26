@@ -535,27 +535,21 @@ async def project_sampling_log_page(
 
 @app.get("/projects/{project_id}/queries", response_class=HTMLResponse)
 async def project_queries_page(request: Request, project_id: str) -> HTMLResponse:
-    return _render_subpage(
-        request, project_id,
-        page_kind="queries",
-        page_title="Queries",
-        description="Cross-corpus search and matrices.",
-        feature_refs=["F3.4", "F3.5", "F3.6", "F3.7"],
-        wireframe_blocks=[
-            {"heading": "Query builder", "lines": [
-                "Code filter · source filter · participant attribute · speaker filter · boolean combinator · proximity (F3.5).",
-            ]},
-            {"heading": "Saved queries", "lines": [
-                "List of named, re-runnable queries (F3.7).",
-            ]},
-            {"heading": "Matrix views", "lines": [
-                "code × source (frequency) · code × code (co-occurrence) · code × attribute (cross-tab). Export CSV/XLSX (F3.6, F6.3).",
-            ]},
-            {"heading": "Coded segment retrieval", "lines": [
-                "&quot;Show all quotes for code X grouped by participant&quot; — the most-run query (F6.2).",
-            ]},
-        ],
-    )
+    """Query builder page (F3.5).
+
+    Replaces the previous wireframe stub with a real page that lets
+    a researcher build a query (code filter + source filter + speaker
+    role filter), POST it to ``/api/projects/<pid>/queries/run``, and
+    see the matching applications inline. Saved queries (F3.7) and
+    matrix views (F3.6) live on the same page as future graduations;
+    the minimum-viable F3.5 surface ships first so the pure
+    ``scribe.query`` executor stops being unreachable from the UI.
+    """
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "queries.html", {
+        "project_id": pid,
+        "page_title": "Queries",
+    })
 
 
 @app.get("/projects/{project_id}/memos", response_class=HTMLResponse)
@@ -1957,6 +1951,118 @@ async def get_source_speaker_map_distribution_endpoint(
             segments, speaker_map
         ),
         "has_transcript": True,
+    })
+
+
+# --------------------------------------------------------------------------- #
+# Queries (F3.5) — REST surface
+#
+# scribe.query shipped the pure-Python query data model + executor
+# in ae528c2 with full unit coverage; F3.5 had no HTTP route, so the
+# only way to run a query was via curl or a Python REPL. This block
+# wires the executor through to the user-facing /projects/<pid>/queries
+# page via:
+#
+#   POST /api/projects/<pid>/queries/run
+#     Body: {"query": <Query payload>}
+#     Returns matched applications + per-source diagnostic.
+#
+# scribe.query_runtime owns the on-disk Application → query-shape dict
+# adapter; this route is a thin wrapper that resolves the segments
+# loader (the same edited.json / *.json discovery rules as the QDPX
+# exporter and the speaker-map helpers above) and routes the result
+# through the standard Application.to_dict serialiser.
+# --------------------------------------------------------------------------- #
+
+from . import query as _query  # noqa: E402  (after module-level state)
+from . import query_runtime as _query_runtime  # noqa: E402
+
+
+@app.post("/api/projects/{project_id}/queries/run")
+async def run_project_query_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    """Execute a Query against this project's corpus (F3.5).
+
+    Request body shape::
+
+        {"query": {<scribe.query.Query payload>}}
+
+    The wrapper expects the inner ``query.project_id`` to equal the
+    URL ``project_id``; mismatch lands as 400 to keep saved queries
+    from another project from silently executing here.
+
+    Returns::
+
+        {
+          "applications": [<Application.to_dict()>, ...],
+          "total_applications": <int>,
+          "sources_missing_transcript": [<sid>, ...],
+          "warnings": [<string>, ...]
+        }
+
+    Status codes:
+      * 200 — query ran (even if zero matches).
+      * 400 — invalid query payload, project_id mismatch, or any
+        :class:`ProjectValidationError` from the executor / adapter.
+      * 404 — project does not exist on disk.
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    query_payload = body.get("query")
+    if not isinstance(query_payload, dict):
+        raise HTTPException(400, "Body must include a 'query' object")
+    # Server-side: stamp project_id from the URL so a UI bug can't
+    # accidentally execute a foreign-project query (the adapter
+    # double-checks this, but a clean 400 is friendlier than the
+    # adapter's mismatch error).
+    query_payload = dict(query_payload)
+    query_payload.setdefault("project_id", project_id)
+    if query_payload.get("project_id") != project_id:
+        raise HTTPException(
+            400, "query.project_id must match the URL project_id"
+        )
+    try:
+        q = _query.Query.from_dict(query_payload)
+    except _projects.ProjectValidationError as e:
+        raise HTTPException(400, f"Invalid query: {e}")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        sources_by_id: dict[str, _sources.Source] = {}
+
+        def _segments_loader(sid: str):
+            # Mirror the QDPX / speaker-map discovery rules. Cache
+            # the source object so we hit disk once per source.
+            src = sources_by_id.get(sid)
+            if src is None:
+                try:
+                    src = _sources.load_source(_projects_root(), project_id, sid)
+                except FileNotFoundError:
+                    return None
+                except _projects.ProjectValidationError:
+                    return None
+                sources_by_id[sid] = src
+            return _load_segments_for_source_speaker_map(src)
+
+        try:
+            report = _query_runtime.run_query_against_project(
+                _projects_root(), project_id, q,
+                segments_loader=_segments_loader,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+    return JSONResponse({
+        "applications": [a.to_dict() for a in report.matches],
+        "total_applications": report.total_applications,
+        "sources_missing_transcript": list(report.sources_missing_transcript),
+        "warnings": list(report.warnings),
     })
 
 

@@ -2387,3 +2387,109 @@ export function formatProvenanceHtml(d) {
   parts.push("</div>");
   return parts.join("");
 }
+
+
+// ---------- Query builder (F3.5) ----------
+
+// Map the query-builder form's selections to a `scribe.query.Query`
+// payload. Lives in helpers (not inline in the template) so the
+// translation layer is unit-testable and so any other surface
+// (saved-queries page F3.7, matrix views F3.6) can build the same
+// shape without re-implementing the boolean algebra.
+//
+// Inputs:
+//   * projectId        — required, 12-hex.
+//   * codeIds          — array of 12-hex code ids; multi-select.
+//                        zero    → no codes filter.
+//                        one     → leaf CodeExpr ({op: "code", code_id}).
+//                        many    → "or" combinator over leaves.
+//                        ("and" / "not" combinators belong to a future
+//                        UI; this helper exposes only OR for now,
+//                        matching the multi-select control's mental
+//                        model.)
+//   * sourceIds        — array of 12-hex source ids.
+//   * speakerRole      — empty string or one of SPEAKER_ROLES.
+//   * speakerLabels    — optional array; non-empty appends to
+//                        the SpeakerFilter's labels list.
+//   * speakerParticipantIds — optional array; non-empty appends
+//                        to the SpeakerFilter's participant_ids list.
+//   * proximity        — optional object {scope, requiredCodeIds, maxGap};
+//                        omitted when scope is empty / requiredCodeIds is empty.
+//
+// Returns a plain object suitable for JSON.stringify into the body
+// of `POST /api/projects/<pid>/queries/run` under the `query` key.
+export function buildQueryPayload({
+  projectId,
+  codeIds = [],
+  sourceIds = [],
+  speakerRole = "",
+  speakerLabels = [],
+  speakerParticipantIds = [],
+  proximity = null,
+} = {}) {
+  if (!projectId) {
+    throw new Error("buildQueryPayload: projectId is required");
+  }
+  const out = { project_id: projectId };
+
+  // Sources filter — only emitted when at least one id is selected.
+  if (sourceIds && sourceIds.length) {
+    out.sources = { source_ids: sourceIds.slice() };
+  }
+
+  // Speaker filter — combine role + labels + participant_ids into
+  // one SpeakerFilter object. The pure executor matches a label /
+  // role / participant_id with OR semantics across the three lists.
+  const roles = speakerRole ? [speakerRole] : [];
+  if (roles.length || speakerLabels.length || speakerParticipantIds.length) {
+    out.speakers = {
+      roles,
+      labels: speakerLabels.slice(),
+      participant_ids: speakerParticipantIds.slice(),
+    };
+  }
+
+  // Codes filter — single id → leaf, many → OR combinator.
+  if (codeIds && codeIds.length === 1) {
+    out.codes = { expr: { op: "code", code_id: codeIds[0] } };
+  } else if (codeIds && codeIds.length > 1) {
+    out.codes = {
+      expr: {
+        op: "or",
+        children: codeIds.map(cid => ({ op: "code", code_id: cid })),
+      },
+    };
+  }
+
+  // Proximity — emitted only when both scope + required_code_ids
+  // are non-trivial. ProximityFilter.is_empty() returns True when
+  // required_code_ids is empty, so we mirror that here.
+  if (proximity
+      && proximity.scope
+      && Array.isArray(proximity.requiredCodeIds)
+      && proximity.requiredCodeIds.length) {
+    out.proximity = {
+      scope: proximity.scope,
+      required_code_ids: proximity.requiredCodeIds.slice(),
+      max_gap: typeof proximity.maxGap === "number" ? proximity.maxGap : 0,
+    };
+  }
+
+  return out;
+}
+
+// Group a flat list of applications by source_id. Used by the
+// queries page to render results grouped by source. Returns a
+// Map<sid, Array<app>> preserving the input order both within
+// groups and across groups (first-seen source comes first).
+export function groupApplicationsBySource(apps) {
+  const out = new Map();
+  if (!Array.isArray(apps)) return out;
+  for (const a of apps) {
+    if (!a || typeof a !== "object") continue;
+    const sid = a.source_id || "";
+    if (!out.has(sid)) out.set(sid, []);
+    out.get(sid).push(a);
+  }
+  return out;
+}

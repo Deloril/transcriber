@@ -1,8 +1,11 @@
 {#
-  Generic subpage for sources / codebook / queries / memos / ai / audit /
-  settings under a project. Each is a placeholder wireframe today; the
-  loop will replace the body block per-page as the corresponding F-feature
-  graduates from "data layer done" to "UI done".
+  Generic subpage for sibling routes (memos / ai / audit) that haven't
+  yet graduated from "data layer done" to "UI done". The queries
+  surface (F3.5), sources, codebook, and settings are no longer
+  rendered here — they own their own templates.
+
+  The loop will replace the body block per-page as each remaining
+  F-feature graduates.
 
   Variables passed in:
     project_id       — required
@@ -26,11 +29,12 @@
     <a class="btn" href="/projects/{{ project_id }}/sources/add">+ Add source</a>
   {% elif page_kind == "codebook" %}
     <a class="btn" href="#" onclick="alert('Stub: F2.x'); return false;">+ New code</a>
-  {% elif page_kind == "queries" %}
-    <a class="btn" href="#" onclick="alert('Stub: F3.5'); return false;">+ New query</a>
   {% elif page_kind == "memos" %}
     <a class="btn" href="#" onclick="alert('Stub: F5.1'); return false;">+ New memo</a>
   {% endif %}
+  {# F3.5 graduated to its own template (queries.html); the
+     "+ New query" stub used to live here and now lives in the
+     real query builder as "Run query". #}
 {% endblock %}
 
 {% block body %}
