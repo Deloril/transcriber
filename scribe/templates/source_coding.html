@@ -891,18 +891,31 @@ document.addEventListener("mousedown", (e) => {
   hidePopover();
 });
 
+// F2.5: read the active coder id from localStorage (set by the coders
+// list page or the coder detail's "Use as active coder" button).
+// When set the new application is attributed to that coder; otherwise
+// the server falls back to the project's auto-created default coder.
+function getActiveCoderId() {
+  try {
+    return localStorage.getItem(`scribe.active_coder_id.${PROJECT_ID}`) || null;
+  } catch (_) { return null; }
+}
+
 async function applyCode(codeId) {
   if (!CURRENT_SELECTION) return;
   try {
+    const payload = {
+      code_id: codeId,
+      source_id: SOURCE_ID,
+      anchor_start_word_id: CURRENT_SELECTION.startWordId,
+      anchor_end_word_id: CURRENT_SELECTION.endWordId,
+    };
+    const activeCoderId = getActiveCoderId();
+    if (activeCoderId) payload.coder_id = activeCoderId;
     const r = await fetch(`/api/projects/${PROJECT_ID}/applications`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        code_id: codeId,
-        source_id: SOURCE_ID,
-        anchor_start_word_id: CURRENT_SELECTION.startWordId,
-        anchor_end_word_id: CURRENT_SELECTION.endWordId,
-      }),
+      body: JSON.stringify(payload),
     });
     if (!r.ok) {
       const detail = await r.json().catch(() => ({}));

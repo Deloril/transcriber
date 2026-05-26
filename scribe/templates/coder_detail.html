@@ -1,0 +1,187 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Coder{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}/coders">← Coders</a>
+{% endblock %}
+
+{% block extra_styles %}
+  .field-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .field-input, select.field-input {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+    font: inherit; font-size: 14px;
+  }
+  .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 600px) { .field-row { grid-template-columns: 1fr; } }
+  .danger-zone {
+    border: 1px dashed var(--err);
+    padding: 14px 18px;
+    border-radius: 10px;
+  }
+  .danger-zone .btn.danger {
+    background: transparent; color: var(--err);
+    border: 1px solid var(--err);
+  }
+  .danger-zone .btn.danger:hover { background: var(--err); color: var(--bg); }
+{% endblock %}
+
+{% block body %}
+<div id="loading" class="card hint">Loading coder…</div>
+<div id="errorState" class="card" style="display:none;color:var(--err)"></div>
+
+<div id="coderCard" class="card" style="display:none">
+  <form id="editCoderForm" style="margin-top:4px">
+    <div style="margin-bottom:12px">
+      <label for="ed-name" class="field-label">Name <span style="color:var(--err)">*</span></label>
+      <input id="ed-name" type="text" required maxlength="200" class="field-input">
+    </div>
+
+    <div class="field-row" style="margin-bottom:12px">
+      <div>
+        <label for="ed-role" class="field-label">Role</label>
+        <select id="ed-role" class="field-input">
+          <option value="researcher">researcher</option>
+          <option value="second_coder">second_coder</option>
+          <option value="reviewer">reviewer</option>
+          <option value="trainee">trainee</option>
+          <option value="other">other</option>
+        </select>
+      </div>
+      <div>
+        <label for="ed-status" class="field-label">Status</label>
+        <select id="ed-status" class="field-input">
+          <option value="active">active</option>
+          <option value="inactive">inactive</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field-row" style="margin-bottom:12px">
+      <div>
+        <label for="ed-email" class="field-label">Email</label>
+        <input id="ed-email" type="email" maxlength="320" class="field-input">
+      </div>
+      <div>
+        <label for="ed-colour" class="field-label">Highlight colour</label>
+        <input id="ed-colour" type="color" class="field-input">
+      </div>
+    </div>
+
+    <div style="margin-bottom:12px">
+      <label for="ed-notes" class="field-label">Notes</label>
+      <textarea id="ed-notes" rows="3" maxlength="4000" class="field-input"></textarea>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px">
+      <button id="ed-submit" class="btn" type="submit">Save changes</button>
+      <button id="set-active-btn" class="btn secondary" type="button">Use as active coder</button>
+      <span id="ed-msg" class="hint" role="alert" aria-live="polite"></span>
+    </div>
+  </form>
+</div>
+
+<div id="dangerCard" class="card danger-zone" style="display:none;margin-top:14px">
+  <h3 style="margin-top:0;color:var(--err)">Danger zone</h3>
+  <p class="hint">Deleting a coder removes them from the picker but does <strong>not</strong> orphan or remove their applications: the audit trail keeps the recorded coder id even after the coder record is gone.</p>
+  <button id="deleteBtn" class="btn danger" type="button">Delete coder</button>
+</div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+const CODER_ID = {{ coder_id | tojson }};
+const ACTIVE_KEY = `scribe.active_coder_id.${PROJECT_ID}`;
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+function setMsg(el, text, isError) {
+  el.textContent = text;
+  el.style.color = isError ? "var(--err)" : "var(--ok)";
+}
+
+async function load() {
+  const loading = document.getElementById("loading");
+  const card = document.getElementById("coderCard");
+  const dangerCard = document.getElementById("dangerCard");
+  const error = document.getElementById("errorState");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/coders/${CODER_ID}`);
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const c = await r.json();
+    loading.style.display = "none";
+    document.getElementById("ed-name").value = c.name || "";
+    document.getElementById("ed-role").value = c.role || "researcher";
+    document.getElementById("ed-status").value = c.status || "active";
+    document.getElementById("ed-email").value = c.email || "";
+    document.getElementById("ed-colour").value = c.colour || "#9c8ad6";
+    document.getElementById("ed-notes").value = c.notes || "";
+    card.style.display = "";
+    dangerCard.style.display = "";
+  } catch (e) {
+    loading.style.display = "none";
+    error.textContent = `Couldn't load coder: ${e.message}`;
+    error.style.display = "";
+  }
+}
+
+document.getElementById("editCoderForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById("ed-msg");
+  const submit = document.getElementById("ed-submit");
+  const payload = {
+    name: document.getElementById("ed-name").value.trim(),
+    role: document.getElementById("ed-role").value,
+    status: document.getElementById("ed-status").value,
+    email: document.getElementById("ed-email").value.trim(),
+    colour: document.getElementById("ed-colour").value.trim(),
+    notes: document.getElementById("ed-notes").value.trim(),
+  };
+  submit.disabled = true;
+  setMsg(msg, "Saving…", false);
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/coders/${CODER_ID}`, {
+      method: "PATCH",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    setMsg(msg, "Saved", false);
+  } catch (err) {
+    setMsg(msg, `Couldn't save: ${err.message}`, true);
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+document.getElementById("set-active-btn").addEventListener("click", () => {
+  try { localStorage.setItem(ACTIVE_KEY, CODER_ID); } catch (_) {}
+  setMsg(document.getElementById("ed-msg"), "Set as active coder for this project", false);
+});
+
+document.getElementById("deleteBtn").addEventListener("click", async () => {
+  if (!confirm("Delete this coder? Their existing applications stay (the audit trail keeps the id), but the coder record itself is removed.")) return;
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/coders/${CODER_ID}`, { method: "DELETE" });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    window.location.href = `/projects/${PROJECT_ID}/coders`;
+  } catch (err) {
+    setMsg(document.getElementById("ed-msg"), `Couldn't delete: ${err.message}`, true);
+  }
+});
+
+load();
+</script>
+{% endblock %}

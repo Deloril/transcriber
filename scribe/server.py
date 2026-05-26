@@ -417,6 +417,76 @@ async def project_participant_detail_page(
         "page_title": "Participant",
     })
 
+# --------------------------------------------------------------------------- #
+# Coders (F2.5) — UI surface
+#
+# Pages backing the F2.5 multi-coder mode. The data layer (Coder
+# entity + ICR statistics) shipped in cae5570 with no HTTP surface;
+# the routes here let a researcher list, create, and edit coders, and
+# the /icr page lets them compare two coders' applications via
+# Cohen's kappa.
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/projects/{project_id}/coders", response_class=HTMLResponse)
+async def project_coders_page(
+    request: Request, project_id: str
+) -> HTMLResponse:
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "coders_list.html", {
+        "project_id": pid,
+        "page_title": "Coders",
+    })
+
+
+@app.get("/projects/{project_id}/coders/new", response_class=HTMLResponse)
+async def project_coder_new_page(
+    request: Request, project_id: str
+) -> HTMLResponse:
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "coder_new.html", {
+        "project_id": pid,
+        "page_title": "New coder",
+    })
+
+
+@app.get(
+    "/projects/{project_id}/coders/{coder_id}",
+    response_class=HTMLResponse,
+)
+async def project_coder_detail_page(
+    request: Request, project_id: str, coder_id: str
+) -> HTMLResponse:
+    pid = _project_id_or_404(project_id)
+    # Same shape check as the API. Don't 404 on missing — the page
+    # shows a friendly error so the user can navigate back.
+    if not _coders.CODER_ID_RE.match(coder_id):
+        raise HTTPException(400, "Invalid coder id")
+    return templates.TemplateResponse(request, "coder_detail.html", {
+        "project_id": pid,
+        "coder_id": coder_id,
+        "page_title": "Coder",
+    })
+
+
+@app.get("/projects/{project_id}/icr", response_class=HTMLResponse)
+async def project_icr_page(
+    request: Request, project_id: str
+) -> HTMLResponse:
+    """ICR comparison view (F2.5).
+
+    Picks any two coders + an optional source filter; renders Cohen's
+    kappa overall and per code, with the Landis & Koch interpretation
+    label and per-code application counts. The page consumes
+    ``GET /api/projects/<pid>/icr`` (above).
+    """
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "icr.html", {
+        "project_id": pid,
+        "page_title": "Inter-coder reliability",
+    })
+
+
 @app.get("/projects/{project_id}/sampling-log", response_class=HTMLResponse)
 async def project_sampling_log_page(
     request: Request, project_id: str
@@ -1279,6 +1349,311 @@ async def delete_participant_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Coders (F2.5, multi-coder mode) — REST surface
+#
+# The pure data layer (``scribe/coders.py``) and the ICR statistics
+# (``scribe/icr.py``) shipped in cae5570 with 135 passing tests but had
+# no HTTP surface — researchers couldn't add a second coder, set the
+# active coder, or run an inter-coder reliability comparison from the
+# UI.
+#
+# These endpoints close that gap: full CRUD on coders, plus an ICR
+# computation route that returns Cohen's kappa per code (and overall)
+# for any two coders. The ``/api/projects/<pid>/applications`` POST
+# already accepts an optional ``coder_id`` field (see above) so the
+# coding view can attribute new applications to whichever coder is
+# active in the user's session.
+# --------------------------------------------------------------------------- #
+
+from . import coders as _coders  # noqa: E402
+from . import applications as _applications  # noqa: E402
+from . import codes as _codes  # noqa: E402
+
+
+def _check_coder_id(coder_id: str) -> None:
+    if not _coders.CODER_ID_RE.match(coder_id):
+        raise HTTPException(400, "Invalid coder id")
+
+
+@app.get("/api/projects/{project_id}/coders")
+async def list_coders_endpoint(project_id: str) -> JSONResponse:
+    """List all coders in a project (F2.5).
+
+    Returns coders ordered by ``created_at`` ascending — the order in
+    which the team was assembled. The default ``"You"`` coder created
+    on first application is always present.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        out = [
+            c.to_dict()
+            for c in _coders.list_coders(_projects_root(), project_id)
+        ]
+    return JSONResponse({"coders": out})
+
+
+@app.post("/api/projects/{project_id}/coders")
+async def create_coder_endpoint(
+    project_id: str, request: Request
+) -> JSONResponse:
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            coder = _coders.Coder.new(
+                project_id=project_id,
+                name=str(body.get("name", "")),
+                role=str(body.get("role", "researcher") or "researcher"),
+                email=str(body.get("email", "") or ""),
+                colour=str(body.get("colour", "") or ""),
+                status=str(body.get("status", "active") or "active"),
+                notes=str(body.get("notes", "") or ""),
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid coder payload: {e}")
+        _coders.save_coder(_projects_root(), coder)
+    return JSONResponse(coder.to_dict(), status_code=201)
+
+
+@app.get("/api/projects/{project_id}/coders/{coder_id}")
+async def get_coder_endpoint(
+    project_id: str, coder_id: str
+) -> JSONResponse:
+    _check_project_id(project_id)
+    _check_coder_id(coder_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            coder = _coders.load_coder(
+                _projects_root(), project_id, coder_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Coder not found")
+    return JSONResponse(coder.to_dict())
+
+
+@app.patch("/api/projects/{project_id}/coders/{coder_id}")
+async def patch_coder_endpoint(
+    project_id: str, coder_id: str, request: Request
+) -> JSONResponse:
+    _check_project_id(project_id)
+    _check_coder_id(coder_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            coder = _coders.load_coder(
+                _projects_root(), project_id, coder_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Coder not found")
+        try:
+            coder.apply_update(body)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        _coders.save_coder(_projects_root(), coder)
+    return JSONResponse(coder.to_dict())
+
+
+@app.delete("/api/projects/{project_id}/coders/{coder_id}")
+async def delete_coder_endpoint(
+    project_id: str, coder_id: str
+) -> JSONResponse:
+    """Delete a coder.
+
+    Per the F2.5 contract in :mod:`scribe.coders`, deleting a coder
+    does **not** retroactively orphan their applications: the
+    ``coder_id`` recorded on each application is a stable string
+    reference, not a foreign key. The audit trail keeps the id even
+    after the Coder record is gone.
+    """
+    _check_project_id(project_id)
+    _check_coder_id(coder_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        ok = _coders.delete_coder(
+            _projects_root(), project_id, coder_id
+        )
+    if not ok:
+        raise HTTPException(404, "Coder not found")
+    return JSONResponse({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
+# F2.5 — Inter-coder reliability (Cohen's kappa) computation surface
+#
+# Given two coder ids the endpoint returns:
+#   * overall Cohen's kappa across every (source, code) the two coders
+#     touched between them,
+#   * per-code kappa (binary "applied this code to item I?" decisions),
+#   * per-code Landis & Koch interpretation labels,
+#   * agreement counts (items both applied / only A / only B / neither).
+# The ICR view template consumes this JSON to render the comparison
+# table.
+# --------------------------------------------------------------------------- #
+
+
+from . import icr as _icr  # noqa: E402
+
+
+def _icr_items_set(
+    apps_a: "list[_applications.Application]",
+    apps_b: "list[_applications.Application]",
+) -> tuple[set[tuple[str, str]], dict[tuple[str, str], set[str]],
+           dict[tuple[str, str], set[str]]]:
+    """Bucket two coders' applications into per-item code sets.
+
+    The F2.5 unit of comparison is the smallest re-anchorable span
+    that *either* coder marked. F4.1 anchors applications to
+    ``(source_id, anchor_start_word_id, anchor_end_word_id)`` so we
+    use the (source_id, anchor_start_word_id) tuple as the item id —
+    exactly the shape :func:`scribe.icr.per_code_kappa` expects.
+    """
+    items: set[tuple[str, str]] = set()
+    coder_a_map: dict[tuple[str, str], set[str]] = {}
+    coder_b_map: dict[tuple[str, str], set[str]] = {}
+    for a in apps_a:
+        key = (a.source_id, a.anchor_start_word_id)
+        items.add(key)
+        coder_a_map.setdefault(key, set()).add(a.code_id)
+    for a in apps_b:
+        key = (a.source_id, a.anchor_start_word_id)
+        items.add(key)
+        coder_b_map.setdefault(key, set()).add(a.code_id)
+    return items, coder_a_map, coder_b_map
+
+
+@app.get("/api/projects/{project_id}/icr")
+async def icr_endpoint(
+    project_id: str,
+    coder_a: str,
+    coder_b: str,
+    source_id: str = "",
+) -> JSONResponse:
+    """Compute Cohen's kappa for ``coder_a`` vs ``coder_b`` (F2.5).
+
+    Optional ``source_id`` narrows the comparison to a single source.
+    Returns:
+
+        {
+          "coder_a": {id, name},
+          "coder_b": {id, name},
+          "n_items": int,            # union of items either touched
+          "n_both_applied_any": int, # both applied at least one code
+          "overall_kappa": float,    # collapsing all codes per item to a "matches" boolean
+          "overall_label": str,      # Landis & Koch
+          "per_code": [
+            {"code_id": ..., "code_name": ..., "kappa": ..., "label": ...,
+             "n_a_applied": ..., "n_b_applied": ...},
+            ...
+          ],
+        }
+
+    400 on invalid coder ids; 404 if either coder doesn't exist (or
+    the project doesn't); 200 on success including the empty case
+    (n_items=0, kappa=1.0).
+    """
+    _check_project_id(project_id)
+    _check_coder_id(coder_a)
+    _check_coder_id(coder_b)
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            a_coder = _coders.load_coder(
+                _projects_root(), project_id, coder_a
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Coder A not found")
+        try:
+            b_coder = _coders.load_coder(
+                _projects_root(), project_id, coder_b
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Coder B not found")
+
+        try:
+            apps_a = _applications.list_applications(
+                _projects_root(), project_id,
+                source_id=source_id or None,
+                coder_id=coder_a,
+            )
+            apps_b = _applications.list_applications(
+                _projects_root(), project_id,
+                source_id=source_id or None,
+                coder_id=coder_b,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+        codes = _codes.list_codes(_projects_root(), project_id)
+
+    name_by_code_id = {c.id: c.name for c in codes}
+    items, a_map, b_map = _icr_items_set(apps_a, apps_b)
+
+    per_code = _icr.per_code_kappa(a_map, b_map, items=sorted(items))
+
+    # Overall kappa: for each item, take the *set* of codes each coder
+    # applied. Two coders agree on an item iff their code sets are
+    # equal. Treat the equal/unequal flag as a single boolean label and
+    # use Cohen's kappa over those booleans.
+    a_labels = []
+    b_labels = []
+    for it in sorted(items):
+        # Sort the code-set so the label is deterministic.
+        a_labels.append(tuple(sorted(a_map.get(it, set()))))
+        b_labels.append(tuple(sorted(b_map.get(it, set()))))
+    overall_kappa = _icr.cohens_kappa(a_labels, b_labels)
+    overall_label = _icr.interpret_kappa(overall_kappa)
+
+    n_both_applied_any = sum(
+        1 for it in items
+        if a_map.get(it) and b_map.get(it)
+    )
+
+    per_code_out = []
+    for code_id in sorted(per_code.keys()):
+        kappa = per_code[code_id]
+        n_a = sum(1 for it in items if code_id in a_map.get(it, set()))
+        n_b = sum(1 for it in items if code_id in b_map.get(it, set()))
+        per_code_out.append({
+            "code_id": code_id,
+            "code_name": name_by_code_id.get(code_id, code_id),
+            "kappa": kappa,
+            "label": _icr.interpret_kappa(kappa),
+            "n_a_applied": n_a,
+            "n_b_applied": n_b,
+        })
+
+    return JSONResponse({
+        "coder_a": {"id": a_coder.id, "name": a_coder.name},
+        "coder_b": {"id": b_coder.id, "name": b_coder.name},
+        "source_id": source_id or None,
+        "n_items": len(items),
+        "n_both_applied_any": n_both_applied_any,
+        "overall_kappa": overall_kappa,
+        "overall_label": overall_label,
+        "per_code": per_code_out,
+    })
+
+
+# --------------------------------------------------------------------------- #
 # Sampling log (F1.4) — methodologically-transparent record of which
 # source / participant was added (or planned, or removed, or just
 # noted) at what time, under what sampling strategy, with what
@@ -2022,19 +2397,26 @@ async def unlock_codebook_endpoint(
 
 @app.get("/api/projects/{project_id}/applications")
 async def list_applications_endpoint(
-    project_id: str, source_id: str = "", code_id: str = ""
+    project_id: str, source_id: str = "", code_id: str = "",
+    coder_id: str = "",
 ) -> JSONResponse:
-    """List applications. Optional ``source_id`` and ``code_id`` query
-    parameters narrow the result, which is what the source-coding view
-    uses to render only this source's applications."""
+    """List applications. Optional ``source_id`` / ``code_id`` /
+    ``coder_id`` query parameters narrow the result. The source-coding
+    view uses ``source_id`` to render only this source's applications;
+    the F2.5 ICR view uses ``coder_id`` (and source filter) to compare
+    two coders' work on the same items."""
     _check_project_id(project_id)
     with PROJECTS_LOCK:
         _project_must_exist(project_id)
-        all_apps = _applications.list_applications(
-            _projects_root(), project_id,
-            source_id=source_id or None,
-            code_id=code_id or None,
-        )
+        try:
+            all_apps = _applications.list_applications(
+                _projects_root(), project_id,
+                source_id=source_id or None,
+                code_id=code_id or None,
+                coder_id=coder_id or None,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
     return JSONResponse({"applications": [a.to_dict() for a in all_apps]})
 
 
@@ -2072,7 +2454,23 @@ async def create_application_endpoint(project_id: str, request: Request) -> JSON
                 _projects_root(), code, change_note="initial-on-demand",
             )
 
-        coder_id = _ensure_default_coder(project_id)
+        # F2.5 multi-coder mode: an explicit ``coder_id`` in the body
+        # routes the application to a specific Coder. If omitted (the
+        # single-coder default), fall back to the project's default
+        # coder. Validate the supplied id shape *and* existence so a
+        # caller can't smuggle a foreign coder onto an application.
+        explicit_coder_id = body.get("coder_id")
+        if explicit_coder_id:
+            cid = str(explicit_coder_id)
+            if not _coders.CODER_ID_RE.match(cid):
+                raise HTTPException(400, "Invalid coder_id")
+            try:
+                _coders.load_coder(_projects_root(), project_id, cid)
+            except FileNotFoundError:
+                raise HTTPException(404, "Coder not found")
+            coder_id = cid
+        else:
+            coder_id = _ensure_default_coder(project_id)
 
         try:
             app_obj = _applications.Application.new(

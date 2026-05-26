@@ -1,0 +1,124 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}New coder{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}/coders">← Coders</a>
+{% endblock %}
+
+{% block extra_styles %}
+  .field-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .field-input, select.field-input {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+    font: inherit; font-size: 14px;
+  }
+  .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 600px) { .field-row { grid-template-columns: 1fr; } }
+{% endblock %}
+
+{% block body %}
+<div class="card">
+  <form id="newCoderForm" style="margin-top:4px">
+    <div style="margin-bottom:12px">
+      <label for="nc-name" class="field-label">
+        Name <span style="color:var(--err)">*</span>
+        <span class="hint" style="margin-left:6px">— display label ("Luke", "Coder B", "Reviewer 1")</span>
+      </label>
+      <input id="nc-name" type="text" required maxlength="200"
+             class="field-input"
+             placeholder="Luke">
+    </div>
+
+    <div class="field-row" style="margin-bottom:12px">
+      <div>
+        <label for="nc-role" class="field-label">Role</label>
+        <select id="nc-role" class="field-input">
+          <option value="researcher">researcher</option>
+          <option value="second_coder">second_coder</option>
+          <option value="reviewer">reviewer</option>
+          <option value="trainee">trainee</option>
+          <option value="other">other</option>
+        </select>
+      </div>
+      <div>
+        <label for="nc-status" class="field-label">Status</label>
+        <select id="nc-status" class="field-input">
+          <option value="active">active</option>
+          <option value="inactive">inactive</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field-row" style="margin-bottom:12px">
+      <div>
+        <label for="nc-email" class="field-label">Email <span class="hint">(optional)</span></label>
+        <input id="nc-email" type="email" maxlength="320"
+               class="field-input"
+               placeholder="luke@example.org">
+      </div>
+      <div>
+        <label for="nc-colour" class="field-label">Highlight colour <span class="hint">(optional)</span></label>
+        <input id="nc-colour" type="color" class="field-input" value="#9c8ad6">
+      </div>
+    </div>
+
+    <div style="margin-bottom:12px">
+      <label for="nc-notes" class="field-label">Notes <span class="hint">(optional — e.g. "trained on initial codebook 2026-04-12")</span></label>
+      <textarea id="nc-notes" rows="3" maxlength="4000"
+                class="field-input"
+                placeholder="Anything worth recording about this coder."></textarea>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px">
+      <button id="nc-submit" class="btn" type="submit">Create coder</button>
+      <a class="btn secondary" href="/projects/{{ project_id }}/coders">Cancel</a>
+      <span id="nc-msg" class="hint" role="alert" aria-live="polite"></span>
+    </div>
+  </form>
+</div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+const form = document.getElementById("newCoderForm");
+const submit = document.getElementById("nc-submit");
+const msg = document.getElementById("nc-msg");
+
+function setMsg(text, isError) {
+  msg.textContent = text;
+  msg.style.color = isError ? "var(--err)" : "var(--ok)";
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = document.getElementById("nc-name").value.trim();
+  if (!name) { setMsg("Name is required", true); return; }
+  const payload = {
+    name,
+    role: document.getElementById("nc-role").value,
+    status: document.getElementById("nc-status").value,
+    email: document.getElementById("nc-email").value.trim(),
+    colour: document.getElementById("nc-colour").value.trim(),
+    notes: document.getElementById("nc-notes").value.trim(),
+  };
+  submit.disabled = true;
+  setMsg("Creating…", false);
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/coders`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const coder = await r.json();
+    window.location.href = `/projects/${PROJECT_ID}/coders/${coder.id}`;
+  } catch (err) {
+    setMsg(`Couldn't create coder: ${err.message}`, true);
+    submit.disabled = false;
+  }
+});
+</script>
+{% endblock %}

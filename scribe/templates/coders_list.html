@@ -1,0 +1,174 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Coders{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/icr">📊 Inter-coder reliability</a>
+  <a class="btn" href="/projects/{{ project_id }}/coders/new">+ New coder</a>
+{% endblock %}
+
+{% block subtitle_block %}
+  <span class="sub">F2.5 — every application carries a <code>coder_id</code>; multi-coder mode lets you compare two coders' work and compute Cohen's kappa.</span>
+{% endblock %}
+
+{% block extra_styles %}
+  table.coders {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  table.coders thead th {
+    text-align: left; font-weight: 600; font-size: 11px;
+    color: var(--muted); text-transform: uppercase;
+    letter-spacing: .04em; padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+  table.coders tbody td {
+    padding: 11px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  table.coders tbody tr:hover { background: var(--accent-soft); }
+  .role-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .swatch {
+    display: inline-block; width: 10px; height: 10px;
+    border-radius: 50%; margin-right: 6px;
+    border: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  .status-inactive { color: var(--muted); font-style: italic; }
+  .active-coder-bar {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
+    font-size: 13px; display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap;
+  }
+{% endblock %}
+
+{% block body %}
+<div id="activeBar" class="active-coder-bar" style="display:none">
+  <strong>Active coder:</strong>
+  <span id="activeName" class="hint">(loading)</span>
+  <span class="hint" style="margin-left:auto">New applications will be attributed to this coder.</span>
+</div>
+
+<div id="codersCard" class="card" style="display:none">
+  <table class="coders">
+    <thead><tr>
+      <th>Name</th>
+      <th>Role</th>
+      <th>Status</th>
+      <th>Email</th>
+      <th>Active</th>
+      <th>Added</th>
+      <th></th>
+    </tr></thead>
+    <tbody id="codersBody"></tbody>
+  </table>
+</div>
+
+<div id="loading" class="card hint">Loading coders…</div>
+
+<div id="emptyState" class="empty card" style="display:none">
+  <h3>No coders yet</h3>
+  <p>The default coder ("You") is created automatically the first time you apply a code. Add a second coder to enable inter-coder reliability comparisons (Cohen's kappa).</p>
+  <a class="btn" href="/projects/{{ project_id }}/coders/new">+ Add a coder</a>
+</div>
+
+<div id="errorState" class="card" style="display:none;color:var(--err)"></div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+const ACTIVE_KEY = `scribe.active_coder_id.${PROJECT_ID}`;
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+function fmtDate(s) {
+  if (!s) return "—";
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  } catch (_) { return s; }
+}
+
+function getActiveCoderId() {
+  try { return localStorage.getItem(ACTIVE_KEY) || null; } catch (_) { return null; }
+}
+function setActiveCoderId(id) {
+  try { localStorage.setItem(ACTIVE_KEY, id); } catch (_) {}
+}
+
+async function load() {
+  const loading = document.getElementById("loading");
+  const card = document.getElementById("codersCard");
+  const empty = document.getElementById("emptyState");
+  const error = document.getElementById("errorState");
+  const activeBar = document.getElementById("activeBar");
+  const activeName = document.getElementById("activeName");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/coders`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const list = data.coders || [];
+    loading.style.display = "none";
+    if (!list.length) { empty.style.display = ""; return; }
+
+    let activeId = getActiveCoderId();
+    if (!activeId || !list.find(c => c.id === activeId)) {
+      activeId = list[0].id;
+      setActiveCoderId(activeId);
+    }
+    const active = list.find(c => c.id === activeId);
+    if (active) {
+      activeName.textContent = active.name;
+      activeBar.style.display = "";
+    }
+
+    const body = document.getElementById("codersBody");
+    list.forEach(c => {
+      const tr = document.createElement("tr");
+      const id = escapeHtml(c.id);
+      const isActive = c.id === activeId;
+      const role = c.role || "researcher";
+      const status = c.status || "active";
+      const swatch = c.colour ? `<span class="swatch" style="background:${escapeHtml(c.colour)}"></span>` : "";
+      tr.innerHTML = `
+        <td>${swatch}<a href="/projects/${PROJECT_ID}/coders/${id}"><strong>${escapeHtml(c.name || "(unnamed)")}</strong></a></td>
+        <td><span class="role-pill">${escapeHtml(role)}</span></td>
+        <td class="${status === 'inactive' ? 'status-inactive' : ''}">${escapeHtml(status)}</td>
+        <td class="hint">${escapeHtml(c.email || "—")}</td>
+        <td>${isActive ? '<strong>active</strong>' : `<button data-id="${id}" class="set-active btn secondary" style="font-size:11px;padding:4px 10px">Use as active</button>`}</td>
+        <td class="hint">${fmtDate(c.created_at)}</td>
+        <td><a class="btn secondary" href="/projects/${PROJECT_ID}/coders/${id}">Open</a></td>
+      `;
+      body.appendChild(tr);
+    });
+    body.querySelectorAll(".set-active").forEach(btn => {
+      btn.addEventListener("click", (ev) => {
+        setActiveCoderId(ev.currentTarget.dataset.id);
+        window.location.reload();
+      });
+    });
+    card.style.display = "";
+  } catch (e) {
+    loading.style.display = "none";
+    error.textContent = `Couldn't load coders: ${e.message}`;
+    error.style.display = "";
+  }
+}
+load();
+</script>
+{% endblock %}

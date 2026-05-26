@@ -417,6 +417,19 @@
       <a class="btn secondary" href="/projects/{{ project_id }}/sampling-log">View log</a>
     </div>
   </div>
+
+  {# F2.5: Coders snapshot — multi-coder mode + ICR (Cohen's kappa).
+     Pure data layer shipped earlier; this card is the entry into the
+     /projects/<pid>/coders + /projects/<pid>/icr surface. #}
+  <div class="card ph-card">
+    <h3>Coders <span class="count" id="coderCount">…</span></h3>
+    <div id="coderList"><div class="ph-empty">Loading…</div></div>
+    <div class="ph-actions">
+      <a class="btn" href="/projects/{{ project_id }}/coders/new">+ New coder</a>
+      <a class="btn secondary" href="/projects/{{ project_id }}/coders">View all</a>
+      <a class="btn secondary" href="/projects/{{ project_id }}/icr">📊 ICR</a>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
@@ -729,11 +742,38 @@ function renderHero(activeMovement, ctx) {
   ).join("");
 }
 
+async function loadCoders() {
+  const list = document.getElementById("coderList");
+  const count = document.getElementById("coderCount");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/coders`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const arr = data.coders || [];
+    count.textContent = arr.length;
+    if (!arr.length) {
+      list.innerHTML = `<div class="ph-empty">No coders yet — added on first application. <a href="/projects/${PROJECT_ID}/coders/new">Add a second coder →</a></div>`;
+      return;
+    }
+    const top = arr.slice(0, 4);
+    list.innerHTML = top.map(c => {
+      const role = c.role || "researcher";
+      return `<div class="item"><a href="/projects/${PROJECT_ID}/coders/${escapeHtml(c.id)}">${escapeHtml(c.name || "(unnamed)")}</a><span class="meta">${escapeHtml(role)}</span></div>`;
+    }).join("");
+    if (arr.length > 4) {
+      list.innerHTML += `<div class="more"><a href="/projects/${PROJECT_ID}/coders">+ ${arr.length - 4} more →</a></div>`;
+    }
+  } catch (e) {
+    list.innerHTML = `<div class="ph-empty" style="color:var(--err)">Error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
 loadProject();
 loadSources();
 loadCodebook();
 loadApplications();
 loadParticipants();
 loadSamplingLog();
+loadCoders();
 </script>
 {% endblock %}

@@ -1,0 +1,250 @@
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Inter-coder reliability{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/coders">Coders</a>
+{% endblock %}
+
+{% block subtitle_block %}
+  <span class="sub">F2.5 — Cohen's kappa for any two coders' applications. Optionally narrow to a single source.</span>
+{% endblock %}
+
+{% block extra_styles %}
+  .icr-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr auto;
+    gap: 12px; align-items: end;
+  }
+  @media (max-width: 800px) {
+    .icr-controls { grid-template-columns: 1fr; }
+  }
+  .field-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .field-input {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+    font: inherit; font-size: 14px;
+  }
+
+  .kappa-headline {
+    display: flex; align-items: baseline; gap: 14px;
+    margin-bottom: 12px;
+  }
+  .kappa-value {
+    font-family: var(--mono);
+    font-size: 32px;
+    font-weight: 600;
+    color: var(--text-strong);
+    letter-spacing: -.01em;
+  }
+  .kappa-label {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+  }
+  .kappa-label.poor { color: var(--err); border-color: var(--err); }
+  .kappa-label.slight, .kappa-label.fair { color: #b08e22; border-color: #b08e22; }
+  .kappa-label.moderate { color: var(--accent); border-color: var(--accent); }
+  .kappa-label.substantial,
+  .kappa-label.almost.perfect { color: var(--ok); border-color: var(--ok); }
+
+  table.kappa {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  table.kappa thead th {
+    text-align: left; font-weight: 600; font-size: 11px;
+    color: var(--muted); text-transform: uppercase;
+    letter-spacing: .04em; padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+  table.kappa tbody td {
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.kappa tbody td.kappa-cell {
+    font-family: var(--mono);
+    text-align: right;
+  }
+{% endblock %}
+
+{% block body %}
+<div class="card">
+  <form id="icrForm">
+    <div class="icr-controls">
+      <div>
+        <label for="ic-coder-a" class="field-label">Coder A</label>
+        <select id="ic-coder-a" class="field-input"></select>
+      </div>
+      <div>
+        <label for="ic-coder-b" class="field-label">Coder B</label>
+        <select id="ic-coder-b" class="field-input"></select>
+      </div>
+      <div>
+        <label for="ic-source" class="field-label">Source <span class="hint">(optional)</span></label>
+        <select id="ic-source" class="field-input">
+          <option value="">All sources</option>
+        </select>
+      </div>
+      <div>
+        <button id="ic-run" class="btn" type="submit">Compute kappa</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div id="loadingPickers" class="card hint" style="margin-top:14px">Loading coders…</div>
+
+<div id="resultsCard" class="card" style="display:none;margin-top:14px">
+  <div class="kappa-headline">
+    <span class="kappa-value" id="kappa-overall">—</span>
+    <span class="kappa-label" id="kappa-label">—</span>
+    <span class="hint" id="kappa-meta"></span>
+  </div>
+  <p class="hint" style="margin:0 0 12px">
+    Per-code Cohen's kappa: each item is the (source, anchor span) tuple either coder annotated; the binary decision per code is "did this coder apply this code to that item?".
+    Codes neither coder applied are omitted.
+  </p>
+  <table class="kappa">
+    <thead><tr>
+      <th>Code</th>
+      <th>Coder A applied</th>
+      <th>Coder B applied</th>
+      <th style="text-align:right">Kappa</th>
+      <th>Interpretation</th>
+    </tr></thead>
+    <tbody id="kappa-body"></tbody>
+  </table>
+  <p class="hint" style="margin-top:14px">
+    <em>Interpretation labels follow Landis &amp; Koch (1977): poor / slight / fair / moderate / substantial / almost perfect.</em>
+  </p>
+</div>
+
+<div id="emptyState" class="card hint" style="display:none;margin-top:14px">
+  <strong>No overlap.</strong> The two selected coders have no overlapping applications under the current filter — either nobody has coded yet, or they coded different items. Add a second coder + apply codes to the same source to see kappa.
+</div>
+
+<div id="errorState" class="card" style="display:none;margin-top:14px;color:var(--err)"></div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+function fmtKappa(k) {
+  if (k === null || k === undefined || isNaN(k)) return "—";
+  return Number(k).toFixed(3);
+}
+
+async function loadPickers() {
+  const loading = document.getElementById("loadingPickers");
+  const error = document.getElementById("errorState");
+  try {
+    const [coderRes, srcRes] = await Promise.all([
+      fetch(`/api/projects/${PROJECT_ID}/coders`),
+      fetch(`/api/projects/${PROJECT_ID}/sources`),
+    ]);
+    if (!coderRes.ok) throw new Error(`coders HTTP ${coderRes.status}`);
+    if (!srcRes.ok) throw new Error(`sources HTTP ${srcRes.status}`);
+    const coders = (await coderRes.json()).coders || [];
+    const sources = (await srcRes.json()).sources || [];
+
+    const aSel = document.getElementById("ic-coder-a");
+    const bSel = document.getElementById("ic-coder-b");
+    coders.forEach((c, i) => {
+      const optA = document.createElement("option");
+      optA.value = c.id; optA.textContent = `${c.name} (${c.role || "researcher"})`;
+      aSel.appendChild(optA);
+      const optB = document.createElement("option");
+      optB.value = c.id; optB.textContent = `${c.name} (${c.role || "researcher"})`;
+      bSel.appendChild(optB);
+    });
+    if (coders.length >= 2) {
+      aSel.value = coders[0].id;
+      bSel.value = coders[1].id;
+    }
+
+    const srcSel = document.getElementById("ic-source");
+    sources.forEach(s => {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      opt.textContent = s.name || s.id;
+      srcSel.appendChild(opt);
+    });
+    loading.style.display = "none";
+  } catch (e) {
+    loading.style.display = "none";
+    error.textContent = `Couldn't load coders / sources: ${e.message}`;
+    error.style.display = "";
+  }
+}
+
+document.getElementById("icrForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const aId = document.getElementById("ic-coder-a").value;
+  const bId = document.getElementById("ic-coder-b").value;
+  const sId = document.getElementById("ic-source").value;
+  const error = document.getElementById("errorState");
+  const empty = document.getElementById("emptyState");
+  const results = document.getElementById("resultsCard");
+  error.style.display = "none";
+  empty.style.display = "none";
+  results.style.display = "none";
+
+  if (!aId || !bId) {
+    error.textContent = "Pick a Coder A and a Coder B.";
+    error.style.display = ""; return;
+  }
+  const url = new URL(`/api/projects/${PROJECT_ID}/icr`, window.location.origin);
+  url.searchParams.set("coder_a", aId);
+  url.searchParams.set("coder_b", bId);
+  if (sId) url.searchParams.set("source_id", sId);
+
+  try {
+    const r = await fetch(url.toString());
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const data = await r.json();
+    if (data.n_items === 0) {
+      empty.style.display = "";
+      return;
+    }
+    document.getElementById("kappa-overall").textContent = fmtKappa(data.overall_kappa);
+    const labelEl = document.getElementById("kappa-label");
+    labelEl.textContent = data.overall_label || "—";
+    labelEl.className = "kappa-label " + (data.overall_label || "").replace(/\s+/g, ".");
+    document.getElementById("kappa-meta").textContent =
+      `${data.n_items} item${data.n_items === 1 ? "" : "s"} compared, ${data.n_both_applied_any} where both coders applied any code.`;
+
+    const body = document.getElementById("kappa-body");
+    body.innerHTML = "";
+    (data.per_code || []).forEach(row => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(row.code_name)}</strong></td>
+        <td class="hint">${row.n_a_applied}</td>
+        <td class="hint">${row.n_b_applied}</td>
+        <td class="kappa-cell">${fmtKappa(row.kappa)}</td>
+        <td><span class="kappa-label ${(row.label || "").replace(/\s+/g, ".")}">${escapeHtml(row.label || "")}</span></td>
+      `;
+      body.appendChild(tr);
+    });
+    results.style.display = "";
+  } catch (err) {
+    error.textContent = `Couldn't compute kappa: ${err.message}`;
+    error.style.display = "";
+  }
+});
+
+loadPickers();
+</script>
+{% endblock %}
