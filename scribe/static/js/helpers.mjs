@@ -121,6 +121,97 @@ export function backendStatTile(gpu) {
   };
 }
 
+// ---------- Parakeet visibility on the upload page (G5.1) ----------
+//
+// NVIDIA Parakeet (NeMo) is a CUDA-only model: NeMo has no AMD/ROCm
+// support and there's no community fork that does. So when the active
+// backend is AMD ROCm, the Parakeet optgroup is hidden from the model
+// dropdown entirely — we don't tantalise the user with an option that
+// will fail at load time. On other non-CUDA backends (MPS / CPU) the
+// optgroup stays visible because Parakeet *can* still run on CPU
+// (slowly) and the user might be on a machine with multiple
+// pipelines; the server-side ``capabilities.parakeet.blocked_by_backend``
+// flag and the in-page hint cover those cases.
+
+/**
+ * Decide whether to hide the Parakeet optgroup in the model dropdown.
+ *
+ * Returns ``true`` only on AMD ROCm. The reasoning is intentionally
+ * narrow: on Apple Silicon (MPS) or CPU the user isn't blocked from
+ * loading NeMo, just told "this will be slow / GPU recommended" via
+ * the model hint. ROCm is the only backend where the model literally
+ * cannot run.
+ *
+ * @param {string|null|undefined} backend - one of ``cuda``, ``rocm``,
+ *   ``mps``, ``cpu`` (case-insensitive).
+ * @returns {boolean}
+ */
+export function shouldHideParakeetOptgroup(backend) {
+  return String(backend ?? "").trim().toLowerCase() === "rocm";
+}
+
+/**
+ * Compute the model-hint state for the upload page based on the
+ * currently-selected model and the server-reported capabilities.
+ *
+ * Returns a structured object the renderer turns into DOM:
+ *   - ``kind`` — ``"blocked"`` (Parakeet selected on a backend that
+ *     can't run NeMo), ``"missing"`` (Parakeet selected but NeMo isn't
+ *     installed), ``"info"`` (Parakeet selected and OK — tells the
+ *     user it's English-only and GPU-recommended), or ``"none"``
+ *     (Whisper / non-Parakeet model — hide the hint entirely).
+ *   - ``tone`` — ``"warn"`` for blocked/missing, ``"muted"`` for info,
+ *     ``null`` for none.
+ *   - ``html`` — the HTML body for the hint, with the backend label
+ *     pre-escaped. ``null`` when ``kind === "none"``.
+ *
+ * The "blocked" branch is the G5.1 surface: it names the active
+ * backend so the user understands why the option is unavailable, and
+ * nudges them to a Whisper model.
+ *
+ * @param {object} args
+ * @param {string|null|undefined} args.model     - the currently-selected
+ *   model id (e.g. ``"large-v3"`` or ``"nvidia/parakeet-tdt-0.6b-v2"``).
+ * @param {string|null|undefined} args.backend   - active backend.
+ * @param {object|null|undefined} args.parakeet  - the server's
+ *   ``capabilities.parakeet`` payload: ``{ available, installed,
+ *   blocked_by_backend, error }``.
+ * @returns {{kind: "blocked"|"missing"|"info"|"none",
+ *           tone: "warn"|"muted"|null,
+ *           html: string|null}}
+ */
+export function parakeetModelHint({ model, backend, parakeet } = {}) {
+  const isParakeet = String(model ?? "").toLowerCase().includes("parakeet");
+  if (!isParakeet) {
+    return { kind: "none", tone: null, html: null };
+  }
+  const p = parakeet || {};
+  if (p.blocked_by_backend) {
+    const label = formatBackendLabel(backend);
+    return {
+      kind: "blocked",
+      tone: "warn",
+      html:
+        "⚠ Parakeet (NVIDIA NeMo) doesn't run on the active <strong>" +
+        escapeHtml(label) + "</strong> backend. Pick a Whisper model.",
+    };
+  }
+  if (!p.available && !p.installed) {
+    return {
+      kind: "missing",
+      tone: "warn",
+      html:
+        "⚠ NVIDIA NeMo isn't installed. Install it with " +
+        "<code>pip install -r requirements-parakeet.txt</code> in your venv, then reload.",
+    };
+  }
+  return {
+    kind: "info",
+    tone: "muted",
+    html: "English only · CUDA GPU recommended · ~30× faster than Whisper.",
+  };
+}
+
 // ---------- Library view (F10.1) ----------
 
 /**

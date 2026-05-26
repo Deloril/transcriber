@@ -721,6 +721,7 @@
     import {
       fmtBytes, fmtDuration, fmtBitrate, fmtRate, fmtFps, escapeHtml,
       fmtElapsed, predictFinishTime, backendStatTile, formatBackendLabel,
+      shouldHideParakeetOptgroup, parakeetModelHint,
     } from "/static/js/helpers.mjs";
     const $ = (id) => document.getElementById(id);
     const drop = $("drop"), fileInput = $("file"), fileInfo = $("fileInfo");
@@ -984,33 +985,27 @@
     }
     function updateModelHint() {
       const hint = $("modelHint");
-      const v = ($("model").value || "").toLowerCase();
-      const isParakeet = v.includes("parakeet");
       const backend = (_caps && _caps.gpu && _caps.gpu.backend) || "";
       const parakeet = (_caps && _caps.parakeet) || {};
-      if (isParakeet && parakeet.blocked_by_backend) {
-        hint.classList.remove("hidden");
-        hint.style.color = "var(--warn)";
-        hint.innerHTML =
-          "⚠ Parakeet (NVIDIA NeMo) doesn't run on the active <strong>" +
-          escapeHtml(formatBackendLabel(backend)) + "</strong> backend. Pick a Whisper model.";
-      } else if (isParakeet && !parakeet.available && !parakeet.installed) {
-        hint.classList.remove("hidden");
-        hint.style.color = "var(--warn)";
-        hint.innerHTML =
-          "⚠ NVIDIA NeMo isn't installed. Install it with " +
-          "<code>pip install -r requirements-parakeet.txt</code> in your venv, then reload.";
-      } else if (isParakeet) {
-        hint.classList.remove("hidden");
-        hint.style.color = "var(--muted)";
-        hint.textContent = "English only · CUDA GPU recommended · ~30× faster than Whisper.";
-      } else {
+      const state = parakeetModelHint({
+        model: $("model").value,
+        backend,
+        parakeet,
+      });
+      if (state.kind === "none") {
         hint.classList.add("hidden");
+      } else {
+        hint.classList.remove("hidden");
+        hint.style.color = state.tone === "warn" ? "var(--warn)" : "var(--muted)";
+        hint.innerHTML = state.html;
       }
-      // Hide the Parakeet optgroup entirely on AMD ROCm (NeMo isn't an option).
+      // G5.1: hide the Parakeet optgroup entirely on AMD ROCm
+      // (NeMo isn't an option there). The model-hint above also
+      // calls this out via state.kind === "blocked" if the user
+      // had Parakeet pre-selected from a saved profile.
       const parakeetGroup = $("model").querySelector('optgroup[label*="Parakeet"]');
       if (parakeetGroup) {
-        parakeetGroup.style.display = (backend === "rocm") ? "none" : "";
+        parakeetGroup.style.display = shouldHideParakeetOptgroup(backend) ? "none" : "";
       }
     }
     $("model").addEventListener("change", updateModelHint);
