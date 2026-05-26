@@ -8112,6 +8112,513 @@ async def get_review_pass_endpoint(
 
 
 # --------------------------------------------------------------------------- #
+# F8.7 — AI second-coder pass on a locked codebook (HTTP surface)
+#
+# The engine module ``scribe.ai_second_coder`` shipped in a3be790 with
+# the full SecondCoderPass / SecondCoderDiff / SecondCoderICR data
+# model + step-at-a-time processor + Cohen's-kappa computation, but
+# had no FastAPI surface, no UI, and no integration test — so a user
+# could not invoke it. This block wires the route layer the engine
+# was designed for, mirroring the F8.6 split (engine pure, server is
+# a thin shell).
+#
+# Endpoints:
+#
+#   POST /api/projects/<pid>/sources/<sid>/second-coder
+#         Start a fresh second-coder pass on this source's transcript
+#         and (by default) drive it forward up to ``max_steps`` items
+#         so the user sees diff progress on the very first request.
+#         Refuses on an unlocked codebook (409 + structured error).
+#         Body (all optional except human_coder_id):
+#           {
+#             "human_coder_id": "<cid>",   # required
+#             "granularity": "paragraph" | "sentence",
+#             "top_n": 1,
+#             "min_score": 0.0,
+#             "embedding_model": "...",
+#             "generation_model": "...",
+#             "max_steps": 5,
+#             "notes": "optional"
+#           }
+#
+#   POST /api/projects/<pid>/second-coder-passes/<pid>/run
+#         Resume an existing pass. Drives ``max_steps`` items.
+#         Calling on a terminal pass returns 409.
+#
+#   POST /api/projects/<pid>/second-coder-passes/<pid>/cancel
+#         Move a non-terminal pass to ``cancelled`` (also cancels
+#         the inner review pass).
+#
+#   GET  /api/projects/<pid>/second-coder-passes
+#         List passes in the project. Optional ``source_id`` /
+#         ``human_coder_id`` / ``status`` filters.
+#
+#   GET  /api/projects/<pid>/second-coder-passes/<pid>
+#         Single-pass fetch.
+#
+#   GET  /api/projects/<pid>/second-coder-passes/<pid>/diff
+#         Live diff: walks the inner review pass + applications and
+#         returns a SecondCoderDiff. Useful for the per-pass detail
+#         view that highlights AI-only / human-only / agreement codes
+#         per item.
+#
+# All write routes are gated by F8.10 (412 + structured gate body)
+# like the existing suggestion endpoints. Each pass start is also
+# recorded as an AIEvent of feature=second_coder so the F9.6 audit
+# log carries the request invocation. Lock-required errors become
+# 409 (state conflict) so the UI can render a helpful "lock the
+# codebook first" notice rather than a bare 400.
+# --------------------------------------------------------------------------- #
+
+from . import ai_second_coder as _ai_second_coder  # noqa: E402
+
+
+# Default cap on items processed per HTTP request. Same shape as the
+# F8.6 review-pass cap. The client polls ``/run`` to drive the rest.
+_SECOND_CODER_DEFAULT_MAX_STEPS = 5
+_SECOND_CODER_HARD_MAX_STEPS = 100
+
+
+def _coerce_second_coder_max_steps(raw: Any) -> int:
+    """Same shape as ``_coerce_review_max_steps`` for the F8.7 routes."""
+    if raw is None:
+        return _SECOND_CODER_DEFAULT_MAX_STEPS
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "max_steps must be an integer")
+    if n < 0:
+        raise HTTPException(400, "max_steps must be ≥ 0")
+    if n > _SECOND_CODER_HARD_MAX_STEPS:
+        raise HTTPException(
+            400,
+            f"max_steps must be ≤ {_SECOND_CODER_HARD_MAX_STEPS}",
+        )
+    return n
+
+
+def _drive_second_coder_pass(
+    pass_record: "_ai_second_coder.SecondCoderPass",
+    *,
+    project_id: str,
+    cfg: "_ai_backend.BackendConfig",
+    backend: "_ai_backend.ModelBackend",
+    max_steps: int,
+) -> "_ai_second_coder.SecondCoderPass":
+    """Drive a second-coder pass up to ``max_steps`` items.
+
+    Translates backend errors into HTTPExceptions. Per-item errors are
+    recorded by the inner review pass; pass-level failures (backend
+    refused entirely, validation error mid-loop) DO mark the pass
+    failed and re-raise so the client sees a structured error.
+    """
+    if max_steps <= 0:
+        return pass_record
+    if pass_record.status in _ai_second_coder.SECOND_CODER_TERMINAL_STATUSES:
+        return pass_record
+    # Resolve the inner review pass first; if it's gone, the
+    # second-coder pass can't make progress.
+    try:
+        review_pass = _transcript_review.load_review_pass(
+            _projects_root(), project_id, pass_record.review_pass_id,
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            500,
+            "Inner review pass for second-coder pass is missing",
+        )
+    try:
+        embed_fn, generate_fn, _emb, _gen = (
+            _make_embed_and_generate_fns(cfg, backend)
+        )
+    except _ai_backend.BackendValidationError as e:
+        try:
+            _ai_second_coder.mark_second_coder_pass_failed(
+                pass_record,
+                projects_root=_projects_root(),
+                review_pass=review_pass,
+                error_message=str(e)[:_ai_second_coder.MAX_ERROR_MESSAGE_LEN],
+            )
+        except _projects.ProjectValidationError:
+            pass
+        raise HTTPException(400, str(e))
+
+    codes = _codes.list_codes(_projects_root(), project_id)
+    applications = _applications.list_applications(
+        _projects_root(), project_id,
+    )
+    try:
+        _ai_second_coder.run_second_coder_pass(
+            pass_record,
+            projects_root=_projects_root(),
+            review_pass=review_pass,
+            codes=codes,
+            applications=applications,
+            embed_fn=embed_fn,
+            generate_fn=generate_fn,
+            max_steps=max_steps,
+        )
+    except _projects.ProjectValidationError as e:
+        try:
+            _ai_second_coder.mark_second_coder_pass_failed(
+                pass_record,
+                projects_root=_projects_root(),
+                review_pass=review_pass,
+                error_message=str(e)[:_ai_second_coder.MAX_ERROR_MESSAGE_LEN],
+            )
+        except _projects.ProjectValidationError:
+            pass
+        raise HTTPException(400, str(e))
+    except _ai_backend.BackendUnavailable as e:
+        raise HTTPException(502, f"Backend unavailable: {e}")
+    except _ai_backend.BackendError as e:
+        raise HTTPException(500, str(e))
+    return pass_record
+
+
+@app.post("/api/projects/{project_id}/sources/{source_id}/second-coder")
+async def start_second_coder_pass_endpoint(
+    project_id: str, source_id: str, request: Request,
+) -> JSONResponse:
+    """F8.7 — start an AI second-coder pass against a designated human coder."""
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body and not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    body = body or {}
+
+    human_coder_id = str(body.get("human_coder_id", "") or "").strip()
+    if not human_coder_id:
+        raise HTTPException(400, "human_coder_id is required")
+    if not _coders.CODER_ID_RE.match(human_coder_id):
+        raise HTTPException(400, "Invalid human_coder_id")
+
+    granularity = (
+        body.get("granularity") or _ai_second_coder.REVIEW_GRANULARITY_PARAGRAPH
+    )
+    if granularity not in _ai_second_coder.REVIEW_GRANULARITIES:
+        raise HTTPException(
+            400,
+            f"granularity must be one of "
+            f"{list(_ai_second_coder.REVIEW_GRANULARITIES)}",
+        )
+
+    raw_top_n = body.get("top_n", _ai_second_coder.DEFAULT_TOP_N)
+    raw_min_score = body.get("min_score", _ai_second_coder.DEFAULT_MIN_SCORE)
+    try:
+        top_n = int(raw_top_n)
+        min_score = float(raw_min_score)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            400, "top_n must be int and min_score must be numeric",
+        )
+    if top_n < 1 or top_n > 50:
+        raise HTTPException(400, "top_n must be in [1, 50]")
+    if min_score < -1.0 or min_score > 1.0:
+        raise HTTPException(400, "min_score must be in [-1, 1]")
+    notes = str(body.get("notes") or "")[:_ai_second_coder.MAX_NOTES_LEN]
+    max_steps = _coerce_second_coder_max_steps(body.get("max_steps"))
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            source = _sources.load_source(
+                _projects_root(), project_id, source_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+        # Verify the human coder belongs to this project (404 mirrors
+        # the rest of the API rather than a 400).
+        try:
+            _coders.load_coder(_projects_root(), project_id, human_coder_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Human coder not found")
+
+        # F8.10 gate.
+        try:
+            gate = _ai_gate.evaluate_project_ai_gate(
+                _projects_root(), project_id,
+                feature=_ai_provenance.AI_FEATURE_SECOND_CODER,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        if not gate.allowed:
+            raise HTTPException(412, {
+                "detail": "AI gate not satisfied",
+                "gate": gate.to_dict(),
+            })
+
+        # Backend.
+        try:
+            cfg, backend = _resolve_suggestion_backend(project)
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+
+        segments = _load_segments_for_source_speaker_map(source) or []
+        applications = _applications.list_applications(
+            _projects_root(), project_id,
+        )
+
+        # Persist a fresh pass record. start_second_coder_pass enforces
+        # the lock guard internally and creates the inner review pass.
+        try:
+            pass_record = _ai_second_coder.start_second_coder_pass(
+                projects_root=_projects_root(),
+                project_id=project_id,
+                source_id=source_id,
+                human_coder_id=human_coder_id,
+                segments=segments,
+                applications=applications,
+                granularity=granularity,
+                embedding_model=cfg.default_embedding_model,
+                generation_model=cfg.default_model,
+                top_n=top_n,
+                min_score=min_score,
+                notes=notes,
+            )
+        except _ai_second_coder.CodebookNotLockedError as e:
+            # Methodologically required: refuse to score against an
+            # evolving codebook. Surface the message + a structured
+            # marker the UI can branch on without parsing English.
+            raise HTTPException(409, {
+                "detail": str(e),
+                "reason": "codebook_not_locked",
+            })
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+
+        # F9.6 audit — log the request side. Best-effort.
+        try:
+            _ai_invocation_log.record_request_event_for_second_coder_pass(
+                _projects_root(),
+                pass_record,
+                backend=getattr(backend, "name", "") or "",
+            )
+        except Exception:
+            pass
+
+        # Drive forward so the first response carries useful state.
+        _drive_second_coder_pass(
+            pass_record,
+            project_id=project_id,
+            cfg=cfg,
+            backend=backend,
+            max_steps=max_steps,
+        )
+
+    return JSONResponse({"pass": pass_record.to_dict()})
+
+
+@app.post("/api/projects/{project_id}/second-coder-passes/{pass_id}/run")
+async def run_second_coder_pass_endpoint(
+    project_id: str, pass_id: str, request: Request,
+) -> JSONResponse:
+    """F8.7 — drive an existing second-coder pass forward."""
+    _check_project_id(project_id)
+    if not _ai_second_coder.SECOND_CODER_PASS_ID_RE.match(pass_id):
+        raise HTTPException(400, "Invalid second-coder pass id")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body and not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    body = body or {}
+    max_steps = _coerce_second_coder_max_steps(body.get("max_steps"))
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            pass_record = _ai_second_coder.load_second_coder_pass(
+                _projects_root(), project_id, pass_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Second-coder pass not found")
+        if pass_record.status in _ai_second_coder.SECOND_CODER_TERMINAL_STATUSES:
+            raise HTTPException(
+                409,
+                f"Pass already in terminal state: {pass_record.status}",
+            )
+
+        # F8.10 gate revalidation.
+        try:
+            gate = _ai_gate.evaluate_project_ai_gate(
+                _projects_root(), project_id,
+                feature=_ai_provenance.AI_FEATURE_SECOND_CODER,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        if not gate.allowed:
+            raise HTTPException(412, {
+                "detail": "AI gate not satisfied",
+                "gate": gate.to_dict(),
+            })
+
+        try:
+            cfg, backend = _resolve_suggestion_backend(project)
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+
+        _drive_second_coder_pass(
+            pass_record,
+            project_id=project_id,
+            cfg=cfg,
+            backend=backend,
+            max_steps=max_steps,
+        )
+
+    return JSONResponse({"pass": pass_record.to_dict()})
+
+
+@app.post("/api/projects/{project_id}/second-coder-passes/{pass_id}/cancel")
+async def cancel_second_coder_pass_endpoint(
+    project_id: str, pass_id: str,
+) -> JSONResponse:
+    """F8.7 — abandon a non-terminal second-coder pass."""
+    _check_project_id(project_id)
+    if not _ai_second_coder.SECOND_CODER_PASS_ID_RE.match(pass_id):
+        raise HTTPException(400, "Invalid second-coder pass id")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            pass_record = _ai_second_coder.load_second_coder_pass(
+                _projects_root(), project_id, pass_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Second-coder pass not found")
+        if pass_record.status == _ai_second_coder.SECOND_CODER_STATUS_CANCELLED:
+            return JSONResponse({"pass": pass_record.to_dict()})
+        if pass_record.status in _ai_second_coder.SECOND_CODER_TERMINAL_STATUSES:
+            raise HTTPException(
+                409,
+                f"Pass already in terminal state: {pass_record.status}",
+            )
+        # Best-effort: cancel the inner review pass too if it loads.
+        review_pass = None
+        try:
+            review_pass = _transcript_review.load_review_pass(
+                _projects_root(), project_id, pass_record.review_pass_id,
+            )
+        except FileNotFoundError:
+            review_pass = None
+        try:
+            _ai_second_coder.cancel_second_coder_pass(
+                pass_record,
+                projects_root=_projects_root(),
+                review_pass=review_pass,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({"pass": pass_record.to_dict()})
+
+
+@app.get("/api/projects/{project_id}/second-coder-passes")
+async def list_second_coder_passes_endpoint(
+    project_id: str,
+    source_id: str = "",
+    human_coder_id: str = "",
+    status: str = "",
+) -> JSONResponse:
+    """F8.7 — list all second-coder passes for a project."""
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            passes = _ai_second_coder.list_second_coder_passes(
+                _projects_root(), project_id,
+                source_id=source_id or None,
+                human_coder_id=human_coder_id or None,
+                status=status or None,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({"passes": [p.to_dict() for p in passes]})
+
+
+@app.get("/api/projects/{project_id}/second-coder-passes/{pass_id}")
+async def get_second_coder_pass_endpoint(
+    project_id: str, pass_id: str,
+) -> JSONResponse:
+    """F8.7 — fetch a single persisted second-coder pass."""
+    _check_project_id(project_id)
+    if not _ai_second_coder.SECOND_CODER_PASS_ID_RE.match(pass_id):
+        raise HTTPException(400, "Invalid second-coder pass id")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            pass_record = _ai_second_coder.load_second_coder_pass(
+                _projects_root(), project_id, pass_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Second-coder pass not found")
+    return JSONResponse({"pass": pass_record.to_dict()})
+
+
+@app.get("/api/projects/{project_id}/second-coder-passes/{pass_id}/diff")
+async def get_second_coder_pass_diff_endpoint(
+    project_id: str, pass_id: str,
+) -> JSONResponse:
+    """F8.7 — compute the live AI vs human diff for a pass.
+
+    Returns the SecondCoderDiff (per-item AI / human / agreement /
+    AI-only / human-only) AND the live SecondCoderICR. Diff is
+    re-computed on every call (cheap; reads suggestion records +
+    applications) so a researcher who edits applications mid-pass
+    sees the kappa shift immediately.
+    """
+    _check_project_id(project_id)
+    if not _ai_second_coder.SECOND_CODER_PASS_ID_RE.match(pass_id):
+        raise HTTPException(400, "Invalid second-coder pass id")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            pass_record = _ai_second_coder.load_second_coder_pass(
+                _projects_root(), project_id, pass_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Second-coder pass not found")
+        try:
+            review_pass = _transcript_review.load_review_pass(
+                _projects_root(), project_id, pass_record.review_pass_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(
+                500, "Inner review pass missing for this second-coder pass",
+            )
+        applications = _applications.list_applications(
+            _projects_root(), project_id,
+        )
+        try:
+            diff = _ai_second_coder.compute_second_coder_diff(
+                projects_root=_projects_root(),
+                pass_record=pass_record,
+                review_pass=review_pass,
+                applications=applications,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        try:
+            icr = _ai_second_coder.compute_second_coder_icr(diff)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(500, f"ICR computation failed: {e}")
+    return JSONResponse({
+        "pass": pass_record.to_dict(),
+        "diff": diff.to_dict(),
+        "icr": icr.to_dict(),
+    })
+
+
+# --------------------------------------------------------------------------- #
 # Upload + transcription job lifecycle
 # --------------------------------------------------------------------------- #
 

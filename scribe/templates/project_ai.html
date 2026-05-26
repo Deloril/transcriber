@@ -273,16 +273,132 @@
       where the worker left off, and the F9.6 audit log records the
       invocation.
     </li>
-    <li>
-      <strong>AI second coder</strong> (<code>F8.7</code>) — runs on a locked
-      codebook; ICR + diff will surface here.
-      <span class="ai-pill">queue UI pending</span>
+    <li data-test-feature="F8.7" data-test-id="ai-surface-f8-7">
+      <strong>AI second coder</strong> (<code>F8.7</code>) — once the codebook
+      is <em>locked</em> (F2.4), the AI re-codes a transcript in parallel with
+      a designated human coder and computes Cohen's kappa (F2.5) over the
+      diff. Use the <a href="#aiSecondCoderCard">Second-coder pass</a>
+      card below to start a pass and review per-code agreement.
     </li>
     <li>
       <strong>Memo drafting</strong> (<code>F8.8</code>) — "✨ Draft with AI"
       action on a memo (lands with the memos page graduations).
     </li>
   </ul>
+</div>
+
+{# F8.7 — AI second-coder card.
+
+   The engine module shipped in a3be790 with thorough unit tests but
+   no UI; this card is the user-facing surface. The flow:
+
+     1. The user picks a source + a designated human coder.
+     2. They click "Start second-coder pass" — the route refuses
+        (HTTP 409) if the codebook isn't locked, and renders the
+        "lock the codebook first" notice inline.
+     3. The card lists every existing pass with its overall kappa,
+        Landis-&-Koch interpretation, and a "View diff" disclosure
+        that fetches the per-code kappa table from
+        ``GET /second-coder-passes/<id>/diff``.
+
+   Reads:
+     GET  /api/projects/<pid>/sources               — populate source picker
+     GET  /api/projects/<pid>/coders                — populate coder picker
+     GET  /api/projects/<pid>/codebook/lock         — check locked / stage
+     GET  /api/projects/<pid>/second-coder-passes   — list past passes
+     GET  /api/projects/<pid>/second-coder-passes/<id>/diff   — per-pass diff
+
+   Writes:
+     POST /api/projects/<pid>/sources/<sid>/second-coder            — start
+     POST /api/projects/<pid>/second-coder-passes/<id>/run          — drive
+     POST /api/projects/<pid>/second-coder-passes/<id>/cancel       — abandon
+#}
+<div id="aiSecondCoderCard" class="card ai-card"
+     data-test-feature="F8.7"
+     data-test-id="ai-second-coder-card">
+  <h2>Second-coder pass <span class="ai-pill">F8.7</span></h2>
+  <p class="ai-help">
+    Once the codebook is <strong>locked</strong> (F2.4), the AI re-codes a
+    transcript in parallel with a designated human coder. Cohen's kappa
+    (F2.5) over the per-item diff tells you where the two coders agree
+    and where they don't. The AI never auto-applies — this is a
+    diagnostic against a frozen codebook, not a coding action.
+  </p>
+
+  <div id="ai-sc-lock-row" class="ai-section ai-status-row"
+       data-test-id="ai-second-coder-lock-row">
+    <span class="dot"></span>
+    <span class="text">Loading lock state…</span>
+  </div>
+
+  <form id="aiSecondCoderForm" class="ai-section" autocomplete="off">
+    <div class="ai-field-row">
+      <div>
+        <label for="ai-sc-source" class="ai-field-label">Source</label>
+        <select id="ai-sc-source" class="ai-field-input"
+                data-test-id="ai-second-coder-source">
+          <option value="">Loading sources…</option>
+        </select>
+        <p class="ai-help">
+          The transcript the AI will re-code in parallel with the human.
+        </p>
+      </div>
+      <div>
+        <label for="ai-sc-coder" class="ai-field-label">Human coder to compare against</label>
+        <select id="ai-sc-coder" class="ai-field-input"
+                data-test-id="ai-second-coder-coder">
+          <option value="">Loading coders…</option>
+        </select>
+        <p class="ai-help">
+          Their applications on the chosen source become the human side
+          of the diff.
+        </p>
+      </div>
+    </div>
+
+    <div class="ai-field-row" style="margin-top:12px">
+      <div>
+        <label for="ai-sc-granularity" class="ai-field-label">Granularity</label>
+        <select id="ai-sc-granularity" class="ai-field-input"
+                data-test-id="ai-second-coder-granularity">
+          <option value="paragraph" selected>Paragraph (default)</option>
+          <option value="sentence">Sentence</option>
+        </select>
+      </div>
+      <div>
+        <label for="ai-sc-top-n" class="ai-field-label">Top-N AI candidates per item</label>
+        <input id="ai-sc-top-n" type="number" min="1" max="50" value="1"
+               class="ai-field-input"
+               data-test-id="ai-second-coder-top-n">
+        <p class="ai-help">
+          How many of the AI's ranked picks count as "applied" at each
+          span. <code>1</code> matches the most common ICR convention.
+        </p>
+      </div>
+    </div>
+
+    <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <button id="ai-sc-start-btn" class="btn" type="submit"
+              data-test-id="ai-second-coder-start">
+        ✨ Start second-coder pass
+      </button>
+      <span id="ai-sc-msg" class="hint" role="alert" aria-live="polite"></span>
+    </div>
+  </form>
+
+  <div id="ai-sc-passes" class="ai-section" data-test-id="ai-second-coder-passes">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <strong>Past passes</strong>
+      <span id="ai-sc-passes-count" class="hint"></span>
+    </div>
+    <div id="ai-sc-passes-list"
+         data-test-id="ai-second-coder-passes-list"
+         style="margin-top:8px"></div>
+  </div>
+
+  <div id="ai-sc-error" class="ai-section" hidden
+       style="color:var(--err);font-size:13px"
+       data-test-id="ai-second-coder-error"></div>
 </div>
 
 <script>
@@ -585,5 +701,289 @@ document.getElementById("embed-index-clear-btn").addEventListener("click", clear
 loadBackend();
 loadGate();
 loadEmbeddingIndex();
+
+// --- F8.7 second-coder pass card ---------------------------------- //
+
+function _scKappaLabelClass(label) {
+  return "kappa-label " + String(label || "").replace(/\s+/g, ".");
+}
+
+function _scFmtKappa(k) {
+  if (k === null || k === undefined || isNaN(k)) return "—";
+  return Number(k).toFixed(3);
+}
+
+async function loadSecondCoderLockState() {
+  const row = $("ai-sc-lock-row");
+  const startBtn = $("ai-sc-start-btn");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/codebook/lock`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (data.locked) {
+      setStatusRow(row, "ok",
+        `Codebook is locked (stage = ${data.stage}). Second-coder passes can run.`);
+      if (startBtn) startBtn.disabled = false;
+    } else {
+      setStatusRow(row, "bad",
+        `Codebook is unlocked (stage = ${data.stage || "initial"}). ` +
+        `Lock the codebook on the codebook editor before starting a pass.`);
+      if (startBtn) startBtn.disabled = true;
+    }
+  } catch (e) {
+    setStatusRow(row, "bad", `Couldn't load lock state: ${e.message}`);
+    if (startBtn) startBtn.disabled = true;
+  }
+}
+
+async function loadSecondCoderPickers() {
+  const srcSel = $("ai-sc-source");
+  const codSel = $("ai-sc-coder");
+  try {
+    const [sRes, cRes] = await Promise.all([
+      fetch(`/api/projects/${PROJECT_ID}/sources`),
+      fetch(`/api/projects/${PROJECT_ID}/coders`),
+    ]);
+    if (!sRes.ok) throw new Error(`sources HTTP ${sRes.status}`);
+    if (!cRes.ok) throw new Error(`coders HTTP ${cRes.status}`);
+    const sources = (await sRes.json()).sources || [];
+    const coders = (await cRes.json()).coders || [];
+    srcSel.innerHTML = "";
+    if (!sources.length) {
+      const opt = document.createElement("option");
+      opt.value = ""; opt.textContent = "(no sources yet)";
+      opt.disabled = true;
+      srcSel.appendChild(opt);
+    } else {
+      sources.forEach(s => {
+        const opt = document.createElement("option");
+        opt.value = s.id;
+        opt.textContent = s.name || s.id;
+        srcSel.appendChild(opt);
+      });
+    }
+    codSel.innerHTML = "";
+    if (!coders.length) {
+      const opt = document.createElement("option");
+      opt.value = ""; opt.textContent = "(no coders yet)";
+      opt.disabled = true;
+      codSel.appendChild(opt);
+    } else {
+      coders.forEach(c => {
+        const opt = document.createElement("option");
+        opt.value = c.id;
+        opt.textContent = `${c.name} (${c.role || "researcher"})`;
+        codSel.appendChild(opt);
+      });
+    }
+  } catch (e) {
+    const errBox = $("ai-sc-error");
+    errBox.textContent = `Couldn't load pickers: ${e.message}`;
+    errBox.hidden = false;
+  }
+}
+
+function _scStatusBadge(status) {
+  const palette = {
+    pending: "var(--muted)",
+    running: "var(--accent)",
+    completed: "var(--ok)",
+    cancelled: "var(--muted)",
+    failed: "var(--err)",
+  };
+  const colour = palette[status] || "var(--muted)";
+  return `<span class="ai-pill" style="background:transparent;border:1px solid ${colour};color:${colour}">${escapeHtml(status)}</span>`;
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;",
+  }[c]));
+}
+
+function renderSecondCoderPasses(passes) {
+  const list = $("ai-sc-passes-list");
+  const count = $("ai-sc-passes-count");
+  count.textContent = `${passes.length} pass${passes.length === 1 ? "" : "es"}`;
+  list.innerHTML = "";
+  if (!passes.length) {
+    list.innerHTML = `<div class="hint" data-test-id="ai-second-coder-empty">
+      No passes yet. Pick a source + coder above and start one.
+    </div>`;
+    return;
+  }
+  for (const p of passes) {
+    const icr = p.icr_results || {};
+    const overall = icr.overall_kappa;
+    const interp = icr.overall_interpretation || "";
+    const row = document.createElement("div");
+    row.className = "ai-model-row";
+    row.dataset.testId = "ai-second-coder-pass-row";
+    row.dataset.passId = p.id;
+    row.innerHTML = `
+      <div style="flex:1;min-width:0">
+        <div><code>${escapeHtml(p.id)}</code> ${_scStatusBadge(p.status)}</div>
+        <div class="meta">
+          source <code>${escapeHtml(p.source_id)}</code> ·
+          coder <code>${escapeHtml(p.human_coder_id)}</code> ·
+          ${escapeHtml(p.granularity)} · top-N=${escapeHtml(String(p.top_n))}
+        </div>
+        <div class="meta">
+          κ = <strong>${_scFmtKappa(overall)}</strong>
+          ${interp ? `(<em>${escapeHtml(interp)}</em>)` : ""} ·
+          ${(icr.n_items != null) ? `${icr.n_items} item${icr.n_items === 1 ? "" : "s"}` : ""}
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button type="button" class="btn secondary"
+                data-action="view-diff"
+                data-test-id="ai-second-coder-view-diff">View diff</button>
+      </div>
+    `;
+    const detail = document.createElement("div");
+    detail.className = "ai-section";
+    detail.style.display = "none";
+    detail.dataset.testId = "ai-second-coder-pass-detail";
+    detail.style.padding = "10px";
+    detail.style.background = "var(--panel-2)";
+    detail.style.border = "1px solid var(--border)";
+    detail.style.borderRadius = "8px";
+    detail.style.marginTop = "6px";
+    detail.innerHTML = `<div class="hint">Loading diff…</div>`;
+    list.appendChild(row);
+    list.appendChild(detail);
+    row.querySelector('[data-action="view-diff"]').addEventListener("click", async () => {
+      if (detail.style.display === "block") {
+        detail.style.display = "none";
+        return;
+      }
+      detail.style.display = "block";
+      detail.innerHTML = `<div class="hint">Loading diff…</div>`;
+      try {
+        const r = await fetch(
+          `/api/projects/${PROJECT_ID}/second-coder-passes/${p.id}/diff`
+        );
+        if (!r.ok) {
+          const j = await r.json().catch(() => ({}));
+          throw new Error(j.detail || `HTTP ${r.status}`);
+        }
+        const data = await r.json();
+        const i = data.icr || {};
+        const perCode = i.per_code || [];
+        const items = (data.diff || {}).items || [];
+        const rows = perCode.map(pc => `
+          <tr>
+            <td><code>${escapeHtml(pc.code_id)}</code></td>
+            <td>${pc.ai_count}</td>
+            <td>${pc.human_count}</td>
+            <td>${pc.both_count}</td>
+            <td style="text-align:right;font-family:var(--mono)">${_scFmtKappa(pc.kappa)}</td>
+            <td><span class="${_scKappaLabelClass(pc.interpretation)}">${escapeHtml(pc.interpretation || "")}</span></td>
+          </tr>`).join("");
+        detail.innerHTML = `
+          <div class="hint" style="margin-bottom:8px">
+            ${i.n_items || 0} item${(i.n_items === 1) ? "" : "s"} compared,
+            ${i.items_with_full_agreement || 0} fully-agreement,
+            ${i.items_with_any_disagreement || 0} with disagreement.
+            Overall κ = <strong>${_scFmtKappa(i.overall_kappa)}</strong>
+            (<em>${escapeHtml(i.overall_interpretation || "")}</em>)
+          </div>
+          <table class="kappa" style="width:100%;border-collapse:collapse;font-size:12px"
+                 data-test-id="ai-second-coder-per-code-table">
+            <thead><tr>
+              <th style="text-align:left">Code</th>
+              <th style="text-align:left">AI</th>
+              <th style="text-align:left">Human</th>
+              <th style="text-align:left">Both</th>
+              <th style="text-align:right">κ</th>
+              <th style="text-align:left">Interp.</th>
+            </tr></thead>
+            <tbody>${rows || `<tr><td colspan="6" class="hint">No codes applied either side yet.</td></tr>`}</tbody>
+          </table>
+          <div class="hint" style="margin-top:8px">
+            ${items.length} review item${items.length === 1 ? "" : "s"} in the diff.
+          </div>
+        `;
+      } catch (e) {
+        detail.innerHTML = `<div style="color:var(--err)">Couldn't load diff: ${escapeHtml(e.message)}</div>`;
+      }
+    });
+  }
+}
+
+async function loadSecondCoderPasses() {
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/second-coder-passes`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    renderSecondCoderPasses(data.passes || []);
+  } catch (e) {
+    const errBox = $("ai-sc-error");
+    errBox.textContent = `Couldn't list passes: ${e.message}`;
+    errBox.hidden = false;
+  }
+}
+
+document.getElementById("aiSecondCoderForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const sid = $("ai-sc-source").value;
+  const cid = $("ai-sc-coder").value;
+  const granularity = $("ai-sc-granularity").value;
+  const topN = parseInt($("ai-sc-top-n").value, 10) || 1;
+  const msg = $("ai-sc-msg");
+  const errBox = $("ai-sc-error");
+  errBox.hidden = true;
+  msg.textContent = "";
+  if (!sid) { setMsg(msg, "Pick a source first.", "err"); return; }
+  if (!cid) { setMsg(msg, "Pick a human coder first.", "err"); return; }
+
+  setMsg(msg, "Starting pass…", "");
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/sources/${sid}/second-coder`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          human_coder_id: cid,
+          granularity,
+          top_n: topN,
+        }),
+      }
+    );
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const detail = data.detail;
+      if (r.status === 409 && detail && typeof detail === "object" && detail.reason === "codebook_not_locked") {
+        setMsg(msg, "", "");
+        errBox.textContent =
+          "Codebook is not locked. Lock it on the codebook editor before " +
+          "starting a second-coder pass — agreement against an evolving " +
+          "codebook is not a meaningful number.";
+        errBox.hidden = false;
+        return;
+      }
+      if (r.status === 412 && detail && typeof detail === "object" && detail.gate) {
+        setMsg(msg, "", "");
+        errBox.textContent =
+          "AI gate not satisfied: " +
+          (detail.gate.message || "AI suggestions disabled.");
+        errBox.hidden = false;
+        return;
+      }
+      throw new Error(typeof detail === "string" ? detail : `HTTP ${r.status}`);
+    }
+    setMsg(msg, "Pass started.", "ok");
+    await loadSecondCoderPasses();
+  } catch (e) {
+    setMsg(msg, "", "");
+    errBox.textContent = `Couldn't start pass: ${e.message}`;
+    errBox.hidden = false;
+  }
+});
+
+loadSecondCoderLockState();
+loadSecondCoderPickers();
+loadSecondCoderPasses();
 </script>
 {% endblock %}
