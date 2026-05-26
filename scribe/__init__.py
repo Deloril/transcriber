@@ -16,6 +16,9 @@ from .engine import (
     rocm_allocator_explanation,
     rocm_allocator_state,
     rocm_allocator_value,
+    rocm_hsa_override_explanation,
+    rocm_hsa_override_state,
+    rocm_hsa_override_value,
     rocm_lstm_dropout_patch_active,
     rocm_lstm_dropout_patch_explanation,
 )
@@ -39,6 +42,9 @@ __all__ = [
     "rocm_allocator_explanation",
     "rocm_allocator_state",
     "rocm_allocator_value",
+    "rocm_hsa_override_explanation",
+    "rocm_hsa_override_state",
+    "rocm_hsa_override_value",
     "rocm_lstm_dropout_patch_active",
     "rocm_lstm_dropout_patch_explanation",
 ]

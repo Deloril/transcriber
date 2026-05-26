@@ -364,6 +364,9 @@ class TestG4_1ApiCapabilitiesCarriesAllocatorState:
             "rocm_allocator_state",
             "rocm_allocator_value",
             "rocm_allocator_explanation",
+            "rocm_hsa_override_state",
+            "rocm_hsa_override_value",
+            "rocm_hsa_override_explanation",
         }
 
 

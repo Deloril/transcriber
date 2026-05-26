@@ -273,6 +273,9 @@ class TestG2_1ApiCapabilitiesCarriesPinAndDrift:
             "rocm_allocator_state",
             "rocm_allocator_value",
             "rocm_allocator_explanation",
+            "rocm_hsa_override_state",
+            "rocm_hsa_override_value",
+            "rocm_hsa_override_explanation",
         }
 
     def test_capabilities_swallows_helper_exception(

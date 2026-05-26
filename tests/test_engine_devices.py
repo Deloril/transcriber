@@ -1347,3 +1347,287 @@ class TestRocmAllocatorExplanation:
         assert "rocm_allocator_state" in scribe.__all__
         assert "rocm_allocator_value" in scribe.__all__
         assert "rocm_allocator_explanation" in scribe.__all__
+
+
+# ----------------------------------------------------------------------- #
+# G4.2: HSA_OVERRIDE_GFX_VERSION user-facing projections
+# ----------------------------------------------------------------------- #
+
+
+class TestRocmHsaOverrideState:
+    """G4.2: classify the live ``HSA_OVERRIDE_GFX_VERSION`` env var on ROCm.
+
+    Tests the two documented states (``"user-set"``, ``"missing"``)
+    plus the ``None`` collapse on every other backend / GPU
+    configuration. The helper drives both the home page tile sub-line
+    segment and the warning banner the index template surfaces when
+    the state is ``"missing"`` (HIP runtime won't load kernels on a
+    non-gfx1030 RDNA 2 die without the override).
+    """
+
+    def test_returns_user_set_when_env_is_recommended_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The happy path: researcher exported the recommended value.
+        # The state is "user-set" regardless of gfx target — we never
+        # second-guess a user value.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1031")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+        assert engine.rocm_hsa_override_state() == "user-set"
+
+    def test_returns_user_set_when_env_is_non_recommended_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # User picked a non-recommended value (e.g. 11.0.0) — still
+        # "user-set" because we never overrule a user value.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1032")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
+        assert engine.rocm_hsa_override_state() == "user-set"
+
+    def test_returns_user_set_on_gfx1030_with_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Even on gfx1030 (which doesn't strictly need the override),
+        # if the user has set the variable we surface it. Researchers
+        # with mixed-GPU boxes or forced-compatibility setups have
+        # legitimate reasons to set this, and silently dropping the
+        # field would lose information.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1030")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+        assert engine.rocm_hsa_override_state() == "user-set"
+
+    @pytest.mark.parametrize("gfx", [
+        "gfx1031",  # Navi 22 — RX 6700/6750 XT
+        "gfx1032",  # Navi 23 — RX 6600/6650 XT
+        "gfx1033",  # Van Gogh APU (Steam Deck)
+        "gfx1034",  # Navi 24 — RX 6400/6500 XT
+        "gfx1035",  # Rembrandt APU
+        "gfx1036",  # Rembrandt-R APU
+    ])
+    def test_returns_missing_on_non_gfx1030_rdna2_unset(
+        self, monkeypatch: pytest.MonkeyPatch, gfx: str
+    ) -> None:
+        # The actionable state: every non-gfx1030 RDNA 2 die without
+        # the env var. AMD only ships ROCm kernels for gfx1030, so HIP
+        # won't load on these dies until the user exports the override.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: gfx)
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.rocm_hsa_override_state() == "missing"
+
+    def test_returns_none_on_gfx1030_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # gfx1030 is the one RDNA 2 die ROCm ships kernels for — no
+        # override needed, so the helper returns None and the tile
+        # silently omits the segment.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1030")
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.rocm_hsa_override_state() is None
+
+    @pytest.mark.parametrize("gfx", [
+        "gfx1100",  # RDNA 3 — Navi 31
+        "gfx1101",  # RDNA 3 — Navi 32
+        "gfx1102",  # RDNA 3 — Navi 33
+        "gfx1200",  # RDNA 4 — Navi 44
+        "gfx1201",  # RDNA 4 — Navi 48
+        "gfx1010",  # RDNA 1
+        "gfx900",   # Vega
+        "gfx940",   # CDNA 3
+    ])
+    def test_returns_none_on_non_rdna2_rocm_unset(
+        self, monkeypatch: pytest.MonkeyPatch, gfx: str
+    ) -> None:
+        # Non-RDNA-2 ROCm cards don't need the override (ROCm ships
+        # kernels for these targets natively). State collapses to None.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: gfx)
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.rocm_hsa_override_state() is None
+
+    def test_returns_none_on_unknown_arch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Cautious default: if we can't read a gfx target we don't
+        # know what we're looking at, so we don't surface a state.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: None)
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.rocm_hsa_override_state() is None
+
+    @pytest.mark.parametrize("backend", ["cuda", "mps", "cpu"])
+    def test_returns_none_on_non_rocm_backend(
+        self, monkeypatch: pytest.MonkeyPatch, backend: str
+    ) -> None:
+        # The variable is meaningless without a HIP runtime — even if
+        # the user has it set on a CUDA / MPS / CPU box (deeply weird
+        # but possible), we collapse to None so the tile doesn't leak
+        # the segment onto a non-ROCm backend.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: backend)
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1031")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+        assert engine.rocm_hsa_override_state() is None, (
+            f"non-ROCm backend ({backend}) must collapse to None even "
+            "when the env var is set — there's no HIP runtime to override"
+        )
+
+    def test_returns_user_set_when_env_is_empty_string(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An empty-string env var is treated as unset (matches the
+        # ``not os.environ.get(...)`` convention used throughout the
+        # codebase). On a non-gfx1030 die with empty env var, we
+        # report "missing" — same as if the var were not set at all.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1031")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "")
+        assert engine.rocm_hsa_override_state() == "missing"
+
+
+class TestRocmHsaOverrideValue:
+    """G4.2: literal ``HSA_OVERRIDE_GFX_VERSION`` env var value on ROCm."""
+
+    def test_returns_value_when_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+        assert engine.rocm_hsa_override_value() == "10.3.0"
+
+    def test_returns_user_value_verbatim_even_when_non_recommended(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The value is echoed verbatim so support bundles never
+        # silently rewrite the live config.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
+        assert engine.rocm_hsa_override_value() == "11.0.0"
+
+    def test_returns_none_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.rocm_hsa_override_value() is None
+
+    def test_returns_none_when_empty_string(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Empty string is treated as unset (matches the shell convention).
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "")
+        assert engine.rocm_hsa_override_value() is None
+
+    @pytest.mark.parametrize("backend", ["cuda", "mps", "cpu"])
+    def test_returns_none_on_non_rocm(
+        self, monkeypatch: pytest.MonkeyPatch, backend: str
+    ) -> None:
+        # Even if the env var is set on a non-ROCm box, the value
+        # collapses to None — the variable is meaningless there.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: backend)
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+        assert engine.rocm_hsa_override_value() is None
+
+
+class TestRocmHsaOverrideExplanation:
+    """G4.2: one-line rationale matching the active state."""
+
+    def test_returns_none_when_state_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # gfx1030 — no override needed.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1030")
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        assert engine.rocm_hsa_override_explanation() is None
+
+    def test_returns_user_set_explanation_with_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # User-set state must quote the live env var value so a
+        # support bundle is self-explanatory without cross-referencing
+        # ``rocm_hsa_override_value``.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1031")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+        text = engine.rocm_hsa_override_explanation()
+        assert isinstance(text, str)
+        assert "HSA_OVERRIDE_GFX_VERSION" in text
+        assert "10.3.0" in text
+        assert "user-set" in text
+
+    def test_returns_user_set_explanation_with_non_recommended_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Non-recommended user values are echoed verbatim — the tile
+        # and CLI both show whatever the user set.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1032")
+        monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
+        text = engine.rocm_hsa_override_explanation()
+        assert "11.0.0" in text
+
+    def test_returns_missing_explanation_with_arch_and_recommendation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The actionable state: the message must spell out the
+        # ``export HSA_OVERRIDE_GFX_VERSION=10.3.0`` recommendation
+        # AND mention the detected gfx target so a researcher pasting
+        # the line into a support thread has the searchable keywords.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1031")
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        text = engine.rocm_hsa_override_explanation()
+        assert isinstance(text, str)
+        assert "HSA_OVERRIDE_GFX_VERSION" in text
+        assert "10.3.0" in text
+        assert "gfx1031" in text
+        assert "gfx1030" in text  # mentions ROCm kernel set context
+        assert "AMD" in text or "ROCm" in text
+
+    def test_returns_none_on_non_rocm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for backend in ("cuda", "mps", "cpu"):
+            monkeypatch.setattr(engine, "gpu_backend", lambda b=backend: b)
+            monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1031")
+            monkeypatch.setenv("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+            assert engine.rocm_hsa_override_explanation() is None
+
+    def test_uses_constant_for_recommended_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The missing-state explanation should use the canonical
+        # constant so a typo in one place doesn't make the docs
+        # disagree with the recommendation.
+        monkeypatch.setattr(engine, "gpu_backend", lambda: "rocm")
+        monkeypatch.setattr(engine, "gpu_arch_name", lambda: "gfx1032")
+        monkeypatch.delenv("HSA_OVERRIDE_GFX_VERSION", raising=False)
+        text = engine.rocm_hsa_override_explanation()
+        assert engine.HSA_OVERRIDE_RDNA2_VALUE in text
+
+
+class TestG4_2PackageExports:
+    """G4.2: the three new helpers reachable from top-level ``scribe``.
+
+    Mirrors the G4.1 / G3.1 pattern — useful to lab admins / smoke-
+    test scripts / third-party integrations.
+    """
+
+    def test_rocm_hsa_override_state_reexported(self) -> None:
+        import scribe
+        assert scribe.rocm_hsa_override_state is engine.rocm_hsa_override_state
+        assert "rocm_hsa_override_state" in scribe.__all__
+
+    def test_rocm_hsa_override_value_reexported(self) -> None:
+        import scribe
+        assert scribe.rocm_hsa_override_value is engine.rocm_hsa_override_value
+        assert "rocm_hsa_override_value" in scribe.__all__
+
+    def test_rocm_hsa_override_explanation_reexported(self) -> None:
+        import scribe
+        assert (
+            scribe.rocm_hsa_override_explanation
+            is engine.rocm_hsa_override_explanation
+        )
+        assert "rocm_hsa_override_explanation" in scribe.__all__

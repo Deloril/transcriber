@@ -1083,6 +1083,123 @@ def rocm_allocator_explanation() -> str | None:
 
 
 # --------------------------------------------------------------------------- #
+# G4.2: HSA_OVERRIDE_GFX_VERSION user-facing projections
+# --------------------------------------------------------------------------- #
+#
+# ``needs_hsa_override`` and ``recommended_hsa_override_value`` (defined
+# higher up next to the env-var constant) are the *engine-internal*
+# detectors. They answer "should this machine export
+# HSA_OVERRIDE_GFX_VERSION=10.3.0?". The three helpers below project that
+# detector + the live env-var state into the same ``state``/``value``/
+# ``explanation`` triple shape that ``rocm_allocator_*`` use, so the
+# ``/api/capabilities`` payload and the home page Backend tile can treat
+# the two RDNA 2 workarounds uniformly. Three states matter to the user:
+#
+#   * ``"user-set"``  — env var is exported (any value). We never clobber
+#                       a user value, even when it's not the recommended
+#                       10.3.0; the tile echoes whatever they exported so
+#                       a support bundle shows the active config.
+#   * ``"missing"``  — actionable: RDNA 2 non-gfx1030 die where ROCm has
+#                       no kernels and the user hasn't exported the
+#                       override. Tile surfaces a warning so the user
+#                       can fix it before the next HIP runtime init.
+#   * ``None``        — N/A: not on a RDNA 2 die (or on gfx1030, which
+#                       AMD does ship kernels for and thus doesn't need
+#                       the override), or the active backend isn't ROCm.
+#                       Tile silently omits the segment.
+
+
+def rocm_hsa_override_state() -> str | None:
+    """Classify the live ``HSA_OVERRIDE_GFX_VERSION`` env var on ROCm.
+
+    Returns one of:
+
+    * ``"user-set"`` — env var is exported (any value). Never clobbered;
+      we just surface the value via :func:`rocm_hsa_override_value` for
+      triage. Returned regardless of the gfx target: the user set it on
+      purpose, even on gfx1030 they may have a reason (mixed-GPU box,
+      forced compatibility, etc).
+    * ``"missing"`` — actionable: env var is unset *and* the detector
+      :func:`needs_hsa_override` says it's needed (ROCm + non-gfx1030
+      RDNA 2 die). The home page tile surfaces this through the
+      warning banner — the user has to fix it before the next HIP
+      runtime init or kernels won't load.
+    * ``None`` — every other configuration: non-ROCm backend, ROCm with
+      gfx1030 (the one RDNA 2 die AMD ships kernels for), ROCm with
+      RDNA 3 / RDNA 4 / CDNA, or an unknown gfx target where we can't
+      safely recommend an override.
+
+    Cheap to call repeatedly; no torch state mutation, just an env var
+    lookup and the existing :func:`needs_hsa_override` detector.
+    """
+    if not is_rocm():
+        # Even if the user has the env var set on a CUDA / MPS / CPU
+        # box, the variable is meaningless there — there's no HIP
+        # runtime to override. Collapse to None so the JS tile doesn't
+        # leak the segment onto a non-ROCm backend.
+        return None
+    if os.environ.get("HSA_OVERRIDE_GFX_VERSION"):
+        return "user-set"
+    if needs_hsa_override():
+        return "missing"
+    return None
+
+
+def rocm_hsa_override_value() -> str | None:
+    """The literal ``HSA_OVERRIDE_GFX_VERSION`` env var value on ROCm.
+
+    Returns the string the user exported, or ``None`` when the variable
+    is unset (or the active backend is not ROCm). Pairs with
+    :func:`rocm_hsa_override_state`: ``"user-set"`` ↔ whatever string
+    the user exported; ``"missing"`` ↔ ``None``; ``None`` ↔ ``None``.
+
+    Note: returns the user's value verbatim — including non-recommended
+    values (e.g. ``"11.0.0"``). The tile and CLI both echo whatever the
+    user set so support bundles never silently rewrite the live config.
+    """
+    if not is_rocm():
+        return None
+    return os.environ.get("HSA_OVERRIDE_GFX_VERSION") or None
+
+
+def rocm_hsa_override_explanation() -> str | None:
+    """One-line human-readable rationale for the active HSA override state.
+
+    Mirrors :func:`rocm_allocator_explanation` so the two RDNA 2
+    workarounds present a consistent shape to the home page Backend
+    tile and the CLI. Returns ``None`` whenever
+    :func:`rocm_hsa_override_state` returns ``None`` — the segment is
+    silently omitted in those cases.
+
+    The ``"missing"`` branch is the actionable one: it spells out the
+    ``export HSA_OVERRIDE_GFX_VERSION=10.3.0`` recommendation with the
+    detected gfx target embedded, and references the AMD-only-ships-
+    kernels-for-gfx1030 reality so a researcher pasting the line into
+    a support thread has the searchable keyword chain
+    (HSA_OVERRIDE_GFX_VERSION → gfx103x → AMD ROCm).
+    """
+    state = rocm_hsa_override_state()
+    if state is None:
+        return None
+    if state == "user-set":
+        # Quote the user value so the line is self-explanatory in a
+        # support bundle without the reader having to cross-reference
+        # ``rocm_hsa_override_value``.
+        val = rocm_hsa_override_value() or ""
+        return (
+            f"HSA_OVERRIDE_GFX_VERSION={val} (user-set; not clobbered)"
+        )
+    # "missing"
+    arch = gpu_arch_name() or "this RDNA 2 die"
+    return (
+        f"HSA_OVERRIDE_GFX_VERSION unset on {arch} — AMD ROCm only "
+        f"ships kernels for gfx1030. Export "
+        f"HSA_OVERRIDE_GFX_VERSION={HSA_OVERRIDE_RDNA2_VALUE} before "
+        f"running Scribe so HIP treats {arch} as gfx1030"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # WhisperX wrappers
 # --------------------------------------------------------------------------- #
 

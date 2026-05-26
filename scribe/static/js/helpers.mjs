@@ -148,6 +148,23 @@ export function formatBackendLabel(backend) {
  *     prove the workaround is in their install. Suppressed when the
  *     field is null / false / missing — the segment renders only on
  *     an explicit ``true``.
+ *   - **G4.1** RDNA 2 cub_caching allocator state (only on ROCm RDNA 2;
+ *     ``alloc cub_caching`` / ``alloc <user>`` / ``alloc unset``).
+ *     Read from ``gpu.rocm_allocator_state`` — the unset state is
+ *     additionally routed through the warning banner because CT2 is
+ *     about to crash (CT2 #2012). Suppressed on every non-RDNA-2
+ *     backend (CUDA / MPS / CPU / RDNA 3 / CDNA).
+ *   - **G4.2** RDNA 2 HSA_OVERRIDE_GFX_VERSION state (only on ROCm
+ *     RDNA 2 non-gfx1030; ``HSA <value>`` / ``HSA missing``). Read
+ *     from ``gpu.rocm_hsa_override_state`` — the missing state is
+ *     additionally routed through the warning banner because the
+ *     HIP runtime won't load kernels on a non-gfx1030 RDNA 2 die
+ *     (gfx1031/1032/1033/1034/1035/1036) without
+ *     ``HSA_OVERRIDE_GFX_VERSION=10.3.0`` exported before the runtime
+ *     initialises. Suppressed on gfx1030 itself (AMD ships kernels
+ *     for it), on RDNA 3 / RDNA 4 / CDNA, and on every non-ROCm
+ *     backend. Pairs with G4.1 — both surfaces apply to the same
+ *     RX 6000-series + RDNA 2 APU set.
  *
  * The sub line collapses to ``null`` when every component is missing
  * (e.g. CPU backend on a Mac with no discrete GPU), so the renderer
@@ -250,6 +267,35 @@ export function backendStatTile(gpu) {
   } else if (allocState === "unset") {
     parts.push("alloc unset");
   }
+  // G4.2: surface the live HSA_OVERRIDE_GFX_VERSION state as the
+  // final sub-line segment. ``rocm_hsa_override_state`` is null on
+  // every non-RDNA-2-non-gfx1030 ROCm config (and on every non-ROCm
+  // backend) — the override only matters when AMD's gfx1030-only
+  // kernel set has to be remapped onto another RDNA 2 die
+  // (gfx1031/1032/1033/1034/1035/1036). The segment is rendered with
+  // one of two terse labels so a researcher pasting their machine
+  // info into a CT2 / pyannote support thread can confirm the
+  // override is in effect at a glance:
+  //
+  //   - "user-set" → "HSA <value>" (echoes whatever the user
+  //                                 exported, including non-
+  //                                 recommended values)
+  //   - "missing"  → "HSA missing" (RDNA 2 non-gfx1030 die without
+  //                                 the override; paired with a
+  //                                 visible warning banner below
+  //                                 — see ``warning`` field)
+  //   - missing / null → segment omitted entirely
+  //
+  // The actual env var value (``rocm_hsa_override_value``) is read
+  // for the user-set label only; for the missing state the label is
+  // fixed because the env var isn't set.
+  const hsaState = gpu.rocm_hsa_override_state;
+  if (hsaState === "user-set") {
+    const v = gpu.rocm_hsa_override_value;
+    parts.push(v ? `HSA ${String(v)}` : "HSA user-set");
+  } else if (hsaState === "missing") {
+    parts.push("HSA missing");
+  }
   // G2.1 drift warning. Falsy ``ct2_drift_message`` (null / undefined /
   // empty string) means no drift — the tile renders without a warning
   // banner. Anything truthy is passed through verbatim; the server
@@ -262,18 +308,28 @@ export function backendStatTile(gpu) {
   // warning banner — the researcher sees a single warn line they can
   // act on. If both warnings are present (drift *and* unset allocator)
   // they're concatenated with a separator so neither gets swallowed.
+  //
+  // G4.2 missing-HSA-override warning: same idea as G4.1 but for the
+  // second RDNA 2 workaround. When ``rocm_hsa_override_state`` is
+  // ``"missing"`` (RDNA 2 non-gfx1030 die without the env var), the
+  // explanation tells the user exactly which env var to export. Threaded
+  // through the same ``warning`` field so the home page banner
+  // surfaces it without an extra DOM element. If all three warnings
+  // fire at once (drift + alloc unset + HSA missing — the worst case
+  // for a freshly-installed RX 6700 user) they're concatenated with
+  // " — " separators so none get swallowed.
   const drift = gpu.ct2_drift_message;
   const allocExplain = (allocState === "unset" && gpu.rocm_allocator_explanation)
     ? String(gpu.rocm_allocator_explanation)
     : null;
-  let warning = null;
-  if (drift && allocExplain) {
-    warning = `${String(drift)} — ${allocExplain}`;
-  } else if (drift) {
-    warning = String(drift);
-  } else if (allocExplain) {
-    warning = allocExplain;
-  }
+  const hsaExplain = (hsaState === "missing" && gpu.rocm_hsa_override_explanation)
+    ? String(gpu.rocm_hsa_override_explanation)
+    : null;
+  const warningSegments = [];
+  if (drift) warningSegments.push(String(drift));
+  if (allocExplain) warningSegments.push(allocExplain);
+  if (hsaExplain) warningSegments.push(hsaExplain);
+  const warning = warningSegments.length ? warningSegments.join(" — ") : null;
   return {
     label: "Backend",
     value,

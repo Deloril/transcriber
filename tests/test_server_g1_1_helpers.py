@@ -204,6 +204,8 @@ class TestG1_1ApiCapabilitiesUsesHelperChain:
             "rocm_lstm_patch", "rocm_lstm_patch_explanation",
             "rocm_allocator_state", "rocm_allocator_value",
             "rocm_allocator_explanation",
+            "rocm_hsa_override_state", "rocm_hsa_override_value",
+            "rocm_hsa_override_explanation",
         }
         assert gpu["backend"] == "rocm"
         assert gpu["device_name"] == "Radeon RX 7900 XTX"

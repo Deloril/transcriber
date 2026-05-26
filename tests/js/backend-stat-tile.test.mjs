@@ -1196,3 +1196,311 @@ describe("backendStatTile (G4.1 cub_caching allocator)", () => {
     expect(tile.sub).not.toContain("alloc undefined");
   });
 });
+
+// ---------- G4.2: RDNA 2 HSA_OVERRIDE_GFX_VERSION workaround state ----------
+//
+// G4.2 added three fields to the /api/capabilities payload —
+// ``gpu.rocm_hsa_override_state`` (one of ``"user-set"`` / ``"missing"``),
+// ``gpu.rocm_hsa_override_value`` (the literal env var value when set),
+// and ``gpu.rocm_hsa_override_explanation`` (one-line rationale). All
+// three are ``null`` outside the workaround scope: non-ROCm backends,
+// ROCm on gfx1030 itself (the one RDNA 2 die AMD ships kernels for),
+// and ROCm on RDNA 3 / RDNA 4 / CDNA cards.
+//
+// The home page tile renders the state as a sub-line segment:
+//   - "user-set" → "HSA <value>" (echoes whatever the user exported,
+//                                  including non-recommended values)
+//   - "missing"  → "HSA missing" + warning banner with the explanation
+//                                  (HIP runtime won't load kernels;
+//                                  user has to export the env var)
+//   - null / missing → segment omitted entirely
+//
+// When the missing state coincides with G4.1 unset-allocator OR G2.1
+// CT2 wheel drift, all warnings concatenate so none get swallowed.
+
+describe("backendStatTile (G4.2 HSA_OVERRIDE_GFX_VERSION)", () => {
+  it("appends 'HSA <value>' on user-set state (recommended value)", () => {
+    // Researcher exported HSA_OVERRIDE_GFX_VERSION=10.3.0 by hand on a
+    // non-gfx1030 RDNA 2 die. We never clobber a user value; the tile
+    // echoes whatever they set so a support bundle shows the active config.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6700 XT",
+      vram_gb: 12.0,
+      gfx_target: "gfx1031",
+      distro: "Ubuntu 24.04.4 LTS",
+      rocm_hsa_override_state: "user-set",
+      rocm_hsa_override_value: "10.3.0",
+      rocm_hsa_override_explanation:
+        "HSA_OVERRIDE_GFX_VERSION=10.3.0 (user-set; not clobbered)",
+    });
+    expect(tile.sub.split(" · ")).toContain("HSA 10.3.0");
+    // User-set state must NOT trigger a warning — the user knows what
+    // they did, and the override is in effect.
+    expect(tile.warning).toBeNull();
+  });
+
+  it("echoes a non-recommended user value verbatim (never silently rewritten)", () => {
+    // Researcher experimentally set the var to "11.0.0" — the tile
+    // must show that literal string so support bundles never lie.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6600",
+      gfx_target: "gfx1032",
+      rocm_hsa_override_state: "user-set",
+      rocm_hsa_override_value: "11.0.0",
+      rocm_hsa_override_explanation:
+        "HSA_OVERRIDE_GFX_VERSION=11.0.0 (user-set; not clobbered)",
+    });
+    expect(tile.sub.split(" · ")).toContain("HSA 11.0.0");
+    expect(tile.sub).not.toContain("HSA 10.3.0");
+    expect(tile.warning).toBeNull();
+  });
+
+  it("appends 'HSA missing' AND surfaces a warning on missing state", () => {
+    // The actionable state: RDNA 2 non-gfx1030 die without the env
+    // var. The tile must:
+    //   1. carry an "HSA missing" sub-line segment so quick-glance
+    //      readers see it next to the gfx target
+    //   2. populate the ``warning`` field with the explanation so the
+    //      home page's warning banner pops it visibly
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6700 XT",
+      vram_gb: 12.0,
+      gfx_target: "gfx1031",
+      rocm_hsa_override_state: "missing",
+      rocm_hsa_override_value: null,
+      rocm_hsa_override_explanation:
+        "HSA_OVERRIDE_GFX_VERSION unset on gfx1031 — AMD ROCm only " +
+        "ships kernels for gfx1030. Export HSA_OVERRIDE_GFX_VERSION=10.3.0 " +
+        "before running Scribe so HIP treats gfx1031 as gfx1030",
+    });
+    expect(tile.sub.split(" · ")).toContain("HSA missing");
+    expect(tile.warning).toContain("HSA_OVERRIDE_GFX_VERSION");
+    expect(tile.warning).toContain("10.3.0");
+    expect(tile.warning).toContain("gfx1031");
+  });
+
+  it("omits HSA segment when rocm_hsa_override_state is null", () => {
+    // gfx1030 — AMD ships kernels for it, so no override needed; the
+    // helper returns null and the tile omits the segment.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800 XT",
+      vram_gb: 16.0,
+      gfx_target: "gfx1030",
+      rocm_hsa_override_state: null,
+      rocm_hsa_override_value: null,
+      rocm_hsa_override_explanation: null,
+    });
+    expect(tile.sub).not.toContain("HSA");
+    expect(tile.warning).toBeNull();
+  });
+
+  it("omits HSA segment when rocm_hsa_override_state is missing entirely", () => {
+    // Defensive: an older API version that doesn't carry the field
+    // shouldn't make the tile blow up.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800 XT",
+      vram_gb: 16.0,
+    });
+    expect(tile.sub).toBe("AMD Radeon RX 6800 XT · 16 GB VRAM");
+    expect(tile.sub).not.toContain("HSA");
+    expect(tile.warning).toBeNull();
+  });
+
+  it("omits HSA segment on non-ROCm backends (CUDA / MPS / CPU)", () => {
+    // Even if the user has the env var set on a CUDA / MPS / CPU
+    // box (deeply weird but possible), the API nulls the field and
+    // the tile silently drops the segment — the variable is
+    // meaningless without a HIP runtime.
+    for (const backend of ["cuda", "mps", "cpu"]) {
+      const tile = backendStatTile({
+        backend,
+        device_name: "Some Device",
+        rocm_hsa_override_state: null,
+      });
+      const sub = tile.sub || "";
+      expect(sub).not.toContain("HSA");
+    }
+  });
+
+  it("omits HSA segment on unknown / stray state strings (defensive)", () => {
+    // The helper switches on two documented states; a stray string
+    // (from a bad proxy / older client / test pollution) must not
+    // accidentally render a segment.
+    for (const stray of ["yes", "true", "on", 1, {}, [], "MISSING", "unset"]) {
+      const tile = backendStatTile({
+        backend: "rocm",
+        device_name: "AMD Radeon RX 6700 XT",
+        rocm_hsa_override_state: stray,
+      });
+      const sub = tile.sub || "";
+      expect(sub).not.toContain("HSA missing");
+      expect(sub).not.toContain("HSA 10.3.0");
+    }
+  });
+
+  it("HSA segment appears after alloc segment (order pinned)", () => {
+    // Order pin: device → VRAM → gfx → distro → CT2 pin → mirrors →
+    // tier → LSTM patch → alloc → HSA. HSA is last because it
+    // applies to the most-specific subset (RDNA 2 *non-gfx1030*),
+    // making it the strictest qualifier in the chain.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6700 XT",
+      vram_gb: 12.0,
+      gfx_target: "gfx1031",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      distro_tier: "first-class",
+      rocm_lstm_patch: true,
+      rocm_allocator_state: "auto",
+      rocm_allocator_value: "cub_caching",
+      rocm_hsa_override_state: "user-set",
+      rocm_hsa_override_value: "10.3.0",
+    });
+    const segments = tile.sub.split(" · ");
+    expect(segments[segments.length - 1]).toBe("HSA 10.3.0");
+    expect(segments[segments.length - 2]).toBe("alloc cub_caching");
+  });
+
+  it("preserves the GPU tile shape (label / value / sub / warning)", () => {
+    // Pin the contract: G4.2 is additive — the four-key tile shape
+    // is unchanged.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6700 XT",
+      rocm_hsa_override_state: "user-set",
+      rocm_hsa_override_value: "10.3.0",
+    });
+    expect(Object.keys(tile).sort()).toEqual(
+      ["label", "sub", "value", "warning"]
+    );
+  });
+
+  it("concatenates drift + alloc-unset + HSA-missing warnings (worst case)", () => {
+    // Worst case for a freshly-installed RX 6700 XT user: CT2 wheel
+    // drift (G2.1) + cub_caching unset (G4.1) + HSA override missing
+    // (G4.2). All three are independently actionable; the tile must
+    // surface them all through the warning banner (separator " — ").
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6700 XT",
+      vram_gb: 12.0,
+      gfx_target: "gfx1031",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.6.0",
+      ct2_drift_message:
+        "ctranslate2 v4.6.0 installed; pinned ROCm wheel is v4.7.2",
+      rocm_allocator_state: "unset",
+      rocm_allocator_explanation:
+        "CT2_CUDA_ALLOCATOR unset on RDNA 2 — CT2 is about to crash " +
+        "(CT2 #2012). Call apply_rocm_runtime_workarounds() before " +
+        "the CT2 import, or export CT2_CUDA_ALLOCATOR=cub_caching",
+      rocm_hsa_override_state: "missing",
+      rocm_hsa_override_explanation:
+        "HSA_OVERRIDE_GFX_VERSION unset on gfx1031 — AMD ROCm only " +
+        "ships kernels for gfx1030. Export HSA_OVERRIDE_GFX_VERSION=10.3.0 " +
+        "before running Scribe so HIP treats gfx1031 as gfx1030",
+    });
+    // All three warning sources are present — none got swallowed.
+    // (The explanations themselves can contain " — " in their body
+    // copy, so we verify presence of the three signature substrings
+    // and their composition order rather than counting separators.)
+    expect(tile.warning).toContain("v4.6.0");
+    expect(tile.warning).toContain("CT2_CUDA_ALLOCATOR unset");
+    expect(tile.warning).toContain("HSA_OVERRIDE_GFX_VERSION");
+    // The drift message comes first, then alloc, then HSA — pin the
+    // composition order so a future helpers refactor that swaps the
+    // order is caught.
+    const driftIdx = tile.warning.indexOf("v4.6.0");
+    const allocIdx = tile.warning.indexOf("CT2_CUDA_ALLOCATOR unset");
+    const hsaIdx = tile.warning.indexOf("HSA_OVERRIDE_GFX_VERSION unset");
+    expect(driftIdx).toBeGreaterThanOrEqual(0);
+    expect(allocIdx).toBeGreaterThan(driftIdx);
+    expect(hsaIdx).toBeGreaterThan(allocIdx);
+  });
+
+  it("no warning concatenation on user-set state + drift (drift only)", () => {
+    // When the HSA state is user-set, the warning field carries only
+    // the drift message — the user-set state is surfaced through the
+    // sub-line segment, not the banner.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6700 XT",
+      ct2_drift_message:
+        "ctranslate2 v4.6.0 installed; pinned ROCm wheel is v4.7.2",
+      rocm_hsa_override_state: "user-set",
+      rocm_hsa_override_value: "10.3.0",
+      rocm_hsa_override_explanation: "...",
+    });
+    expect(tile.warning).toContain("v4.6.0");
+    expect(tile.warning).not.toContain("HSA_OVERRIDE_GFX_VERSION");
+  });
+
+  it("HSA-missing warning fires standalone (no other warnings)", () => {
+    // Researcher with a clean install and matching CT2 — only the
+    // HSA-missing warning fires.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6700 XT",
+      vram_gb: 12.0,
+      gfx_target: "gfx1031",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.7.2",
+      ct2_drift_message: null,
+      rocm_allocator_state: "auto",
+      rocm_allocator_value: "cub_caching",
+      rocm_allocator_explanation: "...",
+      rocm_hsa_override_state: "missing",
+      rocm_hsa_override_value: null,
+      rocm_hsa_override_explanation:
+        "HSA_OVERRIDE_GFX_VERSION unset on gfx1031 — AMD ROCm only " +
+        "ships kernels for gfx1030. Export HSA_OVERRIDE_GFX_VERSION=10.3.0 " +
+        "before running Scribe so HIP treats gfx1031 as gfx1030",
+    });
+    expect(tile.warning).toContain("HSA_OVERRIDE_GFX_VERSION");
+    expect(tile.warning).not.toContain("v4.6.0");
+    expect(tile.warning).not.toContain("CT2_CUDA_ALLOCATOR");
+    // Single warning — the warning is exactly the HSA explanation
+    // verbatim (the explanation itself has " — " in its body but
+    // there are no joiner separators added by the helper).
+    expect(tile.warning).toBe(
+      "HSA_OVERRIDE_GFX_VERSION unset on gfx1031 — AMD ROCm only " +
+      "ships kernels for gfx1030. Export HSA_OVERRIDE_GFX_VERSION=10.3.0 " +
+      "before running Scribe so HIP treats gfx1031 as gfx1030"
+    );
+  });
+
+  it("HSA segment uses the literal label 'HSA' (no localisation)", () => {
+    // The string is what a researcher copy-pastes into a support
+    // thread; it has to be greppable upstream. Pin the spelling so
+    // a future helpers refactor can't quietly change it to "hsa "
+    // or "HSA_OVERRIDE_GFX_VERSION " or similar.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6700 XT",
+      rocm_hsa_override_state: "user-set",
+      rocm_hsa_override_value: "10.3.0",
+    });
+    expect(tile.sub.split(" · ")).toContain("HSA 10.3.0");
+  });
+
+  it("falls back to 'HSA user-set' when value is missing (defensive)", () => {
+    // If the API reports user-set but no value (shouldn't happen —
+    // server pairs the two — but defensive), the helper emits a
+    // generic label rather than "HSA undefined" or "HSA null".
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6700 XT",
+      rocm_hsa_override_state: "user-set",
+      rocm_hsa_override_value: null,
+    });
+    expect(tile.sub.split(" · ")).toContain("HSA user-set");
+    expect(tile.sub).not.toContain("HSA null");
+    expect(tile.sub).not.toContain("HSA undefined");
+  });
+});

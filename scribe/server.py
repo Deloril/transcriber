@@ -981,6 +981,23 @@ async def capabilities() -> JSONResponse:
     when the state is ``"unset"`` (CT2 is about to crash); the CLI
     surface (``python -m scribe.devices``) prints the same state
     under ``Allocator:``.
+
+    G4.2: ``gpu.rocm_hsa_override_state`` (one of ``"user-set"`` /
+    ``"missing"``), ``gpu.rocm_hsa_override_value`` (the literal
+    ``HSA_OVERRIDE_GFX_VERSION`` env var value), and
+    ``gpu.rocm_hsa_override_explanation`` (one-line rationale)
+    carry the second RDNA 2 workaround: ROCm only ships kernels for
+    ``gfx1030``, so non-gfx1030 RDNA 2 dies (gfx1031/1032/1033/1034/
+    1035/1036) need ``export HSA_OVERRIDE_GFX_VERSION=10.3.0`` *before*
+    the HIP runtime initialises (we can't auto-set it from Python). All
+    three fields are ``None`` outside the workaround scope: non-ROCm
+    backends, ROCm on gfx1030 itself, and ROCm on RDNA 3 / RDNA 4 /
+    CDNA cards. The home page Backend tile appends ``"HSA <value>"``
+    on user-set or ``"HSA missing"`` on the actionable state, and
+    surfaces the explanation through the warning banner so the user
+    sees the export recommendation without scrolling. The CLI
+    surface (``python -m scribe.devices``) prints the same state
+    under ``HSA override:``.
     """
     from .parakeet import nemo_available
     from .engine import (
@@ -991,6 +1008,9 @@ async def capabilities() -> JSONResponse:
         rocm_allocator_explanation,
         rocm_allocator_state,
         rocm_allocator_value,
+        rocm_hsa_override_explanation,
+        rocm_hsa_override_state,
+        rocm_hsa_override_value,
         rocm_lstm_dropout_patch_active,
         rocm_lstm_dropout_patch_explanation,
     )
@@ -1064,6 +1084,15 @@ async def capabilities() -> JSONResponse:
     allocator_state: str | None = None
     allocator_value: str | None = None
     allocator_explanation_text: str | None = None
+    # G4.2: ROCm-only HSA_OVERRIDE_GFX_VERSION workaround state. The
+    # helper ``rocm_hsa_override_state`` already gates on backend ==
+    # "rocm" so we don't have to second-guess it here, just call the
+    # helper and let it decide. The home page tile uses the state
+    # field to pick a sub-line segment + warning banner; the CLI
+    # mirrors the same state under ``HSA override:``.
+    hsa_override_state_label: str | None = None
+    hsa_override_value_label: str | None = None
+    hsa_override_explanation_text: str | None = None
     if backend == "rocm":
         try:
             ct2_rocm_pin = pinned_ct2_rocm_version()
@@ -1121,6 +1150,19 @@ async def capabilities() -> JSONResponse:
             allocator_state = None
             allocator_value = None
             allocator_explanation_text = None
+        # G4.2: surface the HSA_OVERRIDE_GFX_VERSION workaround state.
+        # The helpers already collapse to None outside the workaround
+        # scope (non-RDNA-2 RDNA / non-ROCm), so the JSON fields are
+        # null on RDNA 3 / CDNA / gfx1030. Defensive against helper
+        # exceptions — collapse to None rather than 500.
+        try:
+            hsa_override_state_label = rocm_hsa_override_state()
+            hsa_override_value_label = rocm_hsa_override_value()
+            hsa_override_explanation_text = rocm_hsa_override_explanation()
+        except Exception:  # noqa: BLE001
+            hsa_override_state_label = None
+            hsa_override_value_label = None
+            hsa_override_explanation_text = None
     return JSONResponse({
         "parakeet": {
             "available": parakeet_runtime_ok,
@@ -1145,6 +1187,9 @@ async def capabilities() -> JSONResponse:
             "rocm_allocator_state": allocator_state,
             "rocm_allocator_value": allocator_value,
             "rocm_allocator_explanation": allocator_explanation_text,
+            "rocm_hsa_override_state": hsa_override_state_label,
+            "rocm_hsa_override_value": hsa_override_value_label,
+            "rocm_hsa_override_explanation": hsa_override_explanation_text,
         },
     })
 
