@@ -35,6 +35,12 @@
 
 {% block actions %}
   <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+  <a class="btn secondary"
+     href="/projects/{{ project_id }}/memos/canvas"
+     data-test-id="memos-canvas-link"
+     title="Drag memos around, group them into categories, let clusters emerge.">
+    🗺 Sorting canvas
+  </a>
   <button id="newMemoBtn" type="button" class="btn" data-test-id="memos-new">+ New memo</button>
 {% endblock %}
 

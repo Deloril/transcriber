@@ -1,0 +1,940 @@
+{#
+  Memo-sorting canvas (F5.3 user-facing surface).
+
+  PLANNING.md F5.3:
+    > Memo-sorting canvas (drag/group cards, link memo→memo, link
+    > memo→category).
+
+  Grounded theory's "memo-sorting" move: lay memos out, drag them
+  around, let categories *emerge* from spatial clustering. NVivo's
+  concept map and ATLAS.ti's network view ship this; F5.3 is
+  Scribe's answer.
+
+  This page is the UI surface that finally makes F5.3 reachable.
+  scribe/memo_canvas.py + the canvas REST endpoints (server.py) +
+  the helpers in helpers.mjs all shipped in 9e1fd99 with passing
+  tests; the deferred bit was the drag-drop UI. This template
+  is that drag-drop UI.
+
+  Reaches:
+    GET    /api/projects/<pid>/canvas
+    PUT    /api/projects/<pid>/canvas/cards/<memo_id>          (place / move card)
+    DELETE /api/projects/<pid>/canvas/cards/<memo_id>          (remove card)
+    POST   /api/projects/<pid>/canvas/categories               (new category)
+    PATCH  /api/projects/<pid>/canvas/categories/<cid>         (rename / move)
+    DELETE /api/projects/<pid>/canvas/categories/<cid>         (delete category)
+    PUT    /api/projects/<pid>/canvas/categories/<cid>/members/<mid>
+                                                              (assign card → category)
+    DELETE /api/projects/<pid>/canvas/categories/<cid>/members/<mid>
+                                                              (unassign)
+    POST   /api/projects/<pid>/canvas/links                    (memo→memo link)
+    GET    /api/projects/<pid>/memos                           (list available memos)
+#}
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Memo canvas{% endblock %}
+{% block heading %}Memo canvas{% endblock %}
+
+{% block subtitle_block %}
+  <span class="sub">F5.3 — drag memos onto the board · group into categories · link memo↔memo · let clusters emerge.</span>
+{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}/memos">← Memos</a>
+  <button id="addCategoryBtn" type="button" class="btn secondary"
+          data-test-id="canvas-add-category">+ Category</button>
+  <button id="addMemoBtn" type="button" class="btn"
+          data-test-id="canvas-add-memo">+ Place a memo</button>
+{% endblock %}
+
+{% block extra_styles %}
+  /* ---------- Layout ---------- */
+  .mc-wrap {
+    display: grid;
+    grid-template-columns: minmax(240px, 280px) 1fr;
+    gap: 18px;
+    align-items: start;
+  }
+  @media (max-width: 920px) {
+    .mc-wrap { grid-template-columns: 1fr; }
+  }
+  .mc-side {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  /* ---------- Side panel: memos awaiting placement + tools ---------- */
+  .mc-tray {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+    padding: 11px 13px;
+  }
+  .mc-tray h3 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .mc-tray-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 360px;
+    overflow-y: auto;
+  }
+  .mc-tray-item {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    align-items: center;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 9px;
+    background: var(--panel);
+    font-size: 13px;
+  }
+  .mc-tray-item .mc-tray-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+  .mc-tray-item button {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 7px;
+    font: inherit;
+    font-size: 11px;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .mc-tray-item button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .mc-tray-empty {
+    color: var(--muted);
+    font-style: italic;
+    font-size: 12px;
+  }
+  /* ---------- Board ---------- */
+  .mc-board-wrap {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+    padding: 0;
+    overflow: hidden;
+  }
+  .mc-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .mc-toolbar .grow { flex: 1; }
+  .mc-board {
+    position: relative;
+    width: 100%;
+    height: 600px;
+    overflow: auto;
+    background:
+      repeating-linear-gradient(
+        0deg, transparent 0 39px, var(--border) 39px 40px),
+      repeating-linear-gradient(
+        90deg, transparent 0 39px, var(--border) 39px 40px);
+    background-color: var(--panel-2);
+  }
+  .mc-card {
+    position: absolute;
+    width: 160px;
+    min-height: 70px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,.18);
+    padding: 8px 10px;
+    cursor: grab;
+    user-select: none;
+    transition: border-color 80ms ease, box-shadow 80ms ease;
+  }
+  .mc-card:hover { border-color: var(--accent); }
+  .mc-card.dragging {
+    cursor: grabbing;
+    box-shadow: 0 4px 10px rgba(0,0,0,.32);
+    z-index: 100;
+  }
+  .mc-card .mc-card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mc-card .mc-card-type {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: var(--muted);
+  }
+  .mc-card .mc-card-actions {
+    display: flex;
+    gap: 4px;
+    margin-top: 5px;
+    flex-wrap: wrap;
+  }
+  .mc-card .mc-card-actions button {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font: inherit;
+    font-size: 10.5px;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .mc-card .mc-card-actions button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .mc-card.link-source {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-soft, rgba(122,167,255,.18));
+  }
+  /* Category pills */
+  .mc-category {
+    position: absolute;
+    background: var(--panel);
+    border: 1px dashed var(--border);
+    border-radius: 999px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: grab;
+    user-select: none;
+    color: var(--text);
+  }
+  .mc-category .mc-cat-color {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent);
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .mc-category .mc-cat-actions {
+    margin-left: 8px;
+    color: var(--muted);
+    font-size: 10.5px;
+  }
+  .mc-category .mc-cat-actions button {
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  .mc-category .mc-cat-actions button:hover { color: var(--err, #d97777); }
+  /* Status row */
+  #mcStatus { font-size: 12px; color: var(--muted); margin-left: auto; }
+  #mcStatus.err { color: var(--err); }
+  #mcStatus.ok { color: var(--ok, #6abf7b); }
+
+  /* Modal */
+  .mc-modal-bg {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.45);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 200;
+  }
+  .mc-modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 22px;
+    min-width: 320px;
+    max-width: 480px;
+  }
+  .mc-modal h3 { margin-top: 0; }
+  .mc-modal label {
+    display: block;
+    color: var(--muted);
+    font-size: 12px;
+    margin: 10px 0 4px;
+  }
+  .mc-modal input, .mc-modal select {
+    width: 100%;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 13.5px;
+    box-sizing: border-box;
+  }
+  .mc-modal-actions {
+    display: flex; justify-content: flex-end;
+    gap: 8px; margin-top: 16px;
+  }
+{% endblock %}
+
+{% block body %}
+<div class="mc-wrap" data-test-feature="F5.3">
+  <aside class="mc-side">
+    <div class="mc-tray">
+      <h3>Memos not yet on the board <span id="trayCount" class="hint"></span></h3>
+      <div id="mcTray" class="mc-tray-list" data-test-id="canvas-tray"></div>
+    </div>
+
+    <div class="mc-tray">
+      <h3>Categories <span id="catCount" class="hint"></span></h3>
+      <div id="mcCatList" class="mc-tray-list" data-test-id="canvas-categories"></div>
+    </div>
+
+    <div class="mc-tray">
+      <h3>How this works</h3>
+      <p class="hint" style="margin:0">
+        Drag a card on the board to move it. Click <strong>Link</strong> on a
+        memo, then click another to record a memo→memo edge. Click
+        <strong>+ Category</strong> to create a labelled cluster, then drop
+        cards into it via the assign menu.
+      </p>
+    </div>
+  </aside>
+
+  <section class="mc-board-wrap">
+    <div class="mc-toolbar">
+      <span>F5.3 · grounded-theory memo sorting</span>
+      <span class="grow"></span>
+      <span id="mcStatus"></span>
+    </div>
+    <div id="mcBoard" class="mc-board" data-test-id="canvas-board"
+         role="region" aria-label="Memo sorting canvas"></div>
+  </section>
+</div>
+
+<!-- Add memo to board: pick from list of memos not yet placed -->
+<div id="addMemoModal" class="mc-modal-bg" style="display:none">
+  <div class="mc-modal" role="dialog" aria-label="Place a memo on the board">
+    <h3>Place a memo on the board</h3>
+    <label for="mcMemoSelect">Memo</label>
+    <select id="mcMemoSelect" data-test-id="canvas-memo-select"></select>
+    <div class="mc-modal-actions">
+      <button type="button" class="btn secondary" data-mc-cancel>Cancel</button>
+      <button type="button" id="mcMemoPlace" class="btn"
+              data-test-id="canvas-memo-place">Place</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add category modal -->
+<div id="addCatModal" class="mc-modal-bg" style="display:none">
+  <div class="mc-modal" role="dialog" aria-label="Create a category">
+    <h3>Create a category</h3>
+    <label for="mcCatLabel">Label</label>
+    <input id="mcCatLabel" type="text" maxlength="120"
+           placeholder="e.g. emerging concepts"
+           data-test-id="canvas-cat-label">
+    <label for="mcCatColor">Colour (optional, #rrggbb)</label>
+    <input id="mcCatColor" type="text" placeholder="#7aa7ff"
+           data-test-id="canvas-cat-color">
+    <div class="mc-modal-actions">
+      <button type="button" class="btn secondary" data-mc-cancel>Cancel</button>
+      <button type="button" id="mcCatCreate" class="btn"
+              data-test-id="canvas-cat-create">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Assign card to category modal -->
+<div id="assignModal" class="mc-modal-bg" style="display:none">
+  <div class="mc-modal" role="dialog" aria-label="Assign memo to category">
+    <h3>Assign memo to a category</h3>
+    <p class="hint" id="mcAssignWho" style="margin-top:0"></p>
+    <label for="mcAssignSelect">Category</label>
+    <select id="mcAssignSelect" data-test-id="canvas-assign-select"></select>
+    <div class="mc-modal-actions">
+      <button type="button" class="btn secondary" data-mc-cancel>Cancel</button>
+      <button type="button" id="mcAssignDo" class="btn"
+              data-test-id="canvas-assign-do">Assign</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import {
+  escapeHtml,
+  CANVAS_MAX_COORD,
+  buildAddCategoryPayload,
+  buildMoveCardPayload,
+  clampToBounds,
+  snapToGrid,
+} from "/static/js/helpers.mjs";
+
+const PROJECT_ID = {{ project_id | tojson }};
+
+// In-memory mirror of the server state. Re-fetched whenever the
+// server returns a fresh canvas so the UI doesn't drift.
+let memos = [];           // all memos in project
+let canvas = {            // canvas state
+  cards: [], categories: [], category_members: {},
+};
+let linkSource = null;    // memo_id of the card we clicked "Link" on
+
+const els = {
+  board: document.getElementById("mcBoard"),
+  tray: document.getElementById("mcTray"),
+  trayCount: document.getElementById("trayCount"),
+  catCount: document.getElementById("catCount"),
+  catList: document.getElementById("mcCatList"),
+  status: document.getElementById("mcStatus"),
+  addCatBtn: document.getElementById("addCategoryBtn"),
+  addMemoBtn: document.getElementById("addMemoBtn"),
+  addCatModal: document.getElementById("addCatModal"),
+  addMemoModal: document.getElementById("addMemoModal"),
+  assignModal: document.getElementById("assignModal"),
+  catLabel: document.getElementById("mcCatLabel"),
+  catColor: document.getElementById("mcCatColor"),
+  catCreate: document.getElementById("mcCatCreate"),
+  memoSelect: document.getElementById("mcMemoSelect"),
+  memoPlace: document.getElementById("mcMemoPlace"),
+  assignSelect: document.getElementById("mcAssignSelect"),
+  assignWho: document.getElementById("mcAssignWho"),
+  assignDo: document.getElementById("mcAssignDo"),
+};
+
+let assignTargetMemoId = null;
+
+function setStatus(msg, kind) {
+  els.status.textContent = msg || "";
+  els.status.className = kind || "";
+}
+
+function memoById(id) { return memos.find(m => m.id === id) || null; }
+
+function memoTitle(memo) {
+  if (!memo) return "(missing memo)";
+  if (memo.title && memo.title.trim()) return memo.title;
+  const body = (memo.body || "").trim();
+  if (body) return body.slice(0, 40) + (body.length > 40 ? "…" : "");
+  return "(untitled)";
+}
+
+function memoIdsOnBoard() {
+  return new Set(canvas.cards.map(c => c.memo_id));
+}
+
+function memosOffBoard() {
+  const onBoard = memoIdsOnBoard();
+  return memos.filter(m => !onBoard.has(m.id));
+}
+
+// ---------- Render ----------
+function renderTray() {
+  const off = memosOffBoard();
+  els.trayCount.textContent = off.length ? `(${off.length})` : "";
+  els.tray.innerHTML = "";
+  if (!off.length) {
+    const div = document.createElement("div");
+    div.className = "mc-tray-empty";
+    div.textContent = "Every memo is on the board.";
+    els.tray.appendChild(div);
+    return;
+  }
+  off.forEach(m => {
+    const div = document.createElement("div");
+    div.className = "mc-tray-item";
+    div.dataset.memoId = m.id;
+    div.dataset.testId = "canvas-tray-item";
+    div.innerHTML = `
+      <span class="mc-tray-title">${escapeHtml(memoTitle(m))}</span>
+      <button type="button" data-mc-place="${m.id}"
+              data-test-id="canvas-tray-place">Place</button>
+    `;
+    els.tray.appendChild(div);
+  });
+}
+
+function renderCategoryList() {
+  const cats = canvas.categories || [];
+  els.catCount.textContent = cats.length ? `(${cats.length})` : "";
+  els.catList.innerHTML = "";
+  if (!cats.length) {
+    const div = document.createElement("div");
+    div.className = "mc-tray-empty";
+    div.textContent = "No categories yet.";
+    els.catList.appendChild(div);
+    return;
+  }
+  cats.forEach(cat => {
+    const memberIds = canvas.category_members[cat.id] || [];
+    const div = document.createElement("div");
+    div.className = "mc-tray-item";
+    div.dataset.testId = "canvas-cat-item";
+    div.dataset.catId = cat.id;
+    const swatch = cat.color
+      ? `<span class="mc-cat-color" style="background:${escapeHtml(cat.color)}"></span>`
+      : "";
+    div.innerHTML = `
+      <span class="mc-tray-title">${swatch}${escapeHtml(cat.label)}
+        <span class="hint" style="font-weight:normal">· ${memberIds.length}</span>
+      </span>
+      <button type="button" data-mc-cat-delete="${cat.id}"
+              data-test-id="canvas-cat-delete">Delete</button>
+    `;
+    els.catList.appendChild(div);
+  });
+}
+
+function renderBoard() {
+  els.board.innerHTML = "";
+  // Categories first so cards render on top of them.
+  (canvas.categories || []).forEach(cat => {
+    const el = document.createElement("div");
+    el.className = "mc-category";
+    el.dataset.catId = cat.id;
+    el.dataset.testId = "canvas-cat-pill";
+    const swatch = cat.color
+      ? `<span class="mc-cat-color" style="background:${escapeHtml(cat.color)}"></span>`
+      : "";
+    el.innerHTML = `${swatch}${escapeHtml(cat.label)}
+      <span class="mc-cat-actions">
+        <button type="button" data-mc-cat-rename="${cat.id}" title="Rename">✎</button>
+      </span>`;
+    el.style.left = (cat.x + 16) + "px";
+    el.style.top = (cat.y + 16) + "px";
+    els.board.appendChild(el);
+  });
+  (canvas.cards || []).forEach(card => {
+    const memo = memoById(card.memo_id);
+    const el = document.createElement("div");
+    el.className = "mc-card";
+    el.dataset.memoId = card.memo_id;
+    el.dataset.testId = "canvas-card";
+    if (linkSource === card.memo_id) el.classList.add("link-source");
+    el.innerHTML = `
+      <div class="mc-card-type">${memo ? escapeHtml(memo.type) : "missing"}</div>
+      <div class="mc-card-title">${escapeHtml(memoTitle(memo))}</div>
+      <div class="mc-card-actions">
+        <button type="button" data-mc-link="${card.memo_id}"
+                data-test-id="canvas-card-link">Link</button>
+        <button type="button" data-mc-assign="${card.memo_id}"
+                data-test-id="canvas-card-assign">Assign</button>
+        <button type="button" data-mc-remove="${card.memo_id}"
+                data-test-id="canvas-card-remove">Remove</button>
+      </div>
+    `;
+    el.style.left = (card.x + 16) + "px";
+    el.style.top = (card.y + 16) + "px";
+    els.board.appendChild(el);
+  });
+}
+
+function renderAll() {
+  renderTray();
+  renderCategoryList();
+  renderBoard();
+}
+
+// ---------- Data fetch ----------
+async function fetchMemos() {
+  const r = await fetch(`/api/projects/${PROJECT_ID}/memos`);
+  if (!r.ok) throw new Error(`memos HTTP ${r.status}`);
+  const data = await r.json();
+  memos = Array.isArray(data.memos) ? data.memos : [];
+}
+
+async function fetchCanvas() {
+  const r = await fetch(`/api/projects/${PROJECT_ID}/canvas`);
+  if (!r.ok) throw new Error(`canvas HTTP ${r.status}`);
+  canvas = await r.json();
+}
+
+async function refreshAll() {
+  setStatus("Loading…", "");
+  try {
+    await Promise.all([fetchMemos(), fetchCanvas()]);
+    renderAll();
+    setStatus("");
+  } catch (e) {
+    setStatus(`Couldn't load: ${e.message}`, "err");
+  }
+}
+
+// ---------- Card placement / move ----------
+async function placeCardOnBoard(memo_id, x = 80, y = 80) {
+  const [cx, cy] = clampToBounds(x, y);
+  const payload = buildMoveCardPayload({ x: cx, y: cy });
+  const r = await fetch(
+    `/api/projects/${PROJECT_ID}/canvas/cards/${memo_id}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `place HTTP ${r.status}`);
+  }
+  canvas = await r.json();
+}
+
+async function removeCard(memo_id) {
+  const r = await fetch(
+    `/api/projects/${PROJECT_ID}/canvas/cards/${memo_id}`,
+    { method: "DELETE" },
+  );
+  if (!r.ok && r.status !== 404) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `remove HTTP ${r.status}`);
+  }
+  await fetchCanvas();
+}
+
+// ---------- Drag handler ----------
+let drag = null;
+function startDrag(el, evt) {
+  const memo_id = el.dataset.memoId;
+  if (!memo_id) return;
+  const rect = el.getBoundingClientRect();
+  drag = {
+    el, memo_id,
+    offX: evt.clientX - rect.left,
+    offY: evt.clientY - rect.top,
+  };
+  el.classList.add("dragging");
+  evt.preventDefault();
+}
+function onDragMove(evt) {
+  if (!drag) return;
+  const boardRect = els.board.getBoundingClientRect();
+  const left = evt.clientX - boardRect.left + els.board.scrollLeft - drag.offX;
+  const top = evt.clientY - boardRect.top + els.board.scrollTop - drag.offY;
+  const [x, y] = snapToGrid(Math.max(0, left), Math.max(0, top), { grid: 1 });
+  drag.el.style.left = x + "px";
+  drag.el.style.top = y + "px";
+  drag.lastX = x - 16;
+  drag.lastY = y - 16;
+}
+async function onDragEnd(evt) {
+  if (!drag) return;
+  const { el, memo_id, lastX, lastY } = drag;
+  el.classList.remove("dragging");
+  drag = null;
+  if (typeof lastX !== "number") return;
+  setStatus("Saving position…", "");
+  try {
+    await placeCardOnBoard(memo_id, lastX, lastY);
+    renderAll();
+    setStatus("Saved.", "ok");
+  } catch (e) {
+    setStatus(`Save failed: ${e.message}`, "err");
+    await refreshAll();
+  }
+}
+
+// ---------- Link memo→memo ----------
+async function linkMemos(from_memo_id, to_memo_id) {
+  const r = await fetch(`/api/projects/${PROJECT_ID}/canvas/links`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from_memo_id, to_memo_id, role: "related",
+    }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `link HTTP ${r.status}`);
+  }
+}
+
+// ---------- Categories ----------
+async function createCategory(label, color) {
+  const payload = buildAddCategoryPayload({
+    label, color: color || "", x: 40, y: 40,
+  });
+  const r = await fetch(
+    `/api/projects/${PROJECT_ID}/canvas/categories`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `create cat HTTP ${r.status}`);
+  }
+  return await r.json();
+}
+
+async function deleteCategory(cat_id) {
+  const r = await fetch(
+    `/api/projects/${PROJECT_ID}/canvas/categories/${cat_id}`,
+    { method: "DELETE" },
+  );
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `delete cat HTTP ${r.status}`);
+  }
+}
+
+async function assignMemoToCategory(memo_id, cat_id) {
+  const r = await fetch(
+    `/api/projects/${PROJECT_ID}/canvas/categories/${cat_id}/members/${memo_id}`,
+    { method: "PUT" },
+  );
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `assign HTTP ${r.status}`);
+  }
+}
+
+async function renameCategoryPrompt(cat_id) {
+  const cat = (canvas.categories || []).find(c => c.id === cat_id);
+  if (!cat) return;
+  const next = window.prompt("New label?", cat.label);
+  if (!next || next === cat.label) return;
+  setStatus("Renaming…", "");
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/canvas/categories/${cat_id}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: next }),
+      },
+    );
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `rename HTTP ${r.status}`);
+    }
+    await fetchCanvas();
+    renderAll();
+    setStatus("Renamed.", "ok");
+  } catch (e) {
+    setStatus(`Rename failed: ${e.message}`, "err");
+  }
+}
+
+// ---------- Modal helpers ----------
+function showModal(modal) { modal.style.display = "flex"; }
+function hideModal(modal) { modal.style.display = "none"; }
+
+document.querySelectorAll("[data-mc-cancel]").forEach(b => {
+  b.addEventListener("click", () => {
+    hideModal(els.addCatModal);
+    hideModal(els.addMemoModal);
+    hideModal(els.assignModal);
+  });
+});
+
+// ---------- Wire up: + Category ----------
+els.addCatBtn.addEventListener("click", () => {
+  els.catLabel.value = "";
+  els.catColor.value = "";
+  showModal(els.addCatModal);
+  els.catLabel.focus();
+});
+
+els.catCreate.addEventListener("click", async () => {
+  const label = els.catLabel.value.trim();
+  if (!label) {
+    setStatus("Category label is required.", "err");
+    return;
+  }
+  const color = els.catColor.value.trim();
+  setStatus("Creating category…", "");
+  try {
+    await createCategory(label, color);
+    hideModal(els.addCatModal);
+    await fetchCanvas();
+    renderAll();
+    setStatus("Created.", "ok");
+  } catch (e) {
+    setStatus(`Create failed: ${e.message}`, "err");
+  }
+});
+
+// ---------- Wire up: + Place memo ----------
+els.addMemoBtn.addEventListener("click", () => {
+  const off = memosOffBoard();
+  els.memoSelect.innerHTML = "";
+  if (!off.length) {
+    setStatus("No memos available — create memos first.", "err");
+    return;
+  }
+  off.forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = `[${m.type}] ${memoTitle(m)}`;
+    els.memoSelect.appendChild(opt);
+  });
+  showModal(els.addMemoModal);
+});
+
+els.memoPlace.addEventListener("click", async () => {
+  const memo_id = els.memoSelect.value;
+  if (!memo_id) return;
+  setStatus("Placing card…", "");
+  try {
+    await placeCardOnBoard(memo_id, 60, 60);
+    hideModal(els.addMemoModal);
+    renderAll();
+    setStatus("Placed.", "ok");
+  } catch (e) {
+    setStatus(`Place failed: ${e.message}`, "err");
+  }
+});
+
+// ---------- Tray click delegation ----------
+els.tray.addEventListener("click", async (evt) => {
+  const placeBtn = evt.target.closest("[data-mc-place]");
+  if (!placeBtn) return;
+  const memo_id = placeBtn.getAttribute("data-mc-place");
+  setStatus("Placing card…", "");
+  try {
+    await placeCardOnBoard(memo_id, 60, 60);
+    renderAll();
+    setStatus("Placed.", "ok");
+  } catch (e) {
+    setStatus(`Place failed: ${e.message}`, "err");
+  }
+});
+
+// ---------- Category list click delegation ----------
+els.catList.addEventListener("click", async (evt) => {
+  const delBtn = evt.target.closest("[data-mc-cat-delete]");
+  if (delBtn) {
+    const cat_id = delBtn.getAttribute("data-mc-cat-delete");
+    if (!confirm("Delete this category? Cards stay on the board.")) return;
+    setStatus("Deleting category…", "");
+    try {
+      await deleteCategory(cat_id);
+      await fetchCanvas();
+      renderAll();
+      setStatus("Deleted.", "ok");
+    } catch (e) {
+      setStatus(`Delete failed: ${e.message}`, "err");
+    }
+  }
+});
+
+// ---------- Board click + drag delegation ----------
+els.board.addEventListener("mousedown", (evt) => {
+  // Don't start a drag if the click was on a button.
+  if (evt.target.closest("button")) return;
+  const card = evt.target.closest(".mc-card");
+  if (card) startDrag(card, evt);
+  const cat = evt.target.closest(".mc-category");
+  if (cat && !card) startDrag(cat, evt);
+});
+window.addEventListener("mousemove", onDragMove);
+window.addEventListener("mouseup", onDragEnd);
+
+els.board.addEventListener("click", async (evt) => {
+  // Link
+  const linkBtn = evt.target.closest("[data-mc-link]");
+  if (linkBtn) {
+    const memo_id = linkBtn.getAttribute("data-mc-link");
+    if (linkSource === null) {
+      linkSource = memo_id;
+      setStatus("Pick a target card to link to.", "");
+      renderBoard();
+      return;
+    }
+    if (linkSource === memo_id) {
+      linkSource = null;
+      setStatus("Link cancelled.", "");
+      renderBoard();
+      return;
+    }
+    setStatus("Linking…", "");
+    try {
+      await linkMemos(linkSource, memo_id);
+      linkSource = null;
+      await fetchMemos();
+      renderAll();
+      setStatus("Linked.", "ok");
+    } catch (e) {
+      linkSource = null;
+      renderBoard();
+      setStatus(`Link failed: ${e.message}`, "err");
+    }
+    return;
+  }
+  // Remove
+  const rmBtn = evt.target.closest("[data-mc-remove]");
+  if (rmBtn) {
+    const memo_id = rmBtn.getAttribute("data-mc-remove");
+    if (!confirm("Take this memo off the board? The memo itself stays.")) return;
+    setStatus("Removing…", "");
+    try {
+      await removeCard(memo_id);
+      renderAll();
+      setStatus("Removed.", "ok");
+    } catch (e) {
+      setStatus(`Remove failed: ${e.message}`, "err");
+    }
+    return;
+  }
+  // Assign to category
+  const assBtn = evt.target.closest("[data-mc-assign]");
+  if (assBtn) {
+    const memo_id = assBtn.getAttribute("data-mc-assign");
+    const cats = canvas.categories || [];
+    if (!cats.length) {
+      setStatus("Create a category first.", "err");
+      return;
+    }
+    assignTargetMemoId = memo_id;
+    const memo = memoById(memo_id);
+    els.assignWho.textContent = `Memo: ${memoTitle(memo)}`;
+    els.assignSelect.innerHTML = "";
+    cats.forEach(cat => {
+      const opt = document.createElement("option");
+      opt.value = cat.id;
+      opt.textContent = cat.label;
+      els.assignSelect.appendChild(opt);
+    });
+    showModal(els.assignModal);
+    return;
+  }
+  // Rename category (pencil)
+  const renameBtn = evt.target.closest("[data-mc-cat-rename]");
+  if (renameBtn) {
+    const cat_id = renameBtn.getAttribute("data-mc-cat-rename");
+    await renameCategoryPrompt(cat_id);
+  }
+});
+
+els.assignDo.addEventListener("click", async () => {
+  if (!assignTargetMemoId) return;
+  const cat_id = els.assignSelect.value;
+  if (!cat_id) return;
+  setStatus("Assigning…", "");
+  try {
+    await assignMemoToCategory(assignTargetMemoId, cat_id);
+    hideModal(els.assignModal);
+    await fetchCanvas();
+    renderAll();
+    setStatus("Assigned.", "ok");
+  } catch (e) {
+    setStatus(`Assign failed: ${e.message}`, "err");
+  }
+});
+
+refreshAll();
+</script>
+{% endblock %}

@@ -570,6 +570,41 @@ async def project_memos_page(request: Request, project_id: str) -> HTMLResponse:
     })
 
 
+@app.get("/projects/{project_id}/memos/canvas", response_class=HTMLResponse)
+async def project_memo_canvas_page(
+    request: Request, project_id: str
+) -> HTMLResponse:
+    """Memo-sorting canvas page (F5.3 user-facing surface).
+
+    The pure module (:mod:`scribe.memo_canvas`) and the API surface
+    shipped in 9e1fd99 (cards / categories / memo↔memo links) but the
+    drag-drop UI was deferred. This route ships the user-facing
+    canvas: a 2D board where memos already in the project can be laid
+    out, dragged, grouped into named categories ("emerging concept",
+    "structural conditions", …), and linked memo→memo with a
+    typed-relation role. Mirrors NVivo's concept-map / ATLAS.ti's
+    network-view affordance.
+
+    Reaches:
+      * GET    /api/projects/<pid>/canvas
+      * PUT    /api/projects/<pid>/canvas/cards/<memo_id>
+      * DELETE /api/projects/<pid>/canvas/cards/<memo_id>
+      * POST   /api/projects/<pid>/canvas/categories
+      * PATCH  /api/projects/<pid>/canvas/categories/<cid>
+      * DELETE /api/projects/<pid>/canvas/categories/<cid>
+      * PUT    /api/projects/<pid>/canvas/categories/<cid>/members/<memo_id>
+      * DELETE /api/projects/<pid>/canvas/categories/<cid>/members/<memo_id>
+      * POST   /api/projects/<pid>/canvas/links
+      * GET    /api/projects/<pid>/memos (to list memos that can be
+        added to the canvas)
+    """
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "memo_canvas.html", {
+        "project_id": pid,
+        "page_title": "Memo canvas",
+    })
+
+
 @app.get("/projects/{project_id}/ai", response_class=HTMLResponse)
 async def project_ai_page(request: Request, project_id: str) -> HTMLResponse:
     return _render_subpage(
