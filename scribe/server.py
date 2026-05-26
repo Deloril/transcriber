@@ -554,24 +554,20 @@ async def project_queries_page(request: Request, project_id: str) -> HTMLRespons
 
 @app.get("/projects/{project_id}/memos", response_class=HTMLResponse)
 async def project_memos_page(request: Request, project_id: str) -> HTMLResponse:
-    return _render_subpage(
-        request, project_id,
-        page_kind="memos",
-        page_title="Memos",
-        description="Code · theoretical · methodological · reflexive · quote · source · project memos.",
-        feature_refs=["F5.1", "F5.2", "F5.3", "F5.4", "F5.5"],
-        wireframe_blocks=[
-            {"heading": "Memo list", "lines": [
-                "Filter by type · linked-to · author. Cards with body preview.",
-            ]},
-            {"heading": "Memo canvas", "lines": [
-                "Drag-arrangeable canvas for sorting / clustering memos toward a theory (F5.3).",
-            ]},
-            {"heading": "Promote to code definition", "lines": [
-                "One-click promotion of a memo into a code's operational definition (F5.5).",
-            ]},
-        ],
-    )
+    """Memos page (F5.1 user-facing surface).
+
+    Replaces the wireframe stub. The pure module
+    (:mod:`scribe.memos`) and the POST endpoint shipped earlier; this
+    page is the list / create / edit / delete UI that finally makes
+    F5.1 reachable from the project nav. The sorting-canvas (F5.3),
+    "promote to code" affordance (F5.5), and "✨ draft with AI" (F8.8)
+    layer onto this page as later graduations.
+    """
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "memos.html", {
+        "project_id": pid,
+        "page_title": "Memos",
+    })
 
 
 @app.get("/projects/{project_id}/ai", response_class=HTMLResponse)
@@ -4567,6 +4563,145 @@ async def create_memo_endpoint(
             raise HTTPException(400, f"Invalid memo payload: {e}")
         _memos.save_memo(_projects_root(), memo)
     return JSONResponse(memo.to_dict(), status_code=201)
+
+
+# --------------------------------------------------------------------------- #
+# F5.1 reachability — list / read / update / delete memos
+#
+# The Memo entity has a POST endpoint above (right-click + flat-create
+# flows for F5.1 / F5.2). The Memos page (/projects/<pid>/memos) needs
+# to *list* memos; deleting and editing make the page functionally
+# complete instead of a write-only inbox. These endpoints surface the
+# corresponding helpers in :mod:`scribe.memos` (``list_memos``,
+# ``load_memo``, ``apply_update``, ``delete_memo``).
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/api/projects/{project_id}/memos")
+async def list_memos_endpoint(
+    project_id: str,
+    type: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    author_coder_id: str | None = None,
+    tag: str | None = None,
+) -> JSONResponse:
+    """List memos in a project, optionally filtered.
+
+    Query parameters mirror :func:`scribe.memos.list_memos`:
+
+    * ``type`` — restrict to a single :data:`scribe.memos.MEMO_TYPES` value.
+    * ``target_type`` / ``target_id`` — restrict to memos linked to a
+      specific entity. Pass both for an exact target; ``target_type``
+      alone returns memos linked to *any* entity of that type.
+    * ``author_coder_id`` — restrict to memos by a single author.
+    * ``tag`` — restrict to memos carrying a tag (exact, case-sensitive).
+
+    Returns ``{"memos": [...]}`` so the response shape mirrors the
+    sources/codes/applications listing endpoints. Filter validation
+    errors come back as 400; the project not existing is 404.
+    """
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            memos = _memos.list_memos(
+                _projects_root(),
+                project_id,
+                type=type,
+                target_type=target_type,
+                target_id=target_id,
+                author_coder_id=author_coder_id,
+                tag=tag,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+    return JSONResponse({"memos": [m.to_dict() for m in memos]})
+
+
+@app.get("/api/projects/{project_id}/memos/{memo_id}")
+async def get_memo_endpoint(
+    project_id: str, memo_id: str
+) -> JSONResponse:
+    """Return a single memo by id.
+
+    Used by the memos page when a researcher clicks a row to load
+    the memo into the edit form. 404 when the project or memo is
+    missing.
+    """
+    _check_project_id(project_id)
+    _check_memo_id(memo_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            memo = _memos.load_memo(
+                _projects_root(), project_id, memo_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Memo not found")
+    return JSONResponse(memo.to_dict())
+
+
+@app.patch("/api/projects/{project_id}/memos/{memo_id}")
+async def patch_memo_endpoint(
+    project_id: str, memo_id: str, request: Request
+) -> JSONResponse:
+    """Apply a partial update to a memo (F5.1 reachability).
+
+    Body shape matches :meth:`scribe.memos.Memo.apply_update`: any of
+    ``type`` / ``title`` / ``body`` / ``body_format`` /
+    ``author_coder_id`` / ``links`` / ``tags`` / ``provenance``.
+    Updating ``links`` / ``tags`` replaces the whole list; the UI is
+    expected to read-modify-write so each edit produces one event in
+    the F9.1 log.
+    """
+    _check_project_id(project_id)
+    _check_memo_id(memo_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            memo = _memos.load_memo(
+                _projects_root(), project_id, memo_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Memo not found")
+        try:
+            memo.apply_update(body)
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"Invalid memo update: {e}")
+        _memos.save_memo(_projects_root(), memo)
+    return JSONResponse(memo.to_dict())
+
+
+@app.delete("/api/projects/{project_id}/memos/{memo_id}")
+async def delete_memo_endpoint(
+    project_id: str, memo_id: str
+) -> JSONResponse:
+    """Hard-delete a memo. Returns 204-style ``{"ok": True}``.
+
+    F9.1 will record the deletion in the event log when that wires
+    in; the file itself goes away here. Returns 404 if the memo did
+    not exist (so a redundant delete is visible to the UI rather
+    than silent).
+    """
+    _check_project_id(project_id)
+    _check_memo_id(memo_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        removed = _memos.delete_memo(
+            _projects_root(), project_id, memo_id
+        )
+    if not removed:
+        raise HTTPException(404, "Memo not found")
+    return JSONResponse({"ok": True})
 
 
 # --------------------------------------------------------------------------- #

@@ -29,9 +29,9 @@
     <a class="btn" href="/projects/{{ project_id }}/sources/add">+ Add source</a>
   {% elif page_kind == "codebook" %}
     <a class="btn" href="#" onclick="alert('Stub: F2.x'); return false;">+ New code</a>
-  {% elif page_kind == "memos" %}
-    <a class="btn" href="#" onclick="alert('Stub: F5.1'); return false;">+ New memo</a>
   {% endif %}
+  {# F5.1 memos page graduated to its own template (memos.html); the
+     "+ New memo" button now lives there as a real action button. #}
   {# F3.5 graduated to its own template (queries.html); the
      "+ New query" stub used to live here and now lives in the
      real query builder as "Run query". #}

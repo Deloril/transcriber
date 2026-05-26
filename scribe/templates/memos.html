@@ -1,0 +1,500 @@
+{#
+  Memos page (F5.1 user-facing surface).
+
+  PLANNING.md F5.1:
+    > Memo entity with type (code / theoretical / methodological /
+    > reflexive / quote / source / project), rich text body, multi-
+    > target links.
+
+  scribe/memos.py shipped the entity in 7528995 with passing pytest
+  coverage; the right-click POST flow shipped with F5.2 in c3c3375.
+  Until this template landed, the only way to reach a memo was via
+  curl or the right-click context flow inside the source-coding view.
+  This page is the *list / create / edit / delete* UI — the canonical
+  Memos surface for the project.
+
+  Reads:
+    GET  /api/projects/<pid>/memos                 — list
+    GET  /api/projects/<pid>/memos/<mid>           — single, for edit
+
+  Writes:
+    POST   /api/projects/<pid>/memos               — create (flat shape)
+    PATCH  /api/projects/<pid>/memos/<mid>         — partial update
+    DELETE /api/projects/<pid>/memos/<mid>         — hard delete
+
+  Future graduations live on this page as additive panels:
+    F5.3 — sorting canvas (separate /memos/canvas route, link in actions)
+    F5.4 — "Export all memos" button (uses list_memos filter set)
+    F5.5 — "↗ Promote to code" button on a memo card
+    F8.8 — "✨ Draft with AI" button on the create form
+#}
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+{% block title %}Memos{% endblock %}
+{% block heading %}Memos{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+  <button id="newMemoBtn" type="button" class="btn" data-test-id="memos-new">+ New memo</button>
+{% endblock %}
+
+{% block subtitle_block %}
+  <span class="sub">F5.1 — code · theoretical · methodological · reflexive · quote · source · project · free.</span>
+{% endblock %}
+
+{% block extra_styles %}
+  .mm-grid {
+    display: grid;
+    grid-template-columns: minmax(280px, 1fr) 2fr;
+    gap: 22px;
+    align-items: start;
+  }
+  @media (max-width: 920px) {
+    .mm-grid { grid-template-columns: 1fr; }
+  }
+  .mm-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 12px;
+    align-items: center;
+  }
+  .mm-filters select, .mm-filters input {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 9px;
+    font: inherit;
+    font-size: 13px;
+  }
+  .mm-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .mm-item {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 11px 13px;
+    background: var(--panel-2);
+    cursor: pointer;
+    transition: background 80ms ease, border-color 80ms ease;
+  }
+  .mm-item:hover {
+    background: rgba(122, 167, 255, .06);
+    border-color: var(--accent);
+  }
+  .mm-item.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(122, 167, 255, .18);
+  }
+  .mm-item-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .mm-title {
+    font-weight: 600;
+    color: var(--text);
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mm-type-pill {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 8px;
+    flex-shrink: 0;
+  }
+  .mm-type-pill[data-type="theoretical"] { color: #d29ad8; border-color: #6d4f72; }
+  .mm-type-pill[data-type="methodological"] { color: #9ad8c0; border-color: #4d6f63; }
+  .mm-type-pill[data-type="reflexive"] { color: #d8be9a; border-color: #6f5e4d; }
+  .mm-type-pill[data-type="quote"] { color: #9aa9d8; border-color: #4d556f; }
+  .mm-type-pill[data-type="code"] { color: #d8d29a; border-color: #6f6c4d; }
+  .mm-type-pill[data-type="source"] { color: #b89ad8; border-color: #5d4d6f; }
+  .mm-type-pill[data-type="project"] { color: #9ad8d2; border-color: #4d6c6f; }
+  .mm-body-preview {
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.45;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .mm-meta {
+    color: var(--muted);
+    font-size: 11px;
+    margin-top: 5px;
+  }
+  .mm-form label {
+    display: block;
+    color: var(--muted);
+    font-size: 12px;
+    margin: 10px 0 4px;
+  }
+  .mm-form input[type=text], .mm-form select, .mm-form textarea {
+    width: 100%;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 11px;
+    font: inherit;
+    font-size: 14px;
+    box-sizing: border-box;
+  }
+  .mm-form textarea {
+    resize: vertical;
+    min-height: 140px;
+    font-family: inherit;
+    line-height: 1.5;
+  }
+  .mm-form .row-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .mm-actions {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 16px;
+  }
+  .mm-actions .left { display: flex; gap: 8px; }
+  .mm-actions .right { display: flex; gap: 8px; }
+  #mmStatus { font-size: 12px; color: var(--muted); margin-left: 8px; }
+  #mmStatus.err { color: var(--err); }
+  #mmStatus.ok { color: var(--ok, #6abf7b); }
+  .mm-empty {
+    color: var(--muted);
+    font-style: italic;
+    padding: 14px 0;
+  }
+{% endblock %}
+
+{% block body %}
+<div class="mm-grid">
+  <div class="card" data-test-feature="F5.1">
+    <h2 style="margin-top:0">
+      Memos <span id="mmCount" class="hint" style="margin-left:6px"></span>
+    </h2>
+    <div class="mm-filters">
+      <label class="hint" for="mmTypeFilter">Type:</label>
+      <select id="mmTypeFilter" data-test-id="memos-type-filter">
+        <option value="">all</option>
+        <option value="free">free</option>
+        <option value="code">code</option>
+        <option value="theoretical">theoretical</option>
+        <option value="methodological">methodological</option>
+        <option value="reflexive">reflexive</option>
+        <option value="quote">quote</option>
+        <option value="source">source</option>
+        <option value="project">project</option>
+      </select>
+    </div>
+    <div id="mmList" class="mm-list" data-test-id="memos-list"></div>
+    <div id="mmEmpty" class="mm-empty" style="display:none">
+      No memos yet. Click <strong>+ New memo</strong> to write the first one.
+    </div>
+  </div>
+
+  <div class="card" data-test-feature="F5.1">
+    <div style="display:flex;align-items:center;gap:10px">
+      <h2 id="mmFormTitle" style="margin:0">New memo</h2>
+      <span id="mmStatus"></span>
+    </div>
+    <p class="hint" style="margin:6px 0 0">
+      Memos are the connective tissue of grounded-theory analysis.
+      Write early, write often, refactor upward.
+    </p>
+
+    <form id="mmForm" class="mm-form" autocomplete="off">
+      <div class="row-2">
+        <div>
+          <label for="mmType">Type</label>
+          <select id="mmType" data-test-id="memos-form-type">
+            <option value="free">free</option>
+            <option value="code">code</option>
+            <option value="theoretical">theoretical</option>
+            <option value="methodological">methodological</option>
+            <option value="reflexive">reflexive</option>
+            <option value="quote">quote</option>
+            <option value="source">source</option>
+            <option value="project">project</option>
+          </select>
+        </div>
+        <div>
+          <label for="mmBodyFormat">Body format</label>
+          <select id="mmBodyFormat">
+            <option value="markdown">markdown</option>
+            <option value="plain">plain</option>
+            <option value="html">html</option>
+          </select>
+        </div>
+      </div>
+
+      <label for="mmTitle">Title</label>
+      <input id="mmTitle" type="text" maxlength="200"
+             placeholder="A short label — optional but helpful for the list view"
+             data-test-id="memos-form-title">
+
+      <label for="mmBody">Body</label>
+      <textarea id="mmBody"
+                placeholder="What did you notice? What does it mean? What would you do with it?"
+                data-test-id="memos-form-body"></textarea>
+
+      <label for="mmTags">Tags (comma-separated, optional)</label>
+      <input id="mmTags" type="text"
+             placeholder="e.g. early-coding, pain, identity"
+             data-test-id="memos-form-tags">
+
+      <div class="mm-actions">
+        <div class="left">
+          <button type="button" id="mmDelete" class="btn secondary"
+                  style="display:none;color:var(--err)"
+                  data-test-id="memos-delete">Delete</button>
+        </div>
+        <div class="right">
+          <button type="button" id="mmCancel" class="btn secondary"
+                  style="display:none">Cancel edit</button>
+          <button type="submit" id="mmSubmit" class="btn"
+                  data-test-id="memos-submit">Save memo</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script type="module">
+import { escapeHtml } from "/static/js/helpers.mjs";
+
+const PROJECT_ID = {{ project_id | tojson }};
+
+const els = {
+  list: document.getElementById("mmList"),
+  empty: document.getElementById("mmEmpty"),
+  count: document.getElementById("mmCount"),
+  typeFilter: document.getElementById("mmTypeFilter"),
+  newBtn: document.getElementById("newMemoBtn"),
+  formTitle: document.getElementById("mmFormTitle"),
+  status: document.getElementById("mmStatus"),
+  form: document.getElementById("mmForm"),
+  type: document.getElementById("mmType"),
+  bodyFormat: document.getElementById("mmBodyFormat"),
+  title: document.getElementById("mmTitle"),
+  body: document.getElementById("mmBody"),
+  tags: document.getElementById("mmTags"),
+  submit: document.getElementById("mmSubmit"),
+  cancel: document.getElementById("mmCancel"),
+  del: document.getElementById("mmDelete"),
+};
+
+let memos = [];
+let editingId = null;
+
+function setStatus(msg, kind) {
+  els.status.textContent = msg || "";
+  els.status.className = kind || "";
+}
+
+function fmtDate(s) {
+  if (!s) return "";
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return s;
+    return d.toLocaleDateString(undefined, {
+      year: "numeric", month: "short", day: "numeric",
+    });
+  } catch (_) { return s; }
+}
+
+function bodyPreview(s) {
+  const t = String(s || "").trim();
+  if (!t) return "(empty)";
+  // Markdown stripping is intentionally minimal — we want a quick
+  // preview, not a renderer. Researchers will see the raw body in
+  // the editor anyway.
+  return t.replace(/\s+/g, " ").slice(0, 240);
+}
+
+function renderList() {
+  const wantedType = els.typeFilter.value;
+  const filtered = wantedType
+    ? memos.filter(m => m.type === wantedType)
+    : memos.slice();
+  els.count.textContent = filtered.length === memos.length
+    ? `(${memos.length})`
+    : `(${filtered.length} of ${memos.length})`;
+  if (!filtered.length) {
+    els.list.innerHTML = "";
+    els.empty.style.display = "";
+    return;
+  }
+  els.empty.style.display = "none";
+  els.list.innerHTML = "";
+  filtered.forEach(m => {
+    const div = document.createElement("div");
+    div.className = "mm-item" + (m.id === editingId ? " active" : "");
+    div.dataset.memoId = m.id;
+    div.dataset.testId = "memos-item";
+    const title = m.title || "(untitled)";
+    const linksCount = (m.links || []).length;
+    const tagsStr = (m.tags || []).join(", ");
+    div.innerHTML = `
+      <div class="mm-item-head">
+        <div class="mm-title">${escapeHtml(title)}</div>
+        <div class="mm-type-pill" data-type="${escapeHtml(m.type)}">${escapeHtml(m.type)}</div>
+      </div>
+      <div class="mm-body-preview">${escapeHtml(bodyPreview(m.body))}</div>
+      <div class="mm-meta">
+        ${escapeHtml(fmtDate(m.modified_at || m.created_at))}
+        ${linksCount ? `· ${linksCount} link${linksCount === 1 ? "" : "s"}` : ""}
+        ${tagsStr ? `· ${escapeHtml(tagsStr)}` : ""}
+      </div>
+    `;
+    div.addEventListener("click", () => loadForEdit(m.id));
+    els.list.appendChild(div);
+  });
+}
+
+async function fetchList() {
+  setStatus("Loading…", "");
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/memos`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    memos = Array.isArray(data.memos) ? data.memos : [];
+    renderList();
+    setStatus("");
+  } catch (e) {
+    setStatus(`Couldn't load memos: ${e.message}`, "err");
+  }
+}
+
+function clearForm() {
+  editingId = null;
+  els.form.reset();
+  els.type.value = "free";
+  els.bodyFormat.value = "markdown";
+  els.formTitle.textContent = "New memo";
+  els.cancel.style.display = "none";
+  els.del.style.display = "none";
+  els.submit.textContent = "Save memo";
+  setStatus("");
+  renderList();
+}
+
+async function loadForEdit(memoId) {
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/memos/${memoId}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const m = await r.json();
+    editingId = m.id;
+    els.type.value = m.type || "free";
+    els.bodyFormat.value = m.body_format || "markdown";
+    els.title.value = m.title || "";
+    els.body.value = m.body || "";
+    els.tags.value = (m.tags || []).join(", ");
+    els.formTitle.textContent = "Edit memo";
+    els.cancel.style.display = "";
+    els.del.style.display = "";
+    els.submit.textContent = "Save changes";
+    setStatus("");
+    renderList();
+    els.title.focus();
+  } catch (e) {
+    setStatus(`Couldn't open memo: ${e.message}`, "err");
+  }
+}
+
+function parseTags(raw) {
+  return String(raw || "")
+    .split(",")
+    .map(t => t.trim())
+    .filter(Boolean);
+}
+
+els.form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const payload = {
+    type: els.type.value,
+    body_format: els.bodyFormat.value,
+    title: els.title.value.trim(),
+    body: els.body.value,
+    tags: parseTags(els.tags.value),
+  };
+  setStatus("Saving…", "");
+  try {
+    let r;
+    if (editingId) {
+      r = await fetch(
+        `/api/projects/${PROJECT_ID}/memos/${editingId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+    } else {
+      r = await fetch(`/api/projects/${PROJECT_ID}/memos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    }
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    setStatus(editingId ? "Saved." : "Created.", "ok");
+    await fetchList();
+    if (!editingId) {
+      // After create, leave the form clear so the next memo starts blank.
+      clearForm();
+    }
+  } catch (e) {
+    setStatus(`Save failed: ${e.message}`, "err");
+  }
+});
+
+els.cancel.addEventListener("click", clearForm);
+
+els.del.addEventListener("click", async () => {
+  if (!editingId) return;
+  if (!confirm("Delete this memo? The audit trail keeps the deletion event.")) return;
+  setStatus("Deleting…", "");
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/memos/${editingId}`,
+      { method: "DELETE" },
+    );
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    setStatus("Deleted.", "ok");
+    clearForm();
+    await fetchList();
+  } catch (e) {
+    setStatus(`Delete failed: ${e.message}`, "err");
+  }
+});
+
+els.newBtn.addEventListener("click", () => {
+  clearForm();
+  els.title.focus();
+});
+
+els.typeFilter.addEventListener("change", renderList);
+
+fetchList();
+</script>
+{% endblock %}
