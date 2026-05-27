@@ -264,6 +264,18 @@ async def index(request: Request) -> HTMLResponse:
     except Exception:  # noqa: BLE001
         smoke_test_plan_payload = None
 
+    # G6.2 — surface the in-house benchmark plan with the same
+    # defensive shape. Where the smoke test answers "does the path
+    # crash?", the benchmark answers "is it actually fast?". A
+    # researcher seeing the smoke-test panel pass will want to know
+    # the next CLI invocation; the benchmark panel sits next to it so
+    # they don't have to memorise a different module path.
+    try:
+        from .scripts.bench_rocm import benchmark_plan as _bench_plan_fn
+        benchmark_plan_payload = _bench_plan_fn()
+    except Exception:  # noqa: BLE001
+        benchmark_plan_payload = None
+
     active_backend = gpu_backend()
     return templates.TemplateResponse(
         request,
@@ -287,6 +299,9 @@ async def index(request: Request) -> HTMLResponse:
             # G6.1 — read-only smoke-test plan; ``None`` only when the
             # script module fails to import (defensive).
             "smoke_test_plan": smoke_test_plan_payload,
+            # G6.2 — read-only benchmark plan; ``None`` only when the
+            # script module fails to import (defensive).
+            "benchmark_plan": benchmark_plan_payload,
         },
     )
 
@@ -382,6 +397,30 @@ async def smoke_test_plan_endpoint() -> JSONResponse:
     """
     from .scripts.check_rocm import smoke_test_plan
     return JSONResponse(smoke_test_plan())
+
+
+@app.get("/api/diagnostics/benchmark-plan")
+async def benchmark_plan_endpoint() -> JSONResponse:
+    """Return the G6.2 in-house benchmark plan as JSON.
+
+    Where the G6.1 smoke test answers "does the ROCm path crash?",
+    the G6.2 benchmark (``scribe.scripts.bench_rocm``) answers "is it
+    actually fast?" before any performance number ships in a README
+    or a blog post. It runs the full Whisper → align → (optional)
+    diarize pipeline on a representative audio file, recording wall-
+    clock and RTF for each stage, and supports an offline ``--compare``
+    mode that diffs two saved JSON reports.
+
+    Like the smoke-test route this is read-only — it never imports
+    whisperx or torch and never spawns the benchmark. Callers that
+    want to actually run it shell out to
+    ``python -m scribe.scripts.bench_rocm <audio>`` using the ``cli``
+    / ``cli_venv`` strings the route returns; the ``modes`` list
+    advertises both the run-mode and the compare-mode invocations
+    explicitly.
+    """
+    from .scripts.bench_rocm import benchmark_plan
+    return JSONResponse(benchmark_plan())
 
 
 @app.get("/edit/{job_id}", response_class=HTMLResponse)

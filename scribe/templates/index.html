@@ -929,6 +929,103 @@
     </div>
     {% endif %}
 
+    {# G6.2 — In-house benchmark plan panel.
+
+       Sits next to the G6.1 smoke-test panel because they answer
+       complementary questions: smoke test = "does the path crash?";
+       benchmark = "is it actually fast?". Where the smoke test runs
+       on silence and reports wall-clock, the benchmark runs on a
+       real audio file and reports RTF + supports an offline compare
+       across boxes. Same Jinja shape as G6.1: feature attribute, two
+       CLI forms (run-mode + compare-mode), ordered stage list,
+       exit-code list, defaults summary. The panel is read-only — it
+       never spawns the benchmark; callers copy the CLI invocation.
+
+       Defensive: ``benchmark_plan`` may be ``None`` if the script
+       module failed to import (deploys that strip ``scribe/scripts``).
+       Skip the panel rather than render an empty card. #}
+    {% if benchmark_plan %}
+    <div class="card"
+         id="benchmarkPlanCard"
+         data-test-feature="G6.2"
+         data-test-id="benchmark-plan-card"
+         data-stage-count="{{ benchmark_plan.stages|length }}"
+         data-mode-count="{{ benchmark_plan.modes|length }}">
+      <details>
+        <summary style="cursor:pointer;display:flex;align-items:center;gap:8px;">
+          <span class="caret" aria-hidden="true">▶</span>
+          <span class="title" style="font-weight:600;">Diagnostics — in-house benchmark</span>
+          <span class="hint" style="margin:0;">measure RTF + diff CUDA vs ROCm (CLI)</span>
+        </summary>
+        <div style="margin-top:14px;">
+          <p class="hint" style="margin:0 0 10px 0;">
+            Once the smoke test passes, run this to record wall-clock
+            and real-time-factor across the Whisper → align{% if benchmark_plan.defaults.include_diarize %} → diarize{% endif %}
+            pipeline on a representative audio file. Save the JSON
+            report on each box (CUDA + ROCm) and use
+            <code>--compare</code> to diff them — the panel below
+            advertises both modes. The script
+            <strong>fails fast</strong> at the first stage failure,
+            because a wedged backend doesn't produce useful timings
+            for later stages.
+          </p>
+          {# Modes: ``run`` and ``compare``. Each mode renders its
+             own CLI block so a copy-paste of either works without
+             munging. #}
+          <div data-test-id="benchmark-plan-modes"
+               style="display:flex;flex-direction:column;gap:10px;margin:8px 0;">
+            {% for mode in benchmark_plan.modes %}
+              <div data-test-id="benchmark-plan-mode-{{ mode.name }}"
+                   style="display:flex;flex-direction:column;gap:4px;">
+                <span class="hint" style="margin:0;">
+                  <strong>{{ mode.name }}</strong> — {{ mode.summary }}
+                </span>
+                <code data-test-id="benchmark-plan-mode-{{ mode.name }}-cli-venv"
+                      style="display:block;padding:8px 10px;background:var(--panel-2,var(--panel));border:1px solid var(--border);border-radius:6px;font-family:var(--mono,monospace);">{{ mode.cli_venv }}</code>
+              </div>
+            {% endfor %}
+          </div>
+          <div style="margin-top:10px;">
+            <strong style="font-size:13px;">Stages (in order)</strong>
+            <ol data-test-id="benchmark-plan-stages"
+                style="margin:6px 0 0 18px;padding:0;font-size:13px;">
+              {% for stage in benchmark_plan.stages %}
+                <li data-test-id="benchmark-plan-stage-{{ stage.name }}">
+                  <code>{{ stage.name }}</code> — {{ stage.summary }}
+                  {% if stage.optional %}
+                    <span class="hint" style="margin:0;">(optional)</span>
+                  {% endif %}
+                </li>
+              {% endfor %}
+            </ol>
+          </div>
+          <div style="margin-top:10px;">
+            <strong style="font-size:13px;">Exit codes</strong>
+            <ul data-test-id="benchmark-plan-exit-codes"
+                style="margin:6px 0 0 18px;padding:0;font-size:13px;">
+              {% for ec in benchmark_plan.exit_codes %}
+                <li data-test-id="benchmark-plan-exit-code-{{ ec.code }}">
+                  <code>{{ ec.code }}</code> — {{ ec.meaning }}
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+          <p class="hint" style="margin:10px 0 0 0;">
+            Defaults: <code>--model {{ benchmark_plan.defaults.model }}</code>,
+            <code>--language {{ benchmark_plan.defaults.language }}</code>.
+            Pass <code>--include-diarize</code> (and set
+            <code>HF_TOKEN</code>) to also benchmark pyannote, and
+            <code>--output report.json</code> to save the report for
+            an offline <code>--compare</code> on a different box.
+            See the
+            <a href="/docs/readme" rel="noopener">README</a> for the
+            full ROCm install + benchmark context.
+          </p>
+        </div>
+      </details>
+    </div>
+    {% endif %}
+
     <!-- Slide-in docs -->
     <div id="docOverlay" class="doc-overlay" aria-hidden="true"></div>
     <aside id="docPanel" class="doc-panel" aria-hidden="true" aria-label="Documentation">

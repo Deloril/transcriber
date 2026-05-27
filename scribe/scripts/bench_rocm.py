@@ -646,6 +646,153 @@ def run_benchmark(
 
 
 # --------------------------------------------------------------------------- #
+# G6.2 — Read-only "what does this benchmark do?" plan surface.
+#
+# Mirrors the G6.1 ``smoke_test_plan()`` pattern. The CLI itself is the
+# user-facing surface for actually *running* the benchmark (model loads
+# don't belong in a request-handler), but a researcher who hasn't yet
+# memorised the invocation still wants to discover it from the home page
+# without dropping to the README. The Jinja template + JSON route both
+# read these constants so they can never disagree about stage order,
+# defaults, exit codes, or modes.
+# --------------------------------------------------------------------------- #
+
+
+# Ordered list of stages the benchmark exercises, mirroring the order
+# ``run_benchmark`` actually runs them in. Six required + two optional
+# stages (the diarize pair is gated on ``--include-diarize`` and HF_TOKEN);
+# the ``optional`` flag is part of the contract so the panel can render
+# them with a hint instead of pretending they always run.
+BENCHMARK_STAGES: tuple[dict[str, Any], ...] = (
+    {
+        "name": "load_whisper",
+        "summary": "Instantiate the WhisperX wrapper for the active backend.",
+        "optional": False,
+    },
+    {
+        "name": "load_audio",
+        "summary": "Decode the representative WAV to a NumPy array.",
+        "optional": False,
+    },
+    {
+        "name": "transcribe",
+        "summary": "Run Whisper inference on the full file (the headline number).",
+        "optional": False,
+    },
+    {
+        "name": "load_align_model",
+        "summary": "Load the language's wav2vec2 alignment model.",
+        "optional": False,
+    },
+    {
+        "name": "align",
+        "summary": "Run forced alignment on the transcribed segments.",
+        "optional": False,
+    },
+    {
+        "name": "load_diarize",
+        "summary": "Optional. Load pyannote/speaker-diarization-3.1 (needs HF_TOKEN).",
+        "optional": True,
+    },
+    {
+        "name": "run_diarize",
+        "summary": "Optional. Run pyannote on the audio (probes MIOpen LSTM bug).",
+        "optional": True,
+    },
+)
+
+
+# Process exit codes returned by ``main()``. Surfaced so a CI wrapper
+# can rely on them being part of the contract rather than reading them
+# out of source.
+BENCHMARK_EXIT_CODES: tuple[dict[str, Any], ...] = (
+    {"code": 0, "meaning": "healthy — benchmark or comparison ran without stage failure"},
+    {"code": 1, "meaning": "stage_failure — at least one benchmark stage failed"},
+    {"code": 2, "meaning": "bad_cli_args — missing audio path or unreadable report files"},
+)
+
+
+# CLI mode descriptions. Two modes: a single-box benchmark run, and an
+# offline ``--compare`` of two saved reports. Each mode advertises its
+# own invocation so a copy-paste from the panel works without further
+# munging.
+BENCHMARK_MODES: tuple[dict[str, Any], ...] = (
+    {
+        "name": "run",
+        "summary": "Benchmark the local box on a representative audio file.",
+        "cli": "python -m scribe.scripts.bench_rocm <audio> [--model …] [--output …]",
+        "cli_venv": ".venv/bin/python -m scribe.scripts.bench_rocm <audio> [--model …] [--output …]",
+    },
+    {
+        "name": "compare",
+        "summary": "Diff two saved JSON reports (e.g. cuda.json vs rocm.json).",
+        "cli": "python -m scribe.scripts.bench_rocm --compare baseline.json candidate.json",
+        "cli_venv": ".venv/bin/python -m scribe.scripts.bench_rocm --compare baseline.json candidate.json",
+    },
+)
+
+
+# Defaults baked into ``build_parser``. Restated here as data so the
+# home-page panel doesn't have to re-import argparse. The
+# ``test_defaults_match_argparse`` test below pins these against the
+# parser so any drift fails loudly.
+BENCHMARK_DEFAULTS: dict[str, Any] = {
+    "model": "tiny",
+    "language": "en",
+    "include_diarize": False,
+    "output": None,
+    "label": None,
+}
+
+
+# CLI invocation strings the home page surfaces verbatim. The
+# ``cli_venv`` form mirrors the README's "run from a fresh terminal"
+# convention.
+BENCHMARK_CLI = "python -m scribe.scripts.bench_rocm"
+BENCHMARK_CLI_VENV = ".venv/bin/python -m scribe.scripts.bench_rocm"
+
+
+def benchmark_plan() -> dict[str, Any]:
+    """Return a structured description of what the benchmark does.
+
+    No model loads, no I/O, no torch import — pure metadata. The
+    FastAPI route ``GET /api/diagnostics/benchmark-plan`` returns this
+    dict as JSON; the home-page template renders the same fields into a
+    panel so a user knows what the CLI invocation will run before
+    running it.
+
+    Keys:
+
+    * ``feature_id`` — ``"G6.2"`` so JS test-id selectors can pin the
+      panel.
+    * ``cli`` / ``cli_venv`` — copy-paste invocation strings (run-mode).
+    * ``stages`` — ordered list of ``{name, summary, optional}`` dicts
+      mirroring the order ``run_benchmark`` executes them.
+    * ``defaults`` — argparse defaults (model / language /
+      include_diarize / output / label).
+    * ``exit_codes`` — ``[{code, meaning}, ...]`` triples.
+    * ``modes`` — ``run`` vs ``compare`` invocations advertised
+      separately so the panel can render both.
+    * ``fail_fast`` — ``True``: ``run_benchmark`` stops at the first
+      failure so a wedged backend doesn't produce nonsense timings
+      later.
+    * ``docs_anchor`` — README section heading the user can jump to
+      from the in-app docs viewer (``/docs/readme``) for context.
+    """
+    return {
+        "feature_id": "G6.2",
+        "cli": BENCHMARK_CLI,
+        "cli_venv": BENCHMARK_CLI_VENV,
+        "stages": [dict(stage) for stage in BENCHMARK_STAGES],
+        "defaults": dict(BENCHMARK_DEFAULTS),
+        "exit_codes": [dict(ec) for ec in BENCHMARK_EXIT_CODES],
+        "modes": [dict(mode) for mode in BENCHMARK_MODES],
+        "fail_fast": True,
+        "docs_anchor": "linux-amd-gpu--rocm",
+    }
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
