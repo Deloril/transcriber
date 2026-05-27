@@ -363,6 +363,10 @@ class TestTurn:
         assert "/api/projects/" in body and "/chats" in body
         assert 'id="convList"' in body
         assert 'id="newBtn"' in body
+        # Build-index affordance lives on the source picker so a
+        # fresh project can populate the index without leaving the page.
+        assert "embedding-index/refresh" in body
+        assert 'id="buildBtn"' in body
 
     def test_first_question_populates_title(self, env) -> None:
         client, _ = env

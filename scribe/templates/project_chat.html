@@ -270,6 +270,7 @@ let conversations = [];   // light list (no messages)
 let activeConvId = null;
 let activeConv = null;    // full thread for the selected conversation
 let sources = [];         // from /api/projects/<pid>/sources
+let indexStats = null;    // from /api/projects/<pid>/ai/embedding-index
 
 const $ = (id) => document.getElementById(id);
 const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -287,12 +288,18 @@ async function fetchJSON(url, options = {}) {
 
 async function loadAll() {
   try {
-    const [convResp, sourcesResp] = await Promise.all([
+    const [convResp, sourcesResp, indexResp] = await Promise.all([
       fetchJSON(`/api/projects/${PROJECT_ID}/chats`),
       fetchJSON(`/api/projects/${PROJECT_ID}/sources`),
+      // The index endpoint can return 4xx if no model is configured;
+      // we treat those as "no index yet" rather than a hard failure
+      // so the picker still renders and the user can configure later.
+      fetchJSON(`/api/projects/${PROJECT_ID}/ai/embedding-index`)
+        .catch(() => null),
     ]);
     conversations = convResp.conversations || [];
     sources = sourcesResp.sources || [];
+    indexStats = indexResp;
     renderConvList();
     if (!activeConvId && conversations.length) {
       selectConv(conversations[0].id);
@@ -302,6 +309,13 @@ async function loadAll() {
   } catch (e) {
     renderError(`Could not load: ${e.message}`);
   }
+}
+
+function indexCountForSource(sid) {
+  // Returns the number of indexed entries for a given source id, or
+  // 0 if we can't tell (no stats yet, or source absent from the map).
+  if (!indexStats || !indexStats.by_source) return 0;
+  return indexStats.by_source[sid] || 0;
 }
 
 function renderError(msg) {
@@ -343,6 +357,21 @@ function renderPicker() {
     `;
     return;
   }
+  // Total indexed entries across all sources — drives the "no
+  // snippets to ground on" warning shown next to the build button.
+  const totalIndexed = indexStats ? (indexStats.total || 0) : 0;
+  const indexBanner = totalIndexed === 0
+    ? `<div class="hint" style="color:var(--warn);margin-bottom:8px">
+         <strong>Embedding index is empty.</strong> The chat will still answer
+         questions, but without snippets to ground on it'll say "no relevant
+         text found" for most queries. Build the index first ↓
+       </div>`
+    : `<div class="hint" style="margin-bottom:8px">
+         <strong>${totalIndexed}</strong> snippet${totalIndexed === 1 ? "" : "s"}
+         indexed across this project. Build / refresh below if you've added
+         sources or edited transcripts since the last build.
+       </div>`;
+
   $("pane").innerHTML = `
     <div class="picker">
       <h3>Pick the sources you want to talk about</h3>
@@ -350,8 +379,15 @@ function renderPicker() {
         Selected sources will be searched for relevant snippets each
         time you ask a question. You can talk to one source or many at once.
       </div>
+      ${indexBanner}
       <div id="srcList"></div>
-      <button class="start-btn" id="startBtn" disabled>Start chat →</button>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap">
+        <button class="start-btn" id="startBtn" disabled>Start chat →</button>
+        <button class="start-btn" id="buildBtn" style="background:var(--panel-2);color:var(--text);border:1px solid var(--border)">
+          ${totalIndexed === 0 ? "Build embedding index" : "Refresh embedding index"}
+        </button>
+        <span id="buildStatus" class="hint" style="margin:0"></span>
+      </div>
       <div class="hint" style="margin-top:14px">
         Tip: this isn't coding — the AI gate doesn't apply here.
         Ask open-ended questions like "what tensions recur?" or
@@ -363,10 +399,17 @@ function renderPicker() {
   list.innerHTML = sources.map(s => {
     const flag = s.transcript_job_id ? "" :
       ` <span class="src-meta" style="color:var(--err)">(no transcript — won't be searchable)</span>`;
+    const indexedCount = indexCountForSource(s.id);
+    const indexedFlag = s.transcript_job_id
+      ? ` <span class="src-meta" style="color:${indexedCount > 0 ? "var(--ok)" : "var(--warn)"}">
+            ${indexedCount > 0 ? `${indexedCount} indexed` : "not indexed"}
+          </span>`
+      : "";
     return `<label>
       <input type="checkbox" value="${escapeHtml(s.id)}" ${s.transcript_job_id ? "" : "disabled"}>
       <span class="src-name">${escapeHtml(s.name || s.id)}</span>
       <span class="src-meta">${escapeHtml(s.source_type || "transcript")}</span>
+      ${indexedFlag}
       ${flag}
     </label>`;
   }).join("");
@@ -380,6 +423,45 @@ function renderPicker() {
     if (!sids.length) return;
     startConversation(sids);
   });
+  $("buildBtn").addEventListener("click", buildEmbeddingIndex);
+}
+
+async function buildEmbeddingIndex() {
+  // Calls the existing project-wide refresh endpoint. F8.2's
+  // refresh_embedding_index() walks every source's transcript, embeds
+  // new/changed spans, and removes orphans. It's idempotent — a
+  // second click on a fresh index does no work.
+  const btn = $("buildBtn");
+  const status = $("buildStatus");
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Building…";
+  status.style.color = "var(--muted)";
+  status.textContent = "Embedding transcripts (may take a minute on a long project)…";
+  try {
+    const result = await fetchJSON(
+      `/api/projects/${PROJECT_ID}/ai/embedding-index/refresh`,
+      {method: "POST"},
+    );
+    status.style.color = "var(--ok)";
+    status.textContent = `Done — added ${result.added}, updated ${result.updated}, removed ${result.removed}, unchanged ${result.unchanged}.`;
+    // Refresh stats so the per-source "indexed" tags update without
+    // a page reload.
+    indexStats = await fetchJSON(`/api/projects/${PROJECT_ID}/ai/embedding-index`)
+      .catch(() => indexStats);
+    // Re-render the picker so the per-source counts and the banner update.
+    renderPicker();
+    // Restore the just-completed status line into the freshly-rendered picker.
+    if ($("buildStatus")) {
+      $("buildStatus").style.color = "var(--ok)";
+      $("buildStatus").textContent = `Done — added ${result.added}, updated ${result.updated}, removed ${result.removed}, unchanged ${result.unchanged}.`;
+    }
+  } catch (e) {
+    status.style.color = "var(--err)";
+    status.textContent = `Build failed: ${e.message}`;
+    btn.disabled = false;
+    btn.textContent = original;
+  }
 }
 
 async function startConversation(sourceIds) {
