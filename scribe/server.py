@@ -13,7 +13,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from dotenv import load_dotenv
 import markdown as md
@@ -914,6 +914,20 @@ async def project_ai_page(request: Request, project_id: str) -> HTMLResponse:
     return templates.TemplateResponse(request, "project_ai.html", {
         "project_id": pid,
         "page_title": "AI suggestions",
+    })
+
+
+@app.get("/projects/{project_id}/chat", response_class=HTMLResponse)
+async def project_chat_page(request: Request, project_id: str) -> HTMLResponse:
+    """Conversational exploration of the project's transcripts.
+
+    Real working page (not a wireframe). Source picker, conversation
+    list, message thread with citations clickable into the editor.
+    """
+    pid = _project_id_or_404(project_id)
+    return templates.TemplateResponse(request, "project_chat.html", {
+        "project_id": pid,
+        "page_title": "Chat with your data",
     })
 
 
@@ -9166,6 +9180,347 @@ async def list_ai_suggestions_endpoint(
     return JSONResponse({
         "suggestions": [s.to_dict() for s in suggestions],
     })
+
+
+# --------------------------------------------------------------------------- #
+# Project chat — conversational exploration of transcripts.
+#
+#   GET  /api/projects/<pid>/chats             — list conversations
+#   POST /api/projects/<pid>/chats             — create one (picks sources)
+#   GET  /api/projects/<pid>/chats/<cid>       — full transcript of one
+#   DELETE /api/projects/<pid>/chats/<cid>     — drop it
+#   POST /api/projects/<pid>/chats/<cid>/turn  — ask a question
+#
+# Unlike F8.3/F8.4, the chat endpoints DO NOT pass through the F8.10
+# AI gate. The gate exists to protect the inductive opening of
+# grounded theory by stopping the AI from suggesting *codes* before
+# the researcher has built any. Conversational exploration is reading
+# with help, not coding — so the gate doesn't apply. Citations
+# preserve the audit trail (every assistant turn records exactly
+# which snippets it was given).
+# --------------------------------------------------------------------------- #
+
+
+from . import project_chat as _project_chat  # noqa: E402
+
+
+def _now_iso() -> str:
+    """ISO-8601 UTC with trailing Z. Same shape used elsewhere in the codebase."""
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+@app.get("/api/projects/{project_id}/chats")
+async def list_chats_endpoint(project_id: str) -> JSONResponse:
+    _check_project_id(project_id)
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        convs = _project_chat.list_conversations(_projects_root(), project_id)
+    # Strip messages from the list view — the side panel only needs
+    # title + timestamps + source set. Full thread is fetched via
+    # GET /chats/<cid> when the user clicks in.
+    return JSONResponse({
+        "conversations": [
+            {
+                "id": c.id,
+                "project_id": c.project_id,
+                "source_ids": c.source_ids,
+                "title": c.title,
+                "created_at": c.created_at,
+                "updated_at": c.updated_at,
+                "message_count": len(c.messages),
+            }
+            for c in convs
+        ]
+    })
+
+
+@app.post("/api/projects/{project_id}/chats")
+async def create_chat_endpoint(
+    project_id: str, request: Request,
+) -> JSONResponse:
+    """Body: ``{"source_ids": [..], "title": "..."}``.
+
+    ``title`` is optional — it'll be derived from the first question if
+    omitted. ``source_ids`` is required and must reference real sources.
+    """
+    _check_project_id(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    raw_sids = body.get("source_ids")
+    if not isinstance(raw_sids, list) or not raw_sids:
+        raise HTTPException(400, "source_ids is required (non-empty list)")
+    title = str(body.get("title", "") or "")
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        # Verify each source belongs to the project. We don't need the
+        # source object itself yet; just the existence check stops
+        # someone passing arbitrary 12-char hex strings as a smoke test.
+        existing_sources = {
+            s.id for s in _sources.list_sources(_projects_root(), project_id)
+        }
+        for sid in raw_sids:
+            if not isinstance(sid, str) or sid not in existing_sources:
+                raise HTTPException(
+                    400, f"Unknown source_id: {sid!r}",
+                )
+
+        # Cap to keep ``chats/`` from accumulating unbounded files. We
+        # delete the oldest by ``updated_at`` if the user is past the
+        # cap — empty conversations are abandonment-prone and easy to
+        # pile up.
+        existing = _project_chat.list_conversations(
+            _projects_root(), project_id,
+        )
+        if len(existing) >= _project_chat.MAX_CONVERSATIONS_PER_PROJECT:
+            raise HTTPException(
+                409,
+                f"Project already has the maximum "
+                f"{_project_chat.MAX_CONVERSATIONS_PER_PROJECT} conversations. "
+                "Delete some before starting another.",
+            )
+
+        try:
+            conv = _project_chat.Conversation.new(
+                project_id=project_id,
+                source_ids=raw_sids,
+                title=title,
+                now=_now_iso(),
+            )
+        except _project_chat.ChatValidationError as e:
+            raise HTTPException(400, str(e))
+        _project_chat.save_conversation(_projects_root(), conv)
+    return JSONResponse(conv.to_dict(), status_code=201)
+
+
+@app.get("/api/projects/{project_id}/chats/{conversation_id}")
+async def get_chat_endpoint(
+    project_id: str, conversation_id: str,
+) -> JSONResponse:
+    _check_project_id(project_id)
+    if not _project_chat.CONVERSATION_ID_RE.match(conversation_id):
+        raise HTTPException(400, "Invalid conversation id")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            conv = _project_chat.load_conversation(
+                _projects_root(), project_id, conversation_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Conversation not found")
+    return JSONResponse(conv.to_dict())
+
+
+@app.delete("/api/projects/{project_id}/chats/{conversation_id}")
+async def delete_chat_endpoint(
+    project_id: str, conversation_id: str,
+) -> JSONResponse:
+    _check_project_id(project_id)
+    if not _project_chat.CONVERSATION_ID_RE.match(conversation_id):
+        raise HTTPException(400, "Invalid conversation id")
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        ok = _project_chat.delete_conversation(
+            _projects_root(), project_id, conversation_id,
+        )
+    if not ok:
+        raise HTTPException(404, "Conversation not found")
+    return JSONResponse({"ok": True})
+
+
+def _retrieve_chat_snippets(
+    *,
+    project_id: str,
+    source_ids: Sequence[str],
+    query: str,
+    embed_fn,
+    top_k: int,
+) -> list[_project_chat.Citation]:
+    """Run the user's question through the embedding index and return
+    ranked citations restricted to the conversation's source set.
+
+    The embedding index is per-project; we filter by ``source_id``
+    here rather than running multiple searches because
+    ``search_similar`` already takes a single ``source_id`` filter
+    and we want the *combined* top_k across all sources in the
+    conversation, not top_k per source.
+    """
+    if not query.strip():
+        return []
+    try:
+        vectors = embed_fn([query])
+    except Exception:
+        # An embedding failure shouldn't break the chat — we fall back
+        # to no-snippets which is still answerable (the LLM will say so).
+        return []
+    if not vectors:
+        return []
+    qv = list(vectors[0])
+
+    # Pull source-level transcript-job-id mapping so citations can
+    # carry the editor link target. Done once outside the loop.
+    src_to_job: dict[str, str] = {}
+    for s in _sources.list_sources(_projects_root(), project_id):
+        if getattr(s, "transcript_job_id", "") and s.id in source_ids:
+            src_to_job[s.id] = s.transcript_job_id
+
+    # Pull more candidates than ``top_k`` so we can drop noise and
+    # still meet the cap. Two-pass: gather, then re-sort + cut.
+    raw: list[tuple[float, _embedding_index.EmbeddingEntry]] = []
+    for sid in source_ids:
+        try:
+            raw.extend(_embedding_index.search_similar(
+                projects_root=_projects_root(),
+                project_id=project_id,
+                query_vector=qv,
+                source_id=sid,
+                top_k=top_k * 2,
+            ))
+        except _projects.ProjectValidationError:
+            continue
+    raw.sort(key=lambda pair: -pair[0])
+
+    out: list[_project_chat.Citation] = []
+    seen_keys: set[str] = set()
+    for score, entry in raw:
+        text = (entry.text_preview or "").strip()
+        if len(text) < _project_chat.MIN_SNIPPET_CHARS:
+            continue
+        key = f"{entry.source_id}:{entry.anchor_start_word_id}:{entry.anchor_end_word_id}"
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.append(_project_chat.Citation(
+            source_id=entry.source_id,
+            text_preview=text,
+            score=float(score),
+            anchor_start_word_id=entry.anchor_start_word_id,
+            anchor_end_word_id=entry.anchor_end_word_id,
+            transcript_job_id=src_to_job.get(entry.source_id, ""),
+        ))
+        if len(out) >= top_k:
+            break
+    return out
+
+
+@app.post("/api/projects/{project_id}/chats/{conversation_id}/turn")
+async def post_chat_turn_endpoint(
+    project_id: str, conversation_id: str, request: Request,
+) -> JSONResponse:
+    """Body: ``{"text": "..."}`` — the user's next question.
+
+    Round-trip:
+      1. Append the user message to the conversation.
+      2. Embed the question, retrieve ranked snippets from the
+         conversation's source set.
+      3. Build the prompt + call the LLM.
+      4. Append the assistant's reply (with citations) and persist.
+
+    Returns the full updated conversation so the UI re-renders from
+    a single response.
+    """
+    _check_project_id(project_id)
+    if not _project_chat.CONVERSATION_ID_RE.match(conversation_id):
+        raise HTTPException(400, "Invalid conversation id")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    if len(text) > _project_chat.MAX_MESSAGE_LEN:
+        raise HTTPException(
+            400,
+            f"text exceeds {_project_chat.MAX_MESSAGE_LEN} chars",
+        )
+
+    with PROJECTS_LOCK:
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            conv = _project_chat.load_conversation(
+                _projects_root(), project_id, conversation_id,
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Conversation not found")
+
+        # Resolve the AI backend the same way the suggestion endpoints do.
+        try:
+            cfg, backend = _resolve_suggestion_backend(project)
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+        if not cfg.default_model:
+            raise HTTPException(
+                400,
+                "Project AI backend has no default_model configured.",
+            )
+        try:
+            embed_fn, generate_fn, _emb_model, gen_model = (
+                _make_embed_and_generate_fns(cfg, backend)
+            )
+        except _ai_backend.BackendValidationError as e:
+            raise HTTPException(400, str(e))
+
+        # Persist the user turn first so a backend failure doesn't
+        # lose the user's typing.
+        title_for_first_message = (
+            conv.title
+            or _project_chat.derive_title_from_first_question(text)
+        )
+        if not conv.title:
+            conv.title = title_for_first_message
+        try:
+            conv.append_message(_project_chat.Message(
+                id=_project_chat.new_message_id(),
+                role=_project_chat.ROLE_USER,
+                content=text,
+                created_at=_now_iso(),
+            ))
+        except _project_chat.ChatValidationError as e:
+            raise HTTPException(400, str(e))
+        _project_chat.save_conversation(_projects_root(), conv)
+
+        # Retrieve snippets + call the model.
+        citations = _retrieve_chat_snippets(
+            project_id=project_id,
+            source_ids=conv.source_ids,
+            query=text,
+            embed_fn=embed_fn,
+            top_k=_project_chat.DEFAULT_RETRIEVAL_TOP_K,
+        )
+        prompt = _project_chat.build_chat_prompt(
+            user_question=text,
+            snippets=citations,
+            history=conv.messages[:-1],   # exclude the just-appended user turn
+        )
+        try:
+            answer = generate_fn(prompt)
+        except _ai_backend.BackendUnavailable as e:
+            raise HTTPException(502, f"AI backend unavailable: {e}")
+        except _ai_backend.BackendError as e:
+            raise HTTPException(500, str(e))
+
+        try:
+            conv.append_message(_project_chat.Message(
+                id=_project_chat.new_message_id(),
+                role=_project_chat.ROLE_ASSISTANT,
+                content=str(answer or ""),
+                created_at=_now_iso(),
+                citations=citations,
+            ))
+        except _project_chat.ChatValidationError as e:
+            raise HTTPException(400, str(e))
+        _project_chat.save_conversation(_projects_root(), conv)
+    return JSONResponse(conv.to_dict())
 
 
 # --------------------------------------------------------------------------- #

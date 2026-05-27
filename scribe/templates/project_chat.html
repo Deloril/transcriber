@@ -1,0 +1,581 @@
+{#
+  Conversational exploration of a project's transcripts.
+
+  Layout: two columns.
+
+    Left (250px):  conversation list + "New" button.
+    Right (rest):  message thread for the selected conversation,
+                   plus the input box at the bottom.
+
+  When no conversation is selected, the right column shows a
+  source-picker so the user can start a new chat against a chosen
+  set of sources.
+
+  Citations land as small "[S1]" tokens inline in the assistant's
+  reply. We replace them at render time with anchor links pointing
+  at /edit/<job_id>?word=<wid> so a click jumps to the supporting
+  span in the editor.
+#}
+{% extends "_shell.html" %}
+{% set active_nav = "projects" %}
+
+{% block title %}{{ page_title }}{% endblock %}
+{% block heading %}{{ page_title }}{% endblock %}
+{% block subtitle_block %}
+  <span class="sub">Pick one or more transcripts and explore. The model grounds answers in retrieved snippets and cites them inline.</span>
+{% endblock %}
+
+{% block actions %}
+  <a class="btn secondary" href="/projects/{{ project_id }}">← Project</a>
+{% endblock %}
+
+{% block extra_styles %}
+<style>
+  .chat-grid {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    gap: 18px;
+    align-items: stretch;
+    /* Fit the viewport so the textarea doesn't push the header off-screen. */
+    height: calc(100vh - 220px);
+    min-height: 480px;
+  }
+  /* Left column — conversation list. */
+  .conv-list {
+    display: flex; flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .conv-list .head {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--muted);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .conv-list .head .new-btn {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .conv-list .head .new-btn:hover { border-color: var(--accent); }
+  .conv-list ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+  .conv-list li {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .conv-list li:hover { background: var(--panel-2); }
+  .conv-list li.active { background: var(--panel-2); border-left: 3px solid var(--accent); }
+  .conv-list li .title { color: var(--text); font-weight: 500; }
+  .conv-list li .meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .conv-list .empty { padding: 14px 12px; color: var(--muted); font-size: 12px; }
+
+  /* Right column — message thread or source picker. */
+  .conv-pane {
+    display: flex; flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .conv-pane .pane-head {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--muted);
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px;
+  }
+  .conv-pane .pane-head .title { color: var(--text); font-weight: 500; }
+  .conv-pane .pane-head .del-btn {
+    background: transparent;
+    color: var(--muted);
+    border: 0;
+    font-size: 12px;
+    cursor: pointer;
+    padding: 2px 6px;
+  }
+  .conv-pane .pane-head .del-btn:hover { color: var(--err); }
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px 18px;
+  }
+  .msg { margin-bottom: 14px; }
+  .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+  .msg .body {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .msg.user .body { background: var(--accent-soft); }
+  .msg .citation {
+    display: inline;
+    background: var(--panel-3);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0 4px;
+    font-size: 11px;
+    text-decoration: none;
+    color: var(--accent);
+    margin: 0 1px;
+    vertical-align: baseline;
+  }
+  .msg .citation:hover { background: var(--accent-soft); }
+  .msg .citations-list {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .msg .citations-list .cit-row {
+    padding: 4px 6px;
+    border-left: 2px solid var(--border);
+    margin: 4px 0;
+    font-style: italic;
+  }
+  .msg .citations-list .cit-row a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .msg .citations-list .cit-row a:hover { text-decoration: underline; }
+
+  .input-row {
+    border-top: 1px solid var(--border);
+    padding: 10px 14px;
+    display: flex; gap: 8px; align-items: flex-end;
+  }
+  .input-row textarea {
+    flex: 1;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 13px;
+    resize: vertical;
+    min-height: 44px;
+    max-height: 200px;
+  }
+  .input-row button {
+    background: var(--accent);
+    color: var(--bg);
+    border: 0;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .input-row button:hover { background: var(--accent-2); }
+  .input-row button:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Source picker shown when no conversation is selected. */
+  .picker {
+    padding: 18px;
+    overflow-y: auto;
+    flex: 1;
+  }
+  .picker h3 { margin: 0 0 8px; font-size: 14px; font-weight: 500; }
+  .picker .hint { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+  .picker label {
+    display: flex; gap: 8px; align-items: center;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .picker label:hover { background: var(--panel-2); }
+  .picker .src-name { color: var(--text); }
+  .picker .src-meta { color: var(--muted); font-size: 11px; margin-left: auto; }
+  .picker .start-btn {
+    margin-top: 12px;
+    background: var(--accent);
+    color: var(--bg);
+    border: 0;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .picker .start-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  .err-banner {
+    background: rgba(230, 100, 90, .12);
+    border: 1px solid rgba(230, 100, 90, .4);
+    color: var(--err);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin: 0 14px 10px;
+    font-size: 12px;
+  }
+  .empty-state {
+    padding: 20px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  /* Project nav strip — same as project_subpage so the user keeps
+     orientation across the project. */
+  nav.proj-nav { display: flex; gap: 6px; margin-bottom: 18px; flex-wrap: wrap; }
+</style>
+{% endblock %}
+
+{% block body %}
+<nav class="proj-nav">
+  <a class="btn secondary" href="/projects/{{ project_id }}">Overview</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/sources">Sources</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/codebook">Codebook</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/queries">Queries</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/memos">Memos</a>
+  <a class="btn secondary active" href="/projects/{{ project_id }}/chat">💬 Chat</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/ai">AI</a>
+  <a class="btn secondary" href="/projects/{{ project_id }}/audit">Audit</a>
+</nav>
+
+<div class="chat-grid">
+  <div class="conv-list">
+    <div class="head">
+      <span>Conversations</span>
+      <button class="new-btn" id="newBtn">+ New</button>
+    </div>
+    <ul id="convList"></ul>
+  </div>
+
+  <div class="conv-pane" id="pane">
+    <!-- Initial state filled in by JS once conversations + sources load. -->
+    <div class="empty-state">Loading…</div>
+  </div>
+</div>
+
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+
+// State
+let conversations = [];   // light list (no messages)
+let activeConvId = null;
+let activeConv = null;    // full thread for the selected conversation
+let sources = [];         // from /api/projects/<pid>/sources
+
+const $ = (id) => document.getElementById(id);
+const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+}[c]));
+
+async function fetchJSON(url, options = {}) {
+  const r = await fetch(url, options);
+  if (!r.ok) {
+    const detail = await r.json().catch(() => ({}));
+    throw new Error(detail.detail || `HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
+async function loadAll() {
+  try {
+    const [convResp, sourcesResp] = await Promise.all([
+      fetchJSON(`/api/projects/${PROJECT_ID}/chats`),
+      fetchJSON(`/api/projects/${PROJECT_ID}/sources`),
+    ]);
+    conversations = convResp.conversations || [];
+    sources = sourcesResp.sources || [];
+    renderConvList();
+    if (!activeConvId && conversations.length) {
+      selectConv(conversations[0].id);
+    } else if (!activeConvId) {
+      renderPicker();
+    }
+  } catch (e) {
+    renderError(`Could not load: ${e.message}`);
+  }
+}
+
+function renderError(msg) {
+  $("pane").innerHTML = `<div class="err-banner">${escapeHtml(msg)}</div>`;
+}
+
+function renderConvList() {
+  const ul = $("convList");
+  if (!conversations.length) {
+    ul.innerHTML = `<div class="empty">No chats yet. Click "+ New" to start.</div>`;
+    return;
+  }
+  ul.innerHTML = conversations.map(c => {
+    const cls = c.id === activeConvId ? "active" : "";
+    const title = escapeHtml(c.title || "(untitled)");
+    const turnLabel = c.message_count === 1 ? "1 turn" : `${c.message_count} turns`;
+    const meta = `${turnLabel} · ${escapeHtml((c.updated_at || "").slice(0, 10))}`;
+    return `<li class="${cls}" data-id="${escapeHtml(c.id)}">
+      <div class="title">${title}</div>
+      <div class="meta">${meta}</div>
+    </li>`;
+  }).join("");
+  ul.querySelectorAll("li").forEach(li => {
+    li.addEventListener("click", () => selectConv(li.dataset.id));
+  });
+}
+
+function renderPicker() {
+  if (!sources.length) {
+    $("pane").innerHTML = `
+      <div class="picker">
+        <h3>No sources yet</h3>
+        <div class="hint">
+          Add at least one source to your project before starting a chat —
+          the AI needs transcripts to ground its answers.
+        </div>
+        <a class="btn" href="/projects/${encodeURIComponent(PROJECT_ID)}/sources/add">+ Add a source</a>
+      </div>
+    `;
+    return;
+  }
+  $("pane").innerHTML = `
+    <div class="picker">
+      <h3>Pick the sources you want to talk about</h3>
+      <div class="hint">
+        Selected sources will be searched for relevant snippets each
+        time you ask a question. You can talk to one source or many at once.
+      </div>
+      <div id="srcList"></div>
+      <button class="start-btn" id="startBtn" disabled>Start chat →</button>
+      <div class="hint" style="margin-top:14px">
+        Tip: this isn't coding — the AI gate doesn't apply here.
+        Ask open-ended questions like "what tensions recur?" or
+        "where does the participant push back?".
+      </div>
+    </div>
+  `;
+  const list = $("srcList");
+  list.innerHTML = sources.map(s => {
+    const flag = s.transcript_job_id ? "" :
+      ` <span class="src-meta" style="color:var(--err)">(no transcript — won't be searchable)</span>`;
+    return `<label>
+      <input type="checkbox" value="${escapeHtml(s.id)}" ${s.transcript_job_id ? "" : "disabled"}>
+      <span class="src-name">${escapeHtml(s.name || s.id)}</span>
+      <span class="src-meta">${escapeHtml(s.source_type || "transcript")}</span>
+      ${flag}
+    </label>`;
+  }).join("");
+  const updateBtn = () => {
+    const checked = list.querySelectorAll("input:checked").length;
+    $("startBtn").disabled = checked === 0;
+  };
+  list.addEventListener("change", updateBtn);
+  $("startBtn").addEventListener("click", () => {
+    const sids = Array.from(list.querySelectorAll("input:checked")).map(x => x.value);
+    if (!sids.length) return;
+    startConversation(sids);
+  });
+}
+
+async function startConversation(sourceIds) {
+  try {
+    const conv = await fetchJSON(`/api/projects/${PROJECT_ID}/chats`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({source_ids: sourceIds}),
+    });
+    conversations = [
+      {
+        id: conv.id,
+        title: conv.title,
+        source_ids: conv.source_ids,
+        created_at: conv.created_at,
+        updated_at: conv.updated_at,
+        message_count: 0,
+      },
+      ...conversations,
+    ];
+    selectConv(conv.id);
+  } catch (e) {
+    renderError(`Couldn't start chat: ${e.message}`);
+  }
+}
+
+async function selectConv(cid) {
+  activeConvId = cid;
+  renderConvList();
+  try {
+    activeConv = await fetchJSON(`/api/projects/${PROJECT_ID}/chats/${cid}`);
+    renderThread();
+  } catch (e) {
+    renderError(`Could not load conversation: ${e.message}`);
+  }
+}
+
+function renderThread() {
+  const sourceNames = activeConv.source_ids.map(sid => {
+    const s = sources.find(x => x.id === sid);
+    return s ? s.name : sid;
+  }).join(", ");
+  $("pane").innerHTML = `
+    <div class="pane-head">
+      <span class="title">${escapeHtml(activeConv.title || "(untitled)")}</span>
+      <span style="color:var(--muted);margin:0 auto 0 8px;font-size:11px">about: ${escapeHtml(sourceNames)}</span>
+      <button class="del-btn" id="delBtn" title="Delete this conversation">Delete</button>
+    </div>
+    <div class="messages" id="messages"></div>
+    <div class="input-row">
+      <textarea id="askInput" placeholder="Ask anything about your selected transcripts. Press Enter to send, Shift+Enter for newline."></textarea>
+      <button id="sendBtn">Send</button>
+    </div>
+  `;
+  renderMessages();
+  $("delBtn").addEventListener("click", deleteActiveConversation);
+  $("sendBtn").addEventListener("click", sendTurn);
+  $("askInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendTurn();
+    }
+  });
+}
+
+function renderMessages() {
+  const root = $("messages");
+  if (!activeConv.messages.length) {
+    root.innerHTML = `<div class="empty-state">
+      Ask the first question to begin. The model will pull short
+      snippets from your selected transcripts to ground its answer.
+    </div>`;
+    return;
+  }
+  root.innerHTML = activeConv.messages.map(renderMessage).join("");
+  root.scrollTop = root.scrollHeight;
+}
+
+function renderMessage(m) {
+  const who = m.role === "user" ? "You" : "Assistant";
+  let body = escapeHtml(m.content);
+  // Replace [S1], [S2] inline tokens with anchor links to citations.
+  if (m.role === "assistant" && m.citations && m.citations.length) {
+    body = body.replace(/\[S(\d+)\]/g, (full, n) => {
+      const idx = parseInt(n, 10) - 1;
+      const c = m.citations[idx];
+      if (!c) return full;
+      const href = citationHref(c);
+      const tooltip = escapeHtml(c.text_preview).replace(/"/g, "&quot;");
+      return href
+        ? `<a class="citation" href="${href}" target="_blank" rel="noopener" title="${tooltip}">[S${n}]</a>`
+        : `<span class="citation" title="${tooltip}">[S${n}]</span>`;
+    });
+  }
+  const cits = (m.role === "assistant" && m.citations && m.citations.length)
+    ? `<div class="citations-list">${m.citations.map((c, i) => {
+        const href = citationHref(c);
+        const linkOpen = href ? `<a href="${href}" target="_blank" rel="noopener">` : "";
+        const linkClose = href ? "</a>" : "";
+        return `<div class="cit-row">[S${i + 1}] ${linkOpen}${escapeHtml(c.text_preview)}${linkClose}</div>`;
+      }).join("")}</div>`
+    : "";
+  return `<div class="msg ${m.role}">
+    <div class="who">${who}</div>
+    <div class="body">${body}${cits}</div>
+  </div>`;
+}
+
+function citationHref(c) {
+  if (!c.transcript_job_id) return "";
+  const params = new URLSearchParams();
+  if (c.anchor_start_word_id) params.set("word", c.anchor_start_word_id);
+  const q = params.toString();
+  return `/edit/${encodeURIComponent(c.transcript_job_id)}${q ? "?" + q : ""}`;
+}
+
+async function sendTurn() {
+  const input = $("askInput");
+  const text = (input.value || "").trim();
+  if (!text) return;
+  const sendBtn = $("sendBtn");
+  input.disabled = true;
+  sendBtn.disabled = true;
+  sendBtn.textContent = "…";
+  // Optimistically push the user message so the UI feels responsive.
+  activeConv.messages.push({
+    id: "pending",
+    role: "user",
+    content: text,
+    created_at: new Date().toISOString(),
+    citations: [],
+  });
+  renderMessages();
+  input.value = "";
+  try {
+    const updated = await fetchJSON(
+      `/api/projects/${PROJECT_ID}/chats/${activeConvId}/turn`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({text}),
+      },
+    );
+    activeConv = updated;
+    renderMessages();
+    // Refresh the list (timestamps + counts changed).
+    const listResp = await fetchJSON(`/api/projects/${PROJECT_ID}/chats`);
+    conversations = listResp.conversations || [];
+    renderConvList();
+  } catch (e) {
+    // Roll back the optimistic user message and show the error inline.
+    activeConv.messages = activeConv.messages.filter(m => m.id !== "pending");
+    activeConv.messages.push({
+      id: "err",
+      role: "assistant",
+      content: `(error) ${e.message}`,
+      created_at: new Date().toISOString(),
+      citations: [],
+    });
+    renderMessages();
+  } finally {
+    input.disabled = false;
+    sendBtn.disabled = false;
+    sendBtn.textContent = "Send";
+    input.focus();
+  }
+}
+
+async function deleteActiveConversation() {
+  if (!activeConvId) return;
+  if (!confirm("Delete this conversation? This cannot be undone.")) return;
+  try {
+    await fetchJSON(`/api/projects/${PROJECT_ID}/chats/${activeConvId}`, {
+      method: "DELETE",
+    });
+    conversations = conversations.filter(c => c.id !== activeConvId);
+    activeConvId = null;
+    activeConv = null;
+    renderConvList();
+    if (conversations.length) {
+      selectConv(conversations[0].id);
+    } else {
+      renderPicker();
+    }
+  } catch (e) {
+    alert(`Couldn't delete: ${e.message}`);
+  }
+}
+
+$("newBtn").addEventListener("click", () => {
+  activeConvId = null;
+  activeConv = null;
+  renderConvList();
+  renderPicker();
+});
+
+loadAll();
+</script>
+{% endblock %}
