@@ -276,6 +276,23 @@ async def index(request: Request) -> HTMLResponse:
     except Exception:  # noqa: BLE001
         benchmark_plan_payload = None
 
+    # G7.4 — surface the whisper-backend benchmark plan with the same
+    # defensive shape. Where G6.2 compares the *same* backend across
+    # different hardware (CUDA vs ROCm), G7.4 compares *different*
+    # backends on the *same* machine (faster-whisper vs whisper.cpp)
+    # and reports WER vs an optional reference. The Apple Silicon
+    # audience landing on this page after seeing the G7.3
+    # whisper.cpp-recommendation banner needs a one-step path to
+    # actually measure the speedup before committing to the new
+    # default.
+    try:
+        from .scripts.bench_whisper import (
+            whisper_benchmark_plan as _whisper_bench_plan_fn,
+        )
+        whisper_benchmark_plan_payload = _whisper_bench_plan_fn()
+    except Exception:  # noqa: BLE001
+        whisper_benchmark_plan_payload = None
+
     active_backend = gpu_backend()
     return templates.TemplateResponse(
         request,
@@ -302,6 +319,9 @@ async def index(request: Request) -> HTMLResponse:
             # G6.2 — read-only benchmark plan; ``None`` only when the
             # script module fails to import (defensive).
             "benchmark_plan": benchmark_plan_payload,
+            # G7.4 — read-only whisper-backend benchmark plan; ``None``
+            # only when the script module fails to import (defensive).
+            "whisper_benchmark_plan": whisper_benchmark_plan_payload,
         },
     )
 
@@ -421,6 +441,31 @@ async def benchmark_plan_endpoint() -> JSONResponse:
     """
     from .scripts.bench_rocm import benchmark_plan
     return JSONResponse(benchmark_plan())
+
+
+@app.get("/api/diagnostics/whisper-benchmark-plan")
+async def whisper_benchmark_plan_endpoint() -> JSONResponse:
+    """Return the G7.4 whisper-backend benchmark plan as JSON.
+
+    Where G6.2's ``benchmark_plan`` describes a CUDA-vs-ROCm comparison
+    of the *same* backend, this route describes the
+    faster-whisper-vs-whisper.cpp comparison the G7.4 script
+    (``scribe.scripts.bench_whisper``) runs on the *same* machine.
+    Same shape as the other diagnostics-plan routes — read-only,
+    no torch / whisperx import, no model loads. Callers wanting to
+    actually run the benchmark shell out to
+    ``python -m scribe.scripts.bench_whisper <audio>`` using the
+    invocation strings in the response.
+
+    The ``modes`` list advertises three: ``speed`` (RTF only,
+    cheapest), ``accuracy`` (with ``--reference`` for WER), and
+    ``markdown`` (writes a Markdown table the README embeds). The
+    ``backends`` list mirrors the registry ids so callers can drive
+    the script with ``--backend faster-whisper --backend whisper.cpp``
+    and get a deterministic ordering.
+    """
+    from .scripts.bench_whisper import whisper_benchmark_plan
+    return JSONResponse(whisper_benchmark_plan())
 
 
 @app.get("/edit/{job_id}", response_class=HTMLResponse)

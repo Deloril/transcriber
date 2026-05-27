@@ -1026,6 +1026,101 @@
     </div>
     {% endif %}
 
+    {# G7.4 — Whisper-backend benchmark plan panel.
+
+       Sits next to the G6.2 in-house benchmark panel because they're
+       both "is it actually fast?" tools, but for different audiences:
+       G6.2 compares the same backend across hardware (CUDA vs ROCm),
+       G7.4 compares two backends on the same machine
+       (faster-whisper vs whisper.cpp). Apple Silicon users landing
+       here after seeing the G7.3 whisper.cpp recommendation banner
+       need a one-step path to actually measure the speedup. Same
+       Jinja shape as the other diagnostics panels: feature attribute,
+       three CLI modes (speed / accuracy / markdown), ordered backend
+       list, exit-code list, defaults summary. Read-only — never
+       spawns the benchmark; users copy the CLI invocation.
+
+       Defensive: ``whisper_benchmark_plan`` may be ``None`` if the
+       script module failed to import (deploys that strip
+       ``scribe/scripts``). Skip the panel rather than render an
+       empty card. #}
+    {% if whisper_benchmark_plan %}
+    <div class="card"
+         id="whisperBenchmarkPlanCard"
+         data-test-feature="G7.4"
+         data-test-id="whisper-benchmark-plan-card"
+         data-backend-count="{{ whisper_benchmark_plan.backends|length }}"
+         data-mode-count="{{ whisper_benchmark_plan.modes|length }}">
+      <details>
+        <summary style="cursor:pointer;display:flex;align-items:center;gap:8px;">
+          <span class="caret" aria-hidden="true">▶</span>
+          <span class="title" style="font-weight:600;">Diagnostics — whisper-backend benchmark</span>
+          <span class="hint" style="margin:0;">faster-whisper vs whisper.cpp on this box (CLI)</span>
+        </summary>
+        <div style="margin-top:14px;">
+          <p class="hint" style="margin:0 0 10px 0;">
+            Compare the registered Whisper backends head-to-head on
+            the same audio file. Reports wall-clock, real-time factor,
+            and (with <code>--reference</code>) word error rate. Pass
+            <code>--markdown bench.md</code> to write a table the
+            README can embed. A failure in one backend doesn't stop
+            the others — that's the whole point of the comparison.
+          </p>
+          {# Modes: ``speed`` / ``accuracy`` / ``markdown``. Each
+             renders its own CLI block so a copy-paste of any one
+             works without further munging. #}
+          <div data-test-id="whisper-benchmark-plan-modes"
+               style="display:flex;flex-direction:column;gap:10px;margin:8px 0;">
+            {% for mode in whisper_benchmark_plan.modes %}
+              <div data-test-id="whisper-benchmark-plan-mode-{{ mode.name }}"
+                   style="display:flex;flex-direction:column;gap:4px;">
+                <span class="hint" style="margin:0;">
+                  <strong>{{ mode.name }}</strong> — {{ mode.summary }}
+                </span>
+                <code data-test-id="whisper-benchmark-plan-mode-{{ mode.name }}-cli-venv"
+                      style="display:block;padding:8px 10px;background:var(--panel-2,var(--panel));border:1px solid var(--border);border-radius:6px;font-family:var(--mono,monospace);">{{ mode.cli_venv }}</code>
+              </div>
+            {% endfor %}
+          </div>
+          <div style="margin-top:10px;">
+            <strong style="font-size:13px;">Backends (in order)</strong>
+            <ol data-test-id="whisper-benchmark-plan-backends"
+                style="margin:6px 0 0 18px;padding:0;font-size:13px;">
+              {% for backend in whisper_benchmark_plan.backends %}
+                <li data-test-id="whisper-benchmark-plan-backend-{{ backend.id }}">
+                  <code>{{ backend.id }}</code> — {{ backend.summary }}
+                  {% if backend.optional %}
+                    <span class="hint" style="margin:0;">(optional)</span>
+                  {% endif %}
+                </li>
+              {% endfor %}
+            </ol>
+          </div>
+          <div style="margin-top:10px;">
+            <strong style="font-size:13px;">Exit codes</strong>
+            <ul data-test-id="whisper-benchmark-plan-exit-codes"
+                style="margin:6px 0 0 18px;padding:0;font-size:13px;">
+              {% for ec in whisper_benchmark_plan.exit_codes %}
+                <li data-test-id="whisper-benchmark-plan-exit-code-{{ ec.code }}">
+                  <code>{{ ec.code }}</code> — {{ ec.meaning }}
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+          <p class="hint" style="margin:10px 0 0 0;">
+            Defaults: <code>--model {{ whisper_benchmark_plan.defaults.model }}</code>,
+            <code>--language {{ whisper_benchmark_plan.defaults.language }}</code>.
+            Headline metric: <strong>{{ whisper_benchmark_plan.metric }}</strong>
+            (word error rate vs <code>--reference</code> when supplied).
+            See the
+            <a href="/docs/readme" rel="noopener">README</a> for the
+            Apple Silicon / whisper.cpp install context.
+          </p>
+        </div>
+      </details>
+    </div>
+    {% endif %}
+
     <!-- Slide-in docs -->
     <div id="docOverlay" class="doc-overlay" aria-hidden="true"></div>
     <aside id="docPanel" class="doc-panel" aria-hidden="true" aria-label="Documentation">
