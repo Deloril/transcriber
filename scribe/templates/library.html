@@ -417,6 +417,14 @@
         ? `<button data-action="discard-media" data-id="${escapeHtml(row.id)}" title="Remove the source media file but keep the transcript (reclaim disk space)">Discard media</button>`
         : "";
 
+      // Reattach — only offered when media is currently discarded /
+      // missing. Lets the user point Scribe at the file on disk so
+      // playback works again. Symlink-based; the file stays where
+      // the user keeps it.
+      const reattachBtn = (canEdit && row.media_discarded)
+        ? `<button data-action="reattach-media" data-id="${escapeHtml(row.id)}" title="Point Scribe at the source media file on disk again (creates a symlink)">Reattach media…</button>`
+        : "";
+
       tr.innerHTML = `
         <td class="filename" title="${filename}${originalTitle}">
           <strong>${filename}</strong>${mediaFlag}
@@ -433,6 +441,7 @@
             ${editLink}
             ${downloads}
             ${discardBtn}
+            ${reattachBtn}
             <button class="danger" data-action="delete" data-id="${escapeHtml(row.id)}">Delete</button>
           </div>
         </td>
@@ -444,6 +453,58 @@
       const delBtn = e.target.closest("button[data-action='delete']");
       const discardBtn = e.target.closest("button[data-action='discard-media']");
       const renameBtn = e.target.closest("button[data-action='rename']");
+      const reattachBtn = e.target.closest("button[data-action='reattach-media']");
+      if (reattachBtn) {
+        const jobId = reattachBtn.dataset.id;
+        const row = allRows.find(x => x.id === jobId);
+        const hint = row && row.input_filename
+          ? `Original was: ${row.input_filename}\n\n` : "";
+        const path = window.prompt(
+          hint +
+          "Enter the absolute path to the media file on disk.\n" +
+          "Scribe will create a symlink under uploads/ — the file " +
+          "stays where you keep it. If you move it again, playback " +
+          "will break again.\n\n" +
+          "Examples:\n" +
+          "  /Users/me/Recordings/interview-2.mp4\n" +
+          "  ~/Downloads/maria.wav",
+          "",
+        );
+        if (path === null) return;
+        const trimmed = (path || "").trim();
+        if (!trimmed) return;
+        reattachBtn.disabled = true;
+        const originalText = reattachBtn.textContent;
+        reattachBtn.textContent = "Reattaching…";
+        try {
+          const r = await fetch(
+            `/api/job/${encodeURIComponent(jobId)}/reattach-media`,
+            {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({path: trimmed}),
+            },
+          );
+          if (!r.ok) {
+            const detail = await r.json().catch(() => ({}));
+            throw new Error(detail.detail || `HTTP ${r.status}`);
+          }
+          // Patch the row locally for instant feedback, then refresh
+          // from server to confirm and pick up any other changes.
+          allRows = allRows.map(x =>
+            x.id === jobId ? {...x, media_discarded: false} : x,
+          );
+          render();
+          loadLibrary();
+        } catch (e2) {
+          errBanner.textContent = "Reattach failed: " + (e2.message || e2);
+          errBanner.classList.remove("hidden");
+        } finally {
+          reattachBtn.disabled = false;
+          reattachBtn.textContent = originalText;
+        }
+        return;
+      }
       if (renameBtn) {
         const jobId = renameBtn.dataset.id;
         const row = allRows.find(x => x.id === jobId);

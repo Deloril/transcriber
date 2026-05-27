@@ -191,9 +191,45 @@ def _is_under(child: Path, parent: Path) -> bool:
         return False
 
 
+def _link_or_path_is_under(child: Path, parent: Path) -> bool:
+    """Like :func:`_is_under` but tolerant of deliberate symlinks.
+
+    For media reattach (``POST /api/job/<id>/reattach-media``) we
+    create a symlink at ``uploads/<id>/<filename>`` pointing at a
+    user-supplied absolute path that lives outside ``UPLOAD_DIR``.
+    The strict ``_is_under`` check rejects this because it resolves
+    the symlink's *target* before testing containment. This helper
+    walks the parent chain *without* following the terminal symlink:
+    if the link itself sits inside ``parent`` the path is trusted,
+    even when the target is elsewhere.
+
+    The existing :func:`_is_under` is still the right check for any
+    path that should *not* be a symlink (job state validation,
+    output paths, etc).
+    """
+    if _is_under(child, parent):
+        return True
+    # The terminal segment may be a symlink; if so, anchor on its
+    # parent directory instead. resolve(strict=False) tolerates a
+    # missing leaf so we can still reject after a target was deleted.
+    try:
+        anchor = child.parent.resolve(strict=False)
+        anchor.relative_to(parent.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def _validate_persisted_paths(job: Job) -> None:
-    """Make sure persisted state hasn't been hand-edited to point at arbitrary files."""
-    if not _is_under(job.input_path, UPLOAD_DIR):
+    """Make sure persisted state hasn't been hand-edited to point at arbitrary files.
+
+    Allows ``input_path`` to be a deliberate symlink pointing outside
+    ``UPLOAD_DIR`` (the reattach-media flow), as long as the *link
+    itself* lives inside ``UPLOAD_DIR``. Without this carve-out the
+    server would refuse to load any job that had its source media
+    reattached to an external path.
+    """
+    if not _link_or_path_is_under(job.input_path, UPLOAD_DIR):
         raise ValueError(f"input_path escapes UPLOAD_DIR: {job.input_path}")
     if not _is_under(job.output_dir, OUTPUT_DIR):
         raise ValueError(f"output_dir escapes OUTPUT_DIR: {job.output_dir}")
@@ -11703,6 +11739,129 @@ async def discard_media_endpoint(job_id: str) -> JSONResponse:
     return JSONResponse({"ok": True, "id": job_id, "already": False})
 
 
+# Reattach external media to a job whose source recording was
+# discarded (or whose upload directory has gone missing for any other
+# reason). The user supplies an absolute path on disk; we symlink it
+# into ``uploads/<id>/<filename>`` so the rest of the pipeline can
+# treat it as if it were a normal upload, and flip ``media_discarded``
+# back to ``False``. Trade-off: Scribe doesn't own the file, so if
+# the user moves it again playback breaks again. The UI surfaces this.
+_REATTACH_ALLOWED_SUFFIXES = {
+    # Audio
+    ".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma",
+    # Video (we extract audio at transcription time; for reattach we
+    # just need the file to exist and be playable in <video>).
+    ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi",
+}
+
+
+@app.post("/api/job/{job_id}/reattach-media")
+async def reattach_media_endpoint(
+    job_id: str, request: Request,
+) -> JSONResponse:
+    """Symlink an existing file on disk back into ``uploads/<id>/`` so
+    a job with discarded / missing media can play again.
+
+    Body: ``{"path": "/absolute/path/to/file.mp4"}``.
+
+    The path must:
+      * Be absolute and resolve to an existing regular file.
+      * Have a media-looking extension (see :data:`_REATTACH_ALLOWED_SUFFIXES`).
+      * NOT itself live inside ``UPLOAD_DIR`` (those go through the
+        normal upload path).
+
+    On success, creates ``uploads/<id>/<filename>`` as a symlink to
+    the supplied path, updates ``Job.input_path`` to point at it,
+    flips ``media_discarded`` to false, and persists. If a previous
+    symlink exists at the target spot, it's replaced.
+    """
+    _check_job_id(job_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    raw = body.get("path")
+    if not isinstance(raw, str) or not raw.strip():
+        raise HTTPException(400, "path (absolute filesystem path) is required")
+
+    src = Path(raw).expanduser()
+    if not src.is_absolute():
+        raise HTTPException(400, "path must be absolute")
+    try:
+        src_resolved = src.resolve(strict=True)
+    except (OSError, RuntimeError) as e:
+        raise HTTPException(400, f"path does not resolve to a real file: {e}")
+    if not src_resolved.is_file():
+        raise HTTPException(400, "path is not a regular file")
+    if src_resolved.suffix.lower() not in _REATTACH_ALLOWED_SUFFIXES:
+        raise HTTPException(
+            400,
+            f"unsupported file type: {src_resolved.suffix!r}; "
+            f"expected one of {sorted(_REATTACH_ALLOWED_SUFFIXES)}",
+        )
+    # Don't let the user reattach a file already under UPLOAD_DIR —
+    # that's a different operation (and would create a self-referential
+    # symlink loop in the worst case).
+    if _is_under(src_resolved, UPLOAD_DIR):
+        raise HTTPException(
+            400,
+            "Source path is already inside the uploads directory; "
+            "use the normal flow instead of reattach.",
+        )
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(404, "Job not found")
+        # Refuse on running jobs — the worker is using whatever's there.
+        if job.status not in ("done", "error"):
+            raise HTTPException(
+                409,
+                f"Cannot reattach media while job is {job.status}",
+            )
+        upload_dir = (UPLOAD_DIR / job_id)
+
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    if not _is_under(upload_dir, UPLOAD_DIR.resolve()):
+        # Should be impossible since we built upload_dir from UPLOAD_DIR,
+        # but keep the guard symmetrical with the discard endpoint.
+        raise HTTPException(403, "upload_dir escapes UPLOAD_DIR")
+
+    # The symlink keeps the source filename so existing references in
+    # output_paths / job.json still make sense to a human reading the
+    # directory listing. Sanitise to a single basename to keep the
+    # link inside upload_dir.
+    link = upload_dir / Path(src_resolved.name).name
+    try:
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        os.symlink(src_resolved, link)
+    except OSError as e:
+        raise HTTPException(500, f"Could not create symlink: {e}")
+
+    with JOBS_LOCK:
+        j = JOBS.get(job_id)
+        if j is None:
+            # Race: job removed mid-call. Roll back the symlink we made.
+            try:
+                link.unlink()
+            except OSError:
+                pass
+            raise HTTPException(404, "Job not found")
+        j.input_path = link
+        j.input_filename = link.name
+        j.media_discarded = False
+    _persist_job(j)
+    return JSONResponse({
+        "ok": True,
+        "id": job_id,
+        "input_path": str(link),
+        "target": str(src_resolved),
+    })
+
+
 @app.delete("/api/job/{job_id}")
 async def delete_job_endpoint(job_id: str) -> JSONResponse:
     """Remove a job from the registry and wipe its on-disk artefacts.
@@ -11917,9 +12076,12 @@ async def job_info(job_id: str) -> JSONResponse:
             raise HTTPException(404, "Job not found")
         if job.media_discarded:
             raise HTTPException(410, "Source media discarded for this job")
-        path = job.input_path.resolve()
-    if not _is_under(path, UPLOAD_DIR):
+        link = job.input_path
+    # Containment is checked on the *link* (which lives in UPLOAD_DIR),
+    # not on its target — reattached media intentionally points outside.
+    if not _link_or_path_is_under(link, UPLOAD_DIR):
         raise HTTPException(403, "Forbidden")
+    path = link.resolve()
     if not path.exists():
         raise HTTPException(404, "Source file is missing on disk")
     try:
@@ -11942,10 +12104,12 @@ async def job_waveform(job_id: str, bins: int = 1000) -> JSONResponse:
             raise HTTPException(404, "Job not found")
         if job.media_discarded:
             raise HTTPException(410, "Source media discarded for this job")
-        path = job.input_path.resolve()
+        link = job.input_path
         out_dir = job.output_dir.resolve()
-    if not _is_under(path, UPLOAD_DIR) or not _is_under(out_dir, OUTPUT_DIR):
+    if (not _link_or_path_is_under(link, UPLOAD_DIR)
+            or not _is_under(out_dir, OUTPUT_DIR)):
         raise HTTPException(403, "Forbidden")
+    path = link.resolve()
     if not path.exists():
         raise HTTPException(404, "Source file is missing on disk")
 
@@ -11980,9 +12144,10 @@ async def media(job_id: str, request: Request) -> Response:
             raise HTTPException(404, "Job not found")
         if job.media_discarded:
             raise HTTPException(410, "Source media discarded for this job")
-        path = job.input_path.resolve()
-    if not _is_under(path, UPLOAD_DIR):
+        link = job.input_path
+    if not _link_or_path_is_under(link, UPLOAD_DIR):
         raise HTTPException(403, "Forbidden")
+    path = link.resolve()
     if not path.exists():
         raise HTTPException(404, "Source file is missing on disk")
 

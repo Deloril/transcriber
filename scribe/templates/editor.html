@@ -508,6 +508,9 @@
     <span><strong>Source media discarded.</strong>
       Playback is no longer available for this transcription.
       All edits, search, and export still work.</span>
+    <button id="reattachMediaBtn" type="button"
+            title="Point Scribe at the media file on disk again to restore playback"
+            style="margin-left:auto">Reattach…</button>
   </div>
 
   <div id="mediaWrap" class="media-wrap">
@@ -1996,6 +1999,48 @@ import {
       btn.disabled = false;
       btn.textContent = "🗑 Source";
       toast("Could not discard media: " + (e.message || e));
+    }
+  });
+  $("reattachMediaBtn").addEventListener("click", async () => {
+    // Point Scribe at the media file on disk again. Same prompt
+    // shape as the library row's reattach action — a window.prompt
+    // is bare-bones but does the job for a power-user feature.
+    const path = window.prompt(
+      "Enter the absolute path to the media file on disk.\n" +
+      "Scribe will create a symlink under uploads/ — the file " +
+      "stays where you keep it. If you move it again, playback " +
+      "will break again.\n\n" +
+      "Examples:\n" +
+      "  /Users/me/Recordings/interview-2.mp4\n" +
+      "  ~/Downloads/maria.wav",
+      "",
+    );
+    if (path === null) return;
+    const trimmed = (path || "").trim();
+    if (!trimmed) return;
+    const btn = $("reattachMediaBtn");
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = "Reattaching…";
+    try {
+      const r = await fetch(`/api/job/${JOB_ID}/reattach-media`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({path: trimmed}),
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      // Reload the page so the player wires up against the
+      // newly-symlinked media. Any in-memory edits should already
+      // be saved at this point — the user only sees this notice
+      // on a finished, persisted job.
+      window.location.reload();
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = original;
+      toast("Reattach failed: " + (e.message || e));
     }
   });
   $("exportBtn").addEventListener("click", async () => {
