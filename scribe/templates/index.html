@@ -846,6 +846,89 @@
       </div>
     </div>
 
+    {# G6.1 — Smoke-test plan panel.
+
+       Read-only diagnostic surface for the CLI smoke test in
+       ``scribe/scripts/check_rocm.py``. The script itself is a CLI tool
+       (``python -m scribe.scripts.check_rocm``), but a researcher who's
+       not yet living in a terminal still wants to know what the smoke
+       test does and the exact invocation to copy. The panel renders the
+       same plan structure the JSON route surfaces at
+       ``/api/diagnostics/smoke-test-plan`` so a scripted client and the
+       UI can never disagree about stage order, defaults, or exit codes.
+
+       Defensive: ``smoke_test_plan`` may be ``None`` if the script
+       module failed to import (deploys that strip ``scribe/scripts``).
+       Skip the panel rather than render an empty card. #}
+    {% if smoke_test_plan %}
+    <div class="card"
+         id="smokeTestPlanCard"
+         data-test-feature="G6.1"
+         data-test-id="smoke-test-plan-card"
+         data-stage-count="{{ smoke_test_plan.stages|length }}">
+      <details>
+        <summary style="cursor:pointer;display:flex;align-items:center;gap:8px;">
+          <span class="caret" aria-hidden="true">▶</span>
+          <span class="title" style="font-weight:600;">Diagnostics — smoke test</span>
+          <span class="hint" style="margin:0;">post-install sanity check (CLI)</span>
+        </summary>
+        <div style="margin-top:14px;">
+          <p class="hint" style="margin:0 0 10px 0;">
+            After installing (or after swapping to <code>./setup.sh --rocm</code>),
+            run the smoke test from a terminal to confirm Whisper +
+            alignment {% if smoke_test_plan.defaults.include_diarize %}+ diarization{% endif %}
+            reach the GPU kernels without crashing. The script
+            <strong>fails fast</strong> at the first stage failure,
+            because a wedged backend doesn't produce useful timings for
+            later stages.
+          </p>
+          <div data-test-id="smoke-test-plan-cli-block"
+               style="display:flex;flex-direction:column;gap:6px;margin:8px 0;">
+            <code data-test-id="smoke-test-plan-cli-venv"
+                  style="display:block;padding:8px 10px;background:var(--panel-2,var(--panel));border:1px solid var(--border);border-radius:6px;font-family:var(--mono,monospace);">{{ smoke_test_plan.cli_venv }}</code>
+            <span class="hint" style="margin:0;">
+              or, with the venv already activated:
+              <code data-test-id="smoke-test-plan-cli">{{ smoke_test_plan.cli }}</code>
+            </span>
+          </div>
+          <div style="margin-top:10px;">
+            <strong style="font-size:13px;">Stages (in order)</strong>
+            <ol data-test-id="smoke-test-plan-stages"
+                style="margin:6px 0 0 18px;padding:0;font-size:13px;">
+              {% for stage in smoke_test_plan.stages %}
+                <li data-test-id="smoke-test-plan-stage-{{ stage.name }}">
+                  <code>{{ stage.name }}</code> — {{ stage.summary }}
+                </li>
+              {% endfor %}
+            </ol>
+          </div>
+          <div style="margin-top:10px;">
+            <strong style="font-size:13px;">Exit codes</strong>
+            <ul data-test-id="smoke-test-plan-exit-codes"
+                style="margin:6px 0 0 18px;padding:0;font-size:13px;">
+              {% for ec in smoke_test_plan.exit_codes %}
+                <li data-test-id="smoke-test-plan-exit-code-{{ ec.code }}">
+                  <code>{{ ec.code }}</code> — {{ ec.meaning }}
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+          <p class="hint" style="margin:10px 0 0 0;">
+            Defaults: <code>--seconds {{ smoke_test_plan.defaults.seconds }}</code>,
+            <code>--model {{ smoke_test_plan.defaults.model }}</code>,
+            <code>--language {{ smoke_test_plan.defaults.language }}</code>.
+            Pass <code>--include-diarize</code> (and set
+            <code>HF_TOKEN</code>) to also exercise pyannote — that's
+            the layer that trips the MIOpen LSTM-dropout bug on AMD.
+            See the
+            <a href="/docs/readme" rel="noopener">README</a> for the
+            full ROCm install context.
+          </p>
+        </div>
+      </details>
+    </div>
+    {% endif %}
+
     <!-- Slide-in docs -->
     <div id="docOverlay" class="doc-overlay" aria-hidden="true"></div>
     <aside id="docPanel" class="doc-panel" aria-hidden="true" aria-label="Documentation">

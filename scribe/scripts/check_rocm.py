@@ -391,6 +391,112 @@ def run_smoke_test(
 
 
 # --------------------------------------------------------------------------- #
+# Reachability surface — the smoke-test *plan* (no model loads)
+#
+# G6.1 reaches the user as a CLI script; the home-page UI surface is a
+# read-only panel that shows the same CLI invocation + a JSON-shaped
+# description of what each stage does. This helper returns that plan
+# without touching whisperx / pyannote, so the FastAPI route and the
+# Jinja template can both render it deterministically.
+# --------------------------------------------------------------------------- #
+
+
+# Stable list of stages in the order ``run_smoke_test`` exercises them. The
+# CLI driver, the JSON route, and the template-rendered checklist on the
+# home page all read this list so they can never disagree about the
+# stage names or the count.
+SMOKE_TEST_STAGES: tuple[dict[str, str], ...] = (
+    {
+        "name": "load_whisper",
+        "summary": "Instantiate the WhisperX wrapper for the active backend.",
+    },
+    {
+        "name": "load_audio",
+        "summary": "Decode the silent fixture WAV to a NumPy array.",
+    },
+    {
+        "name": "transcribe_silence",
+        "summary": "Run a one-shot inference on silence (proves the kernels reach).",
+    },
+    {
+        "name": "load_align_model",
+        "summary": "Load the language's wav2vec2 alignment model.",
+    },
+    {
+        "name": "load_diarize",
+        "summary": "Optional. Load pyannote/speaker-diarization-3.1 (needs HF_TOKEN).",
+    },
+    {
+        "name": "run_diarize",
+        "summary": "Optional. Run pyannote on the silent clip (probes MIOpen LSTM bug).",
+    },
+)
+
+
+# Process exit codes the CLI returns. The plan surface advertises these so
+# scripted callers (CI bots, support-scripts) can rely on them being part
+# of the contract rather than reading them out of source.
+SMOKE_TEST_EXIT_CODES: tuple[dict[str, str], ...] = (
+    {"code": 0, "meaning": "healthy — every requested stage reached"},
+    {"code": 1, "meaning": "stage_failure — first failing stage's exception is in the report"},
+    {"code": 2, "meaning": "bad_cli_args — argparse rejected the invocation"},
+)
+
+
+# Default values match the CLI defaults baked into ``build_parser``. We
+# repeat them here as data so the home-page panel can render them
+# without re-importing argparse.
+SMOKE_TEST_DEFAULTS: dict[str, Any] = {
+    "seconds": 5.0,
+    "model": "tiny",
+    "language": "en",
+    "include_diarize": False,
+}
+
+
+# CLI invocation strings the home page surfaces verbatim. The
+# ``cli_venv`` form matches the README's "Verify it took:" snippet so a
+# user copy-pasting from the panel runs the exact command we document.
+SMOKE_TEST_CLI = "python -m scribe.scripts.check_rocm"
+SMOKE_TEST_CLI_VENV = ".venv/bin/python -m scribe.scripts.check_rocm"
+
+
+def smoke_test_plan() -> dict[str, Any]:
+    """Return a structured description of what the smoke test does.
+
+    No model loads, no I/O, no torch import — pure metadata. The FastAPI
+    route ``GET /api/diagnostics/smoke-test-plan`` returns this dict as
+    JSON; the home-page template renders the same fields into a panel
+    so a user knows what the CLI invocation will run before running it.
+
+    Keys:
+
+    * ``cli`` / ``cli_venv`` — copy-paste invocation strings.
+    * ``stages`` — ordered list of ``{name, summary}`` dicts mirroring
+      the order in which ``run_smoke_test`` executes them.
+    * ``defaults`` — argparse defaults (seconds / model / language /
+      include_diarize).
+    * ``exit_codes`` — ``[{code, meaning}, ...]`` triples.
+    * ``fail_fast`` — ``True`` (the driver stops at the first failure
+      so a wedged backend doesn't produce nonsense timings later).
+    * ``feature_id`` — ``"G6.1"`` so JS test-id selectors can pin the
+      panel.
+    * ``docs_anchor`` — README section heading the user can jump to
+      from the in-app docs viewer (``/docs/readme``) for context.
+    """
+    return {
+        "feature_id": "G6.1",
+        "cli": SMOKE_TEST_CLI,
+        "cli_venv": SMOKE_TEST_CLI_VENV,
+        "stages": [dict(stage) for stage in SMOKE_TEST_STAGES],
+        "defaults": dict(SMOKE_TEST_DEFAULTS),
+        "exit_codes": [dict(ec) for ec in SMOKE_TEST_EXIT_CODES],
+        "fail_fast": True,
+        "docs_anchor": "linux-amd-gpu--rocm",
+    }
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 

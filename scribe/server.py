@@ -253,6 +253,16 @@ async def index(request: Request) -> HTMLResponse:
     )
     from .engine import gpu_backend
     from . import whisper_cpp
+    # G6.1 — surface the smoke-test plan so the home page can render a
+    # read-only "Diagnostics" panel that shows the CLI invocation + the
+    # ordered stage list. Defensive against an import failure (e.g. the
+    # script module is missing on a stripped-down deploy): collapse to
+    # ``None`` so the template skips the panel rather than 500ing.
+    try:
+        from .scripts.check_rocm import smoke_test_plan as _smoke_plan_fn
+        smoke_test_plan_payload = _smoke_plan_fn()
+    except Exception:  # noqa: BLE001
+        smoke_test_plan_payload = None
 
     active_backend = gpu_backend()
     return templates.TemplateResponse(
@@ -274,6 +284,9 @@ async def index(request: Request) -> HTMLResponse:
             "whisper_cpp_supported_models": list(whisper_cpp.SUPPORTED_MODELS),
             "whisper_cpp_supported_quants": list(whisper_cpp.SUPPORTED_QUANTS),
             "whisper_cpp_default_quant": whisper_cpp.DEFAULT_QUANT,
+            # G6.1 — read-only smoke-test plan; ``None`` only when the
+            # script module fails to import (defensive).
+            "smoke_test_plan": smoke_test_plan_payload,
         },
     )
 
@@ -348,6 +361,27 @@ async def whisper_cpp_models_endpoint() -> JSONResponse:
         "pywhispercpp_unavailable_reason": reason,
         "models": [m.to_dict() for m in whisper_cpp.list_catalogue()],
     })
+
+
+@app.get("/api/diagnostics/smoke-test-plan")
+async def smoke_test_plan_endpoint() -> JSONResponse:
+    """Return the G6.1 smoke-test plan as JSON.
+
+    The smoke-test (``scribe.scripts.check_rocm``) is the post-install
+    sanity check that loads a tiny Whisper, runs one inference, loads
+    the alignment model, and optionally runs pyannote diarization. It
+    is a CLI-driven check; this route surfaces the *plan* (stage names,
+    defaults, CLI invocation, exit-code semantics) so the home-page UI
+    can render the same checklist a researcher would otherwise have to
+    pull out of the README.
+
+    The route is intentionally read-only — it never imports whisperx
+    or torch and never spawns the smoke test. Callers that want to
+    actually run it shell out to ``python -m scribe.scripts.check_rocm``
+    using the ``cli`` / ``cli_venv`` strings the route returns.
+    """
+    from .scripts.check_rocm import smoke_test_plan
+    return JSONResponse(smoke_test_plan())
 
 
 @app.get("/edit/{job_id}", response_class=HTMLResponse)
