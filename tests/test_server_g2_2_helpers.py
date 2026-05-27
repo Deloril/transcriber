@@ -281,6 +281,7 @@ class TestG2_2ApiCapabilitiesCarriesFallbackUrls:
             "rocm_hsa_override_state",
             "rocm_hsa_override_value",
             "rocm_hsa_override_explanation",
+            "whisper_compute_type",
         }
 
     def test_capabilities_swallows_helper_exception(

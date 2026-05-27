@@ -410,6 +410,7 @@ class TestG4_2ApiCapabilitiesCarriesHsaOverrideState:
             "rocm_hsa_override_state",
             "rocm_hsa_override_value",
             "rocm_hsa_override_explanation",
+            "whisper_compute_type",
         }
 
 

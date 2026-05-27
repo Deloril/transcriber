@@ -1504,3 +1504,187 @@ describe("backendStatTile (G4.2 HSA_OVERRIDE_GFX_VERSION)", () => {
     expect(tile.sub).not.toContain("HSA undefined");
   });
 });
+
+
+// ---------- G5.2: whisper compute-type tier on the sub-line ----------
+//
+// G5.2 (commit ``a497895``) shipped the *engine*-side compute-type
+// tiering helper ``_pick_compute_type`` plus its consumer
+// ``_whisper_device_and_compute``. The original commit had no
+// Reachable-via line; until this commit a researcher had no in-app
+// way to confirm which CT2 compute-type their next transcription
+// would run at. The fields ``whisper_compute_type`` is now exposed
+// on ``GET /api/capabilities`` (server side) and surfaced as a final
+// sub-line segment on the home page Backend tile via the helpers
+// below. The four observable strings are:
+//
+//   - "float16"      → CUDA / RDNA 3 / RDNA 4 with ≥8 GB VRAM
+//   - "int8_float16" → <8 GB GPU *or* any RDNA 2 ROCm box
+//   - "int8"         → CPU / MPS (CT2 has no GPU backend either way)
+//   - <user-forced>  → ``SCRIBE_COMPUTE_TYPE`` override echoed verbatim
+//
+// All four render as ``"compute <type>"`` on the sub-line — the
+// "compute " prefix disambiguates the segment from the existing VRAM
+// / gfx / distro segments when copy-pasted into a support thread.
+
+describe("backendStatTile (G5.2 whisper_compute_type)", () => {
+  it("appends 'compute float16' on a high-VRAM CUDA tile", () => {
+    // CUDA RTX 4090 happy path — fp16 is in effect.
+    const tile = backendStatTile({
+      backend: "cuda",
+      device_name: "NVIDIA GeForce RTX 4090",
+      vram_gb: 24.0,
+      whisper_compute_type: "float16",
+    });
+    expect(tile.value).toBe("CUDA");
+    expect(tile.sub).toBe(
+      "NVIDIA GeForce RTX 4090 · 24 GB VRAM · compute float16"
+    );
+  });
+
+  it("appends 'compute int8_float16' on an RDNA 2 ROCm tile (16 GB stays conservative)", () => {
+    // RX 6800 has 16 GB but RDNA 2 stays on the int8_float16 path
+    // even at high VRAM — the cub_caching workaround (G4.1) only
+    // validated int8 quants on Navi 2x. Surfacing the conservative
+    // pick on the tile means a researcher with a 16 GB AMD card
+    // doesn't have to wonder why fp16 didn't kick in.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6800",
+      vram_gb: 16.0,
+      gfx_target: "gfx1030",
+      whisper_compute_type: "int8_float16",
+    });
+    expect(tile.value).toBe("ROCm");
+    expect(tile.sub).toContain("compute int8_float16");
+    // Final sub-line segment — pin position so a future helpers
+    // refactor doesn't quietly reorder the segments. Compute type is
+    // intentionally last because it depends on every prior signal
+    // (backend + VRAM + RDNA 2 detector + env-var override).
+    expect(tile.sub.split(" · ").pop()).toBe("compute int8_float16");
+  });
+
+  it("appends 'compute int8' on a CPU tile (CT2 has no MPS backend either)", () => {
+    // CPU + MPS both end up at int8 because CT2 has no Metal
+    // backend. The segment populates on every backend — unlike the
+    // ROCm-specific segments, the answer here is meaningful even on
+    // CPU because the user is choosing between waiting hours for an
+    // int8 transcription vs running on a faster machine.
+    const tile = backendStatTile({
+      backend: "cpu",
+      device_name: null,
+      vram_gb: null,
+      whisper_compute_type: "int8",
+    });
+    expect(tile.value).toBe("CPU");
+    expect(tile.sub).toBe("compute int8");
+  });
+
+  it("appends 'compute int8' on an MPS tile (Apple Silicon)", () => {
+    const tile = backendStatTile({
+      backend: "mps",
+      device_name: "Apple M2 Max",
+      whisper_compute_type: "int8",
+    });
+    expect(tile.value).toBe("MPS");
+    expect(tile.sub).toBe("Apple M2 Max · compute int8");
+  });
+
+  it("echoes a user-forced compute type verbatim (SCRIBE_COMPUTE_TYPE)", () => {
+    // ``SCRIBE_COMPUTE_TYPE`` always wins in the engine; if the user
+    // pinned ``int8_float32`` (or any other CT2-accepted value), the
+    // tile reflects that pin so they can confirm their override
+    // survived the shell plumbing. The helper is type-agnostic — it
+    // just renders whatever string the API hands it.
+    const tile = backendStatTile({
+      backend: "cuda",
+      device_name: "NVIDIA GeForce RTX 4090",
+      vram_gb: 24.0,
+      whisper_compute_type: "int8_float32",
+    });
+    expect(tile.sub).toContain("compute int8_float32");
+  });
+
+  it("omits the segment when whisper_compute_type is null / undefined / empty", () => {
+    // Older API or a helper failure: the segment must be silently
+    // omitted, not rendered as "compute null" / "compute undefined" /
+    // "compute ".
+    for (const v of [null, undefined, ""]) {
+      const tile = backendStatTile({
+        backend: "cuda",
+        device_name: "NVIDIA GeForce RTX 4090",
+        vram_gb: 24.0,
+        whisper_compute_type: v,
+      });
+      expect(tile.sub).toBe("NVIDIA GeForce RTX 4090 · 24 GB VRAM");
+      expect(tile.sub).not.toContain("compute null");
+      expect(tile.sub).not.toContain("compute undefined");
+      expect(tile.sub).not.toContain("compute ");
+    }
+  });
+
+  it("compute segment is 'compute ' prefixed (greppable in support threads)", () => {
+    // Pin the literal prefix — a researcher pasting the tile sub-line
+    // into a CT2 / faster-whisper bug report should be able to grep
+    // "compute " to find the type at a glance. The prefix also
+    // disambiguates the segment from the existing "alloc <type>"
+    // (G4.1) and "HSA <value>" (G4.2) segments which use a similar
+    // shape.
+    const tile = backendStatTile({
+      backend: "cpu",
+      whisper_compute_type: "int8",
+    });
+    expect(tile.sub.startsWith("compute ")).toBe(true);
+  });
+
+  it("compute segment renders alongside every other ROCm segment", () => {
+    // End-to-end: a fully-populated RDNA 2 non-gfx1030 ROCm payload
+    // (the worst case for sub-line crowding) carries the compute
+    // segment as the final element. The segments must not collide
+    // and the compute segment must be last.
+    const tile = backendStatTile({
+      backend: "rocm",
+      device_name: "AMD Radeon RX 6700 XT",
+      vram_gb: 12.0,
+      gfx_target: "gfx1031",
+      distro: "Ubuntu 24.04.4 LTS",
+      ct2_rocm_pin: "4.7.2",
+      ct2_installed: "4.7.2",
+      ct2_drift_message: null,
+      ct2_rocm_fallback_urls: [],
+      distro_tier: "first-class",
+      rocm_lstm_patch: true,
+      rocm_allocator_state: "auto",
+      rocm_allocator_value: "cub_caching",
+      rocm_hsa_override_state: "user-set",
+      rocm_hsa_override_value: "10.3.0",
+      whisper_compute_type: "int8_float16",
+    });
+    const segments = tile.sub.split(" · ");
+    expect(segments[0]).toBe("AMD Radeon RX 6700 XT");
+    expect(segments[segments.length - 1]).toBe("compute int8_float16");
+    // Sanity: every prior segment is also present.
+    expect(segments).toContain("12 GB VRAM");
+    expect(segments).toContain("gfx1031");
+    expect(segments).toContain("Ubuntu 24.04.4 LTS");
+    expect(segments).toContain("CT2 v4.7.2");
+    expect(segments).toContain("first-class distro");
+    expect(segments).toContain("LSTM patched");
+    expect(segments).toContain("alloc cub_caching");
+    expect(segments).toContain("HSA 10.3.0");
+  });
+
+  it("does not affect the warning field (compute-type is informational, not actionable)", () => {
+    // Unlike "alloc unset" / "HSA missing", a chosen compute type is
+    // never an error condition — the helper picks the best value for
+    // the hardware. Pin that the warning field is unaffected by
+    // ``whisper_compute_type``.
+    const tile = backendStatTile({
+      backend: "cuda",
+      device_name: "NVIDIA GeForce RTX 4090",
+      vram_gb: 24.0,
+      whisper_compute_type: "float16",
+    });
+    expect(tile.warning).toBeNull();
+  });
+});

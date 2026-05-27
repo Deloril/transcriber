@@ -296,6 +296,28 @@ export function backendStatTile(gpu) {
   } else if (hsaState === "missing") {
     parts.push("HSA missing");
   }
+  // G5.2: surface the CTranslate2 compute-type tier the next
+  // transcription will run at as the final sub-line segment.
+  // ``whisper_compute_type`` is one of:
+  //
+  //   - "float16"        → ≥8 GB CUDA / RDNA 3 / RDNA 4 happy path
+  //   - "int8_float16"   → <8 GB GPU *or* any RDNA 2 ROCm box
+  //                        (regardless of VRAM — the Tier-2
+  //                        cub_caching path is conservative)
+  //   - "int8"           → CPU / MPS (CT2 has no GPU backend on either)
+  //   - any other string → ``SCRIBE_COMPUTE_TYPE`` user-override
+  //                        (echoed verbatim so a researcher running
+  //                        a forced quant sees the value they pinned)
+  //
+  // Rendered as ``"compute <type>"`` so the segment's purpose is
+  // unambiguous when copy-pasted into a support thread alongside the
+  // backend name + VRAM + gfx target. Suppressed entirely when the
+  // field is null / undefined / empty (older API or helper failure).
+  // Populated on every backend — unlike the ROCm-specific segments
+  // above, the compute-type answer is meaningful on CPU / MPS too.
+  if (gpu.whisper_compute_type) {
+    parts.push(`compute ${String(gpu.whisper_compute_type)}`);
+  }
   // G2.1 drift warning. Falsy ``ct2_drift_message`` (null / undefined /
   // empty string) means no drift — the tile renders without a warning
   // banner. Anything truthy is passed through verbatim; the server

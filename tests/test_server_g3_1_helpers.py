@@ -307,6 +307,7 @@ class TestG3_1ApiCapabilitiesCarriesPatchStatus:
             "rocm_hsa_override_state",
             "rocm_hsa_override_value",
             "rocm_hsa_override_explanation",
+            "whisper_compute_type",
         }
 
 

@@ -998,12 +998,30 @@ async def capabilities() -> JSONResponse:
     sees the export recommendation without scrolling. The CLI
     surface (``python -m scribe.devices``) prints the same state
     under ``HSA override:``.
+
+    G5.2: ``gpu.whisper_compute_type`` carries the CTranslate2
+    compute-type tier the next transcription will run at — one of
+    ``"float16"`` (≥8 GB CUDA / RDNA 3 / RDNA 4), ``"int8_float16"``
+    (<8 GB GPU *or* any RDNA 2 ROCm box, regardless of VRAM), or
+    ``"int8"`` (CPU / MPS, where CT2 has no GPU backend). Surfacing the
+    string on the Backend tile means a researcher with a 16 GB RX 6800
+    can confirm at a glance that Scribe stayed conservative on the
+    Tier-2 RDNA 2 path, and a CUDA RTX-4090 user can confirm fp16 is
+    in effect — both surfaces pull from the same
+    :func:`scribe.engine._whisper_device_and_compute` so the Backend
+    tile and the actual model load can never disagree. Unlike the
+    other ``gpu.*`` fields ``whisper_compute_type`` is populated on
+    every backend (it's the most basic question — "what precision
+    will this run at?" — and the answer is meaningful on CPU / MPS
+    too); only the RDNA-2-specific workarounds collapse to ``None``
+    outside their scope. ``SCRIBE_COMPUTE_TYPE`` always wins.
     """
     from .parakeet import nemo_available
     from .engine import (
         gpu_backend,
         _gpu_device_name,
         _cuda_vram_gb,
+        _whisper_device_and_compute,
         gpu_arch_name,
         rocm_allocator_explanation,
         rocm_allocator_state,
@@ -1163,6 +1181,22 @@ async def capabilities() -> JSONResponse:
             hsa_override_state_label = None
             hsa_override_value_label = None
             hsa_override_explanation_text = None
+    # G5.2: resolve the CT2 compute-type tier the next transcription will
+    # run at. ``_whisper_device_and_compute`` is the single source of
+    # truth — calling it here means the Backend tile and the actual
+    # model load can never disagree. The helper does only env-var
+    # lookups + an in-memory architecture probe (no model loads, no
+    # network), so it's safe inside the request path. Defensive against
+    # helper exceptions — collapse to None rather than 500. Unlike the
+    # ROCm-specific fields above, this field is populated on every
+    # backend (CPU / MPS land on ``"int8"``; the answer is meaningful
+    # everywhere, not just on AMD).
+    whisper_compute_type: str | None
+    try:
+        _w_dev, _w_compute = _whisper_device_and_compute()
+        whisper_compute_type = _w_compute or None
+    except Exception:  # noqa: BLE001
+        whisper_compute_type = None
     return JSONResponse({
         "parakeet": {
             "available": parakeet_runtime_ok,
@@ -1190,6 +1224,7 @@ async def capabilities() -> JSONResponse:
             "rocm_hsa_override_state": hsa_override_state_label,
             "rocm_hsa_override_value": hsa_override_value_label,
             "rocm_hsa_override_explanation": hsa_override_explanation_text,
+            "whisper_compute_type": whisper_compute_type,
         },
     })
 
