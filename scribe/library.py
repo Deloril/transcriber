@@ -178,7 +178,10 @@ def summarise_job(job: Any) -> dict[str, Any]:
     The returned dict has *exactly* these keys:
 
     ``id``                — the 12-hex-char job id.
-    ``input_filename``    — original uploaded filename (display only).
+    ``input_filename``    — original uploaded filename (immutable record
+                            of what was uploaded; never overwritten).
+    ``display_name``      — user-set rename, empty string if no rename.
+                            The UI shows ``display_name or input_filename``.
     ``mode``              — ``auto`` / ``multi-track`` / ``diarize``.
     ``language``          — detected (preferred) or requested language.
     ``model``             — Whisper / Parakeet model id used.
@@ -210,6 +213,7 @@ def summarise_job(job: Any) -> dict[str, Any]:
     return {
         "id": _str_field(d, "id"),
         "input_filename": _str_field(d, "input_filename"),
+        "display_name": _str_field(d, "display_name"),
         "mode": _str_field(d, "mode"),
         "language": _resolve_language(d, result),
         "model": _str_field(d, "model"),
@@ -263,6 +267,7 @@ def matches_query(row: dict[str, Any], query: str) -> bool:
         return True
     parts: list[str] = [
         str(row.get("input_filename") or ""),
+        str(row.get("display_name") or ""),
         str(row.get("status") or ""),
         str(row.get("mode") or ""),
         str(row.get("language") or ""),

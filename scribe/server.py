@@ -76,6 +76,11 @@ class Job:
     output_paths: dict[str, str] = field(default_factory=dict)
     audio_streams: int = 0
     input_filename: str = ""
+    # User-set display label that overrides input_filename in the
+    # library list and the editor's topbar. Stored separately so the
+    # original upload name remains the immutable record. Empty string
+    # means "no rename — show input_filename".
+    display_name: str = ""
     options: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 8
     # Wall-clock timestamps used for the UI's elapsed/ETA counters.
@@ -129,6 +134,7 @@ class Job:
             output_paths=d.get("output_paths", {}),
             audio_streams=d.get("audio_streams", 0),
             input_filename=d.get("input_filename", ""),
+            display_name=str(d.get("display_name") or ""),
             options=d.get("options", {}) or {},
             batch_size=int(d.get("batch_size", 8) or 8),
             started_at=d.get("started_at"),
@@ -482,7 +488,11 @@ async def editor_page(request: Request, job_id: str) -> HTMLResponse:
         "editor.html",
         {
             "job_id": job_id,
-            "input_filename": job.input_filename or job.input_path.name,
+            "input_filename": (
+                job.display_name
+                or job.input_filename
+                or job.input_path.name
+            ),
         },
     )
 
@@ -11295,6 +11305,57 @@ async def job_status(job_id: str) -> JSONResponse:
         return JSONResponse(_job_dict(job))
 
 
+# Cap the user-set display name. The library row, editor topbar, and
+# <title> all render this field; runaway lengths there break layout
+# in ways that cascade through the whole page. 200 chars is generous
+# for "Interview 2 — Maria Gonzalez (long version, take 3)" while
+# protecting against accidental paste of a paragraph.
+_MAX_DISPLAY_NAME_LEN = 200
+
+
+@app.patch("/api/job/{job_id}")
+async def patch_job(job_id: str, request: Request) -> JSONResponse:
+    """Mutate user-editable Job metadata.
+
+    Currently the only field accepted is ``display_name`` — a user-set
+    label that overrides ``input_filename`` everywhere the transcription
+    is named (library row, editor topbar, browser tab title). Empty
+    string clears the rename and falls back to the original filename.
+
+    Body: ``{"display_name": "..."}`` (whitespace-trimmed; longer than
+    :data:`_MAX_DISPLAY_NAME_LEN` is rejected). Returns the updated job
+    dict.
+    """
+    _check_job_id(job_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    if "display_name" not in body:
+        raise HTTPException(400, "No mutable field supplied (expected display_name)")
+    raw = body["display_name"]
+    if raw is None:
+        cleaned = ""
+    elif isinstance(raw, str):
+        cleaned = raw.strip()
+    else:
+        raise HTTPException(400, "display_name must be a string or null")
+    if len(cleaned) > _MAX_DISPLAY_NAME_LEN:
+        raise HTTPException(
+            400,
+            f"display_name must be {_MAX_DISPLAY_NAME_LEN} characters or fewer",
+        )
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        job.display_name = cleaned
+        _persist_job(job)
+        return JSONResponse(_job_dict(job))
+
+
 @app.get("/api/job/{job_id}/projects")
 async def job_projects(job_id: str) -> JSONResponse:
     """Return every project / source pair that links to this job, so the
@@ -11344,6 +11405,7 @@ def _job_dict(job: Job) -> dict[str, Any]:
         "output_paths": job.output_paths,
         "result": job.result,
         "input_filename": job.input_filename,
+        "display_name": job.display_name,
         "media_discarded": discarded,
     }
 

@@ -226,6 +226,30 @@
       vertical-align: middle;
     }
 
+    /* Inline rename pencil — visible on row hover so it doesn't
+       compete with the filename text at rest. Same style as other
+       row-action buttons but smaller, right next to the name. */
+    table.lib tbody td.filename .rename-btn {
+      visibility: hidden;
+      background: transparent;
+      border: 0;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      margin-left: 6px;
+      padding: 1px 4px;
+      border-radius: 4px;
+      vertical-align: middle;
+    }
+    table.lib tbody tr:hover td.filename .rename-btn,
+    table.lib tbody td.filename .rename-btn:focus {
+      visibility: visible;
+    }
+    table.lib tbody td.filename .rename-btn:hover {
+      color: var(--text);
+      background: var(--panel-2);
+    }
+
     .empty {
       padding: 60px 20px; text-align: center; color: var(--muted);
     }
@@ -353,7 +377,14 @@
       const tr = document.createElement("tr");
       tr.dataset.jobId = row.id;
 
-      const filename = escapeHtml(row.input_filename || "(unnamed)");
+      // Display label: user-set display_name wins over the original
+      // upload filename. Both are kept on the row so a "show original"
+      // tooltip and the rename prompt can fall back without another fetch.
+      const rawDisplay = row.display_name || row.input_filename || "(unnamed)";
+      const filename = escapeHtml(rawDisplay);
+      const originalTitle = (row.display_name && row.input_filename)
+        ? ` — original: ${escapeHtml(row.input_filename)}`
+        : "";
       const speakers = formatLibrarySpeakers(row.speakers || []);
       const created = formatLibraryDate(row.created_at);
       const duration = fmtDuration(row.duration_seconds || 0);
@@ -387,8 +418,9 @@
         : "";
 
       tr.innerHTML = `
-        <td class="filename" title="${filename}">
+        <td class="filename" title="${filename}${originalTitle}">
           <strong>${filename}</strong>${mediaFlag}
+          <button class="rename-btn" data-action="rename" data-id="${escapeHtml(row.id)}" title="Rename this transcription">✏</button>
         </td>
         <td class="numeric">${duration}</td>
         <td><span class="pill mode">${mode || "—"}</span></td>
@@ -411,6 +443,46 @@
     tbody.addEventListener("click", async (e) => {
       const delBtn = e.target.closest("button[data-action='delete']");
       const discardBtn = e.target.closest("button[data-action='discard-media']");
+      const renameBtn = e.target.closest("button[data-action='rename']");
+      if (renameBtn) {
+        const jobId = renameBtn.dataset.id;
+        const row = allRows.find(x => x.id === jobId);
+        if (!row) return;
+        const current = row.display_name || row.input_filename || "";
+        const next = window.prompt(
+          "Rename this transcription. Empty input clears the rename and " +
+          "shows the original filename again.\n\n" +
+          `Original: ${row.input_filename || "(unnamed)"}`,
+          current,
+        );
+        if (next === null) return;  // user cancelled
+        renameBtn.disabled = true;
+        try {
+          const r = await fetch(`/api/job/${encodeURIComponent(jobId)}`, {
+            method: "PATCH",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({display_name: next}),
+          });
+          if (!r.ok) {
+            const detail = await r.json().catch(() => ({}));
+            throw new Error(detail.detail || `HTTP ${r.status}`);
+          }
+          const updated = await r.json();
+          // Patch the local row so the UI updates without a full reload.
+          allRows = allRows.map(x =>
+            x.id === jobId
+              ? {...x, display_name: updated.display_name || ""}
+              : x,
+          );
+          render();
+        } catch (e2) {
+          errBanner.textContent = "Rename failed: " + (e2.message || e2);
+          errBanner.classList.remove("hidden");
+        } finally {
+          renameBtn.disabled = false;
+        }
+        return;
+      }
       if (delBtn) {
         const jobId = delBtn.dataset.id;
         if (!confirm(`Delete this transcription? This removes the source media and all transcript files. This cannot be undone.`)) return;

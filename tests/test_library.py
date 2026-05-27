@@ -81,7 +81,8 @@ class TestSummariseJobShape:
     """Every row has the same keys, even on a sparse job."""
 
     EXPECTED_KEYS = {
-        "id", "input_filename", "mode", "language", "model",
+        "id", "input_filename", "display_name",
+        "mode", "language", "model",
         "status", "progress", "message",
         "created_at", "started_at", "finished_at",
         "audio_streams", "speakers", "speaker_count",
@@ -255,6 +256,33 @@ class TestSummariseJobOutputs:
     def test_has_outputs_false_when_empty(self) -> None:
         row = library.summarise_job(_job_state(output_paths={}))
         assert row["has_outputs"] is False
+
+
+class TestSummariseJobDisplayName:
+    """User-set rename surfaced separately from the immutable upload
+    filename so the library row + editor topbar can show the friendly
+    label without losing the original."""
+
+    def test_defaults_to_empty_string(self) -> None:
+        row = library.summarise_job(_job_state())
+        assert row["display_name"] == ""
+        # Original filename still carried through verbatim.
+        assert row["input_filename"] == "in.wav"
+
+    def test_passes_through_when_set(self) -> None:
+        row = library.summarise_job(_job_state(display_name="Maria — interview 2"))
+        assert row["display_name"] == "Maria — interview 2"
+        assert row["input_filename"] == "in.wav"
+
+    def test_search_matches_display_name(self) -> None:
+        row = library.summarise_job(_job_state(
+            input_filename="raw-audio-2026-05-26.wav",
+            display_name="Pilot interview with Maria",
+        ))
+        assert library.matches_query(row, "pilot") is True
+        assert library.matches_query(row, "maria") is True
+        # And the original filename is still searchable.
+        assert library.matches_query(row, "raw-audio") is True
 
 
 class TestSummariseJobMediaDiscarded:
