@@ -724,3 +724,140 @@ class TestDownloadGguf:
                 cache_dir=tmp_path,
                 url_opener=lambda u, t: _FakeStream(b"", content_length=0),
             )
+
+
+# --------------------------------------------------------------------------- #
+# decode_audio_for_whisper_cpp — ffmpeg-driven decode that sidesteps the
+# pywhispercpp ``ValueError: vector`` bug on macOS where its bundled
+# loader hands the C++ binding an empty audio buffer.
+# --------------------------------------------------------------------------- #
+
+
+class TestDecodeAudioForWhisperCpp:
+    def _silent_wav(self, tmp_path: Path, *, ms: int = 200) -> Path:
+        """Make a tiny silent WAV file via ffmpeg so we don't depend on
+        any test fixture being shipped in the repo. Returns the path."""
+        import subprocess
+        import shutil
+        if not shutil.which("ffmpeg"):
+            pytest.skip("ffmpeg not on PATH")
+        out = tmp_path / "silent.wav"
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "lavfi",
+                "-i", f"anullsrc=r=16000:cl=mono",
+                "-t", f"{ms / 1000:.3f}",
+                "-c:a", "pcm_s16le",
+                str(out),
+            ],
+            check=True,
+        )
+        return out
+
+    def test_returns_float32_numpy_array(self, tmp_path: Path) -> None:
+        np = pytest.importorskip("numpy")
+        wav = self._silent_wav(tmp_path)
+        out = wcpp.decode_audio_for_whisper_cpp(wav)
+        assert isinstance(out, np.ndarray)
+        assert out.dtype == np.float32
+        # 16kHz × 0.2s = 3200 samples; ffmpeg may pad slightly so
+        # check shape is in the right ballpark.
+        assert 2_500 <= out.size <= 4_000
+
+    def test_decodes_to_16khz_mono(self, tmp_path: Path) -> None:
+        # Make a non-mono, non-16kHz source and confirm we still get
+        # back a flat mono 16kHz buffer.
+        import subprocess
+        import shutil
+        np = pytest.importorskip("numpy")
+        if not shutil.which("ffmpeg"):
+            pytest.skip("ffmpeg not on PATH")
+        src = tmp_path / "stereo-44k.wav"
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                "-t", "0.1",
+                "-c:a", "pcm_s16le",
+                str(src),
+            ],
+            check=True,
+        )
+        out = wcpp.decode_audio_for_whisper_cpp(src)
+        assert out.ndim == 1
+        # 16kHz × 0.1s ≈ 1600 samples (allow padding).
+        assert 1_400 <= out.size <= 2_000
+
+    def test_silent_audio_returns_zeros(self, tmp_path: Path) -> None:
+        np = pytest.importorskip("numpy")
+        wav = self._silent_wav(tmp_path)
+        out = wcpp.decode_audio_for_whisper_cpp(wav)
+        # All samples are silent, so peak amplitude is ~0. Use a
+        # generous bound — even ffmpeg's null source has occasional
+        # rounding artefacts.
+        assert float(np.abs(out).max()) < 1e-3
+
+    def test_missing_file_raises_runtime_error(self, tmp_path: Path) -> None:
+        with pytest.raises(RuntimeError):
+            wcpp.decode_audio_for_whisper_cpp(tmp_path / "no-such-file.wav")
+
+    def test_no_audio_track_raises(self, tmp_path: Path) -> None:
+        # A bare text file isn't audio; ffmpeg will fail at decode.
+        bogus = tmp_path / "not-audio.txt"
+        bogus.write_text("this is not audio")
+        with pytest.raises(RuntimeError):
+            wcpp.decode_audio_for_whisper_cpp(bogus)
+
+    def test_default_inference_calls_decode_helper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Surface-level proof that _default_inference now passes a
+        numpy array (not a path string) into pywhispercpp — that's the
+        whole reason this helper exists. We stub both the decode and
+        the Model so the test runs without ffmpeg or pywhispercpp."""
+        np = pytest.importorskip("numpy")
+        decoded = np.zeros(3200, dtype=np.float32)
+        called_with: list = []
+
+        monkeypatch.setattr(
+            wcpp, "decode_audio_for_whisper_cpp", lambda p: decoded,
+        )
+
+        # Fake Model class so we can prove .transcribe got the array.
+        class _FakeSeg:
+            def __init__(self, t0, t1, text):
+                self.t0, self.t1, self.text = t0, t1, text
+
+        class _FakeModel:
+            def __init__(self, *a, **kw):
+                pass
+            def transcribe(self, audio):
+                called_with.append(audio)
+                return [_FakeSeg(0, 100, "hi")]
+
+        # _default_inference imports lazily; inject a fake module.
+        import sys
+        import types
+        fake = types.ModuleType("pywhispercpp.model")
+        fake.Model = _FakeModel  # type: ignore[attr-defined]
+        sys.modules["pywhispercpp"] = types.ModuleType("pywhispercpp")
+        sys.modules["pywhispercpp.model"] = fake
+
+        try:
+            out = wcpp._default_inference(
+                tmp_path / "audio.wav",
+                tmp_path / "ggml.bin",
+                "en",
+                {},
+            )
+        finally:
+            del sys.modules["pywhispercpp.model"]
+            del sys.modules["pywhispercpp"]
+
+        # The single transcribe call got the decoded array, not the path.
+        assert len(called_with) == 1
+        assert isinstance(called_with[0], np.ndarray)
+        assert called_with[0].dtype == np.float32
+        # And the result was reshaped into the t0/t1/text dict shape.
+        assert out == [{"t0": 0, "t1": 100, "text": "hi"}]

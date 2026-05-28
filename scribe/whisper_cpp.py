@@ -446,6 +446,68 @@ def convert_segments(
 InferenceFn = Callable[[Path, Path, str, dict[str, Any]], list[dict[str, Any]]]
 
 
+def decode_audio_for_whisper_cpp(audio_path: Path) -> "Any":  # numpy.ndarray at runtime
+    """Decode any audio/video file to 16 kHz mono float32 PCM via ffmpeg.
+
+    ``pywhispercpp.Model.transcribe`` accepts either a path (it then
+    tries to decode internally) or a pre-decoded numpy array. The
+    path code path is fragile on macOS — pywhispercpp's bundled
+    loader sometimes returns an empty vector and the underlying
+    C++ binding raises ``ValueError: vector`` from
+    ``whisper_full``. Decoding ourselves with ffmpeg sidesteps the
+    bug entirely and gives us a single, well-tested decoder across
+    every platform.
+
+    Returns a 1-D ``numpy.ndarray`` of dtype ``float32`` in
+    [-1.0, 1.0]. Raises :class:`RuntimeError` if ffmpeg returns a
+    non-zero exit code or an empty stream (e.g. the file has no
+    audio track).
+    """
+    import subprocess
+
+    import numpy as np  # imported lazily — not every dev machine has numpy
+
+    ffmpeg = _ffmpeg_or_die()
+    cmd = [
+        ffmpeg, "-loglevel", "error",
+        "-i", str(audio_path),
+        "-f", "f32le",         # raw 32-bit little-endian float
+        "-ac", "1",            # mono
+        "-ar", "16000",        # 16 kHz (whisper.cpp's native rate)
+        "-vn",                 # discard any video stream
+        "-",
+    ]
+    try:
+        proc = subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"ffmpeg failed to decode {audio_path}: {stderr or e}"
+        ) from e
+    raw = proc.stdout
+    if not raw:
+        raise RuntimeError(
+            f"ffmpeg produced no audio bytes for {audio_path}. "
+            "The file may have no audio track."
+        )
+    return np.frombuffer(raw, dtype=np.float32)
+
+
+def _ffmpeg_or_die() -> str:
+    """Return the absolute path to ffmpeg or raise a helpful error.
+
+    Kept tiny + stand-alone so tests don't need to monkeypatch
+    :mod:`scribe.audio` to exercise the decode helper.
+    """
+    import shutil
+    p = shutil.which("ffmpeg")
+    if not p:
+        raise RuntimeError(
+            "ffmpeg not found on PATH. Install with: brew install ffmpeg"
+        )
+    return p
+
+
 def _default_inference(
     audio_path: Path,
     gguf_path: Path,
@@ -463,7 +525,10 @@ def _default_inference(
         # Sensible default; pywhispercpp picks os.cpu_count() if 0.
         n_threads=int(options.get("n_threads", 0) or 0),
     )
-    raw = model.transcribe(str(audio_path))
+    # Decode ourselves rather than letting pywhispercpp's loader do
+    # it; see decode_audio_for_whisper_cpp() for why.
+    audio = decode_audio_for_whisper_cpp(audio_path)
+    raw = model.transcribe(audio)
     out: list[dict[str, Any]] = []
     for seg in raw:
         # pywhispercpp segments expose .t0 / .t1 / .text
