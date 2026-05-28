@@ -440,6 +440,182 @@ async def whisper_cpp_models_endpoint() -> JSONResponse:
     })
 
 
+# --------------------------------------------------------------------------- #
+# whisper.cpp model download manager
+#
+# The user lands here when they pick whisper.cpp, hit Transcribe, and
+# get back ``GGUF model not cached: …``. The error already names the
+# Hugging Face URL, but copy-pasting curl into a terminal is bad UX.
+# This pair of endpoints kicks off the download in a background
+# thread and lets the UI poll progress so the upload page can show a
+# fill bar instead of silently freezing for 90 seconds while a 1 GB
+# blob trickles in.
+#
+#   POST /api/whisper-cpp/download         body: {"model": "..", "quant": ".."}
+#   GET  /api/whisper-cpp/download/{id}    polled status: {state, downloaded_bytes, total_bytes, error}
+#
+# State is in-memory only — restart the server and the download dict
+# resets. That's fine: a half-finished download leaves a ``.partial``
+# file the user can ``rm`` themselves if it's a problem; a fully
+# finished one shows up cached and the next click is a no-op.
+# --------------------------------------------------------------------------- #
+
+
+_WHISPER_CPP_DOWNLOADS: dict[str, dict[str, Any]] = {}
+_WHISPER_CPP_DOWNLOADS_LOCK = threading.Lock()
+
+
+def _wc_make_download_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+def _wc_run_download(download_id: str, model: str, quant: str) -> None:
+    """Worker body for a whisper.cpp GGUF download.
+
+    Runs in a daemon thread spawned by the POST handler. Updates the
+    shared dict in place so the GET poller sees live byte counts.
+    """
+    from . import whisper_cpp as _wc
+
+    def _progress(done: int, total: int | None) -> None:
+        with _WHISPER_CPP_DOWNLOADS_LOCK:
+            entry = _WHISPER_CPP_DOWNLOADS.get(download_id)
+            if entry is None:
+                return
+            entry["downloaded_bytes"] = int(done)
+            if total is not None:
+                entry["total_bytes"] = int(total)
+
+    try:
+        path = _wc.download_gguf(model, quant, progress=_progress)
+        with _WHISPER_CPP_DOWNLOADS_LOCK:
+            entry = _WHISPER_CPP_DOWNLOADS.get(download_id)
+            if entry is None:
+                return
+            entry["state"] = "complete"
+            entry["path"] = str(path)
+            entry["finished_at"] = datetime.utcnow().isoformat() + "Z"
+    except Exception as e:  # noqa: BLE001
+        with _WHISPER_CPP_DOWNLOADS_LOCK:
+            entry = _WHISPER_CPP_DOWNLOADS.get(download_id)
+            if entry is None:
+                return
+            entry["state"] = "error"
+            entry["error"] = str(e)
+            entry["finished_at"] = datetime.utcnow().isoformat() + "Z"
+
+
+@app.post("/api/whisper-cpp/download")
+async def whisper_cpp_download_endpoint(request: Request) -> JSONResponse:
+    """Kick off a background download of a GGUF weight.
+
+    Body: ``{"model": "large-v3", "quant": "q5_0"}``. Returns a 202
+    with a download id the UI then polls every second via
+    :func:`whisper_cpp_download_status_endpoint`.
+
+    If the requested (model, quant) is already on disk we short-circuit
+    and return ``{"state": "complete", "already_cached": true}`` —
+    the UI then doesn't need to render a fill bar.
+
+    A fresh download id is minted per POST. If a download for the
+    same (model, quant) is already in flight, we return its id rather
+    than starting a duplicate worker.
+    """
+    from . import whisper_cpp as _wc
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    model = str(body.get("model", "") or "")
+    quant = str(body.get("quant", "") or "")
+    if not _wc.is_supported_model(model):
+        raise HTTPException(
+            400,
+            f"Unsupported model {model!r}; expected one of "
+            f"{list(_wc.SUPPORTED_MODELS)}",
+        )
+    if not _wc.is_supported_quant(quant):
+        raise HTTPException(
+            400,
+            f"Unsupported quant {quant!r}; expected one of "
+            f"{list(_wc.SUPPORTED_QUANTS)}",
+        )
+
+    if _wc.is_cached(model, quant):
+        return JSONResponse({
+            "state": "complete",
+            "already_cached": True,
+            "model": model,
+            "quant": quant,
+            "path": str(_wc.gguf_path(model, quant)),
+        })
+
+    # Reuse an in-flight download for the same (model, quant) so a
+    # double-click doesn't spawn two workers writing to the same
+    # ``.partial`` file.
+    with _WHISPER_CPP_DOWNLOADS_LOCK:
+        for did, entry in _WHISPER_CPP_DOWNLOADS.items():
+            if (entry.get("model") == model
+                    and entry.get("quant") == quant
+                    and entry.get("state") == "running"):
+                return JSONResponse({
+                    "state": "running",
+                    "id": did,
+                    "model": model,
+                    "quant": quant,
+                    "downloaded_bytes": entry.get("downloaded_bytes", 0),
+                    "total_bytes": entry.get("total_bytes"),
+                    "url": _wc.hf_download_url(model, quant),
+                }, status_code=202)
+        download_id = _wc_make_download_id()
+        _WHISPER_CPP_DOWNLOADS[download_id] = {
+            "id": download_id,
+            "model": model,
+            "quant": quant,
+            "state": "running",
+            "downloaded_bytes": 0,
+            "total_bytes": None,
+            "url": _wc.hf_download_url(model, quant),
+            "started_at": datetime.utcnow().isoformat() + "Z",
+            "finished_at": None,
+            "error": None,
+            "path": None,
+        }
+
+    threading.Thread(
+        target=_wc_run_download,
+        args=(download_id, model, quant),
+        daemon=True,
+        name=f"whisper-cpp-download-{download_id}",
+    ).start()
+
+    with _WHISPER_CPP_DOWNLOADS_LOCK:
+        snapshot = dict(_WHISPER_CPP_DOWNLOADS[download_id])
+    return JSONResponse(snapshot, status_code=202)
+
+
+@app.get("/api/whisper-cpp/download/{download_id}")
+async def whisper_cpp_download_status_endpoint(
+    download_id: str,
+) -> JSONResponse:
+    """Status for one in-flight or finished download.
+
+    Returns the same snapshot shape the POST returned. The UI polls
+    until ``state`` is ``complete`` or ``error``.
+    """
+    if not re.fullmatch(r"[a-f0-9]{12}", download_id or ""):
+        raise HTTPException(400, "Invalid download id")
+    with _WHISPER_CPP_DOWNLOADS_LOCK:
+        entry = _WHISPER_CPP_DOWNLOADS.get(download_id)
+        if entry is None:
+            raise HTTPException(404, "Unknown download id")
+        snapshot = dict(entry)
+    return JSONResponse(snapshot)
+
+
 @app.get("/api/diagnostics/smoke-test-plan")
 async def smoke_test_plan_endpoint() -> JSONResponse:
     """Return the G6.1 smoke-test plan as JSON.

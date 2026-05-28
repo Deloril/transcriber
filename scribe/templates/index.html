@@ -652,6 +652,19 @@
             Models cache under <code>~/.scribe/models/whisper.cpp/</code>; the
             <a href="/api/whisper-cpp/models">model catalogue</a> lists which GGUFs are present.
           </p>
+          <!-- G7.2 — download manager so a researcher who picks an
+               uncached (model, quant) can fetch it without bouncing
+               to a terminal. The button shows "Cached ✓" /
+               "Download (≈N MB)" / a percent-fill while running. -->
+          <div id="whisperCppDownload"
+               style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"
+               data-test-id="whisper-cpp-download-row">
+            <button type="button" id="whisperCppDownloadBtn"
+                    style="padding:6px 12px;border-radius:6px;cursor:pointer">
+              Check…
+            </button>
+            <span id="whisperCppDownloadStatus" class="hint" style="margin:0"></span>
+          </div>
         </div>
       </div>
       {% endif %}
@@ -1503,6 +1516,177 @@
       $("whisperBackend").addEventListener("change", updateWhisperBackendHint);
       updateWhisperBackendHint();
     }
+
+    // -------- G7.2: whisper.cpp GGUF download manager --------
+    //
+    // The button checks whether the (model, quant) the user has
+    // currently picked is cached. If yes, it stays disabled with
+    // "Cached ✓". If no, clicking POSTs /api/whisper-cpp/download,
+    // then polls /api/whisper-cpp/download/<id> every second until
+    // the worker reports complete or error. The progress is shown
+    // inline as bytes-downloaded / total + percent, so the user
+    // doesn't think the page has frozen during a 1 GB pull.
+    //
+    // Idempotent server-side: a second click on a cached file is a
+    // no-op; an in-flight click reattaches to the existing worker.
+    (function setupWhisperCppDownload() {
+      const btn = $("whisperCppDownloadBtn");
+      const statusEl = $("whisperCppDownloadStatus");
+      const quantSel = $("whisperCppQuant");
+      const modelSel = $("model");
+      const hintEl = $("whisperCppHint");
+      if (!btn || !quantSel || !modelSel || !hintEl) return;
+
+      // Server-injected list of GGUF-supported model names. Values
+      // outside this set (e.g. distil-large-v3) cannot be downloaded
+      // via this catalogue, so the button surfaces a useful message
+      // rather than spinning into a 400.
+      const supportedModels = (hintEl.dataset.supportedModels || "")
+        .split(",").map(s => s.trim()).filter(Boolean);
+
+      let pollHandle = null;
+
+      const fmtBytes = (n) => {
+        if (n == null) return "?";
+        if (n < 1024) return `${n} B`;
+        if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+        if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+        return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+      };
+
+      function setStatus(msg, color) {
+        statusEl.textContent = msg || "";
+        statusEl.style.color = color || "var(--muted)";
+      }
+
+      function setBtn(label, enabled) {
+        btn.textContent = label;
+        btn.disabled = !enabled;
+      }
+
+      async function refreshCacheState() {
+        // Hit /api/whisper-cpp/models, look up the (model, quant) row.
+        // Saves us a separate "is cached?" endpoint — that JSON
+        // already exists for the panel's catalogue link.
+        const model = modelSel.value;
+        const quant = quantSel.value;
+        if (!supportedModels.includes(model)) {
+          setBtn(`whisper.cpp doesn't support ${model}`, false);
+          setStatus(
+            `Pick one of: ${supportedModels.join(", ")} to use whisper.cpp.`,
+            "var(--warn)",
+          );
+          return;
+        }
+        try {
+          const r = await fetch("/api/whisper-cpp/models");
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const body = await r.json();
+          const row = (body.models || []).find(
+            m => m.model === model && m.quant === quant,
+          );
+          if (!row) {
+            setBtn(`Unknown (${model}, ${quant})`, false);
+            setStatus("");
+            return;
+          }
+          if (row.cached) {
+            setBtn(`Cached ✓ (${fmtBytes(row.size_bytes)})`, false);
+            setStatus(`File: ${row.path}`, "var(--ok)");
+          } else {
+            setBtn(`Download ${row.filename}`, true);
+            setStatus(
+              "Not on disk. Click to fetch from Hugging Face — large-v3 is ~1 GB.",
+              "var(--muted)",
+            );
+          }
+        } catch (e) {
+          setBtn("Check failed", true);
+          setStatus(`Could not check cache: ${e.message || e}`, "var(--err)");
+        }
+      }
+
+      async function pollUntilDone(downloadId) {
+        try {
+          const r = await fetch(
+            `/api/whisper-cpp/download/${encodeURIComponent(downloadId)}`,
+          );
+          if (!r.ok) {
+            setStatus(`Status check failed: HTTP ${r.status}`, "var(--err)");
+            return;
+          }
+          const body = await r.json();
+          if (body.state === "running") {
+            const done = body.downloaded_bytes || 0;
+            const total = body.total_bytes;
+            const pct = total ? Math.floor((done / total) * 100) : null;
+            setStatus(
+              total
+                ? `Downloading ${fmtBytes(done)} / ${fmtBytes(total)} (${pct}%)`
+                : `Downloading ${fmtBytes(done)}…`,
+              "var(--muted)",
+            );
+            pollHandle = setTimeout(() => pollUntilDone(downloadId), 1000);
+            return;
+          }
+          if (body.state === "complete") {
+            setBtn("Cached ✓", false);
+            setStatus("Download complete. Ready to transcribe.", "var(--ok)");
+            // Refresh once more so the size + path strings come from
+            // the catalogue rather than the in-memory progress entry.
+            setTimeout(refreshCacheState, 250);
+            return;
+          }
+          if (body.state === "error") {
+            setBtn("Retry download", true);
+            setStatus(`Download failed: ${body.error || "(no detail)"}`, "var(--err)");
+            return;
+          }
+          setStatus(`Unknown state: ${body.state}`, "var(--err)");
+        } catch (e) {
+          setStatus(`Status check failed: ${e.message || e}`, "var(--err)");
+        }
+      }
+
+      btn.addEventListener("click", async () => {
+        const model = modelSel.value;
+        const quant = quantSel.value;
+        if (!supportedModels.includes(model)) return;
+        setBtn("Starting…", false);
+        setStatus("Asking the server to start the download…", "var(--muted)");
+        try {
+          const r = await fetch("/api/whisper-cpp/download", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({model, quant}),
+          });
+          const body = await r.json();
+          if (!r.ok) {
+            throw new Error(body.detail || `HTTP ${r.status}`);
+          }
+          if (body.state === "complete") {
+            setBtn("Cached ✓", false);
+            setStatus(
+              body.already_cached
+                ? "Already on disk — nothing to download."
+                : "Download complete.",
+              "var(--ok)",
+            );
+            return;
+          }
+          // Running — start polling.
+          if (pollHandle) clearTimeout(pollHandle);
+          pollUntilDone(body.id);
+        } catch (e) {
+          setBtn("Retry download", true);
+          setStatus(`Could not start download: ${e.message || e}`, "var(--err)");
+        }
+      });
+
+      modelSel.addEventListener("change", refreshCacheState);
+      quantSel.addEventListener("change", refreshCacheState);
+      refreshCacheState();
+    })();
 
     // -------- F10.3: Import existing transcript --------
     let _importTranscript = null;

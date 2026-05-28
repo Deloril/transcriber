@@ -196,6 +196,98 @@ def is_cached(
     return gguf_path(model, quant, cache_dir).is_file()
 
 
+def download_gguf(
+    model: str,
+    quant: str,
+    *,
+    cache_dir: Path | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
+    chunk_size: int = 1024 * 1024,
+    timeout_s: float = 30.0,
+    url_opener: Callable[[str, float], Any] | None = None,
+) -> Path:
+    """Stream a GGUF weight from Hugging Face into the cache directory.
+
+    The file lands at :func:`gguf_path` once the byte stream completes.
+    Atomic-ish: the bytes go to a sibling ``.partial`` file first and
+    only get renamed after a clean close, so an interrupted download
+    leaves a recognisable stub instead of a half-baked GGUF that
+    pywhispercpp would gladly load and crash on.
+
+    ``progress`` (optional) is called with ``(bytes_downloaded,
+    total_bytes_or_None)`` after each chunk — used by the HTTP layer
+    to surface percent-complete to the UI poller. Total may be
+    ``None`` if the server didn't send Content-Length, which the
+    Hugging Face CDN does in practice but we shouldn't rely on.
+
+    ``url_opener`` is the test seam — production passes ``None`` and
+    we use :mod:`urllib.request.urlopen`. Tests pass a stub that
+    yields a known byte stream so we don't hit the live CDN.
+    """
+    validate(model, quant)
+    cache_dir = cache_dir or default_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = gguf_path(model, quant, cache_dir)
+    if target.is_file():
+        # Idempotent: a second click does no work and surfaces the
+        # cached size for the UI to report.
+        return target
+    partial = target.with_suffix(target.suffix + ".partial")
+    url = hf_download_url(model, quant)
+
+    if url_opener is None:
+        # Local import keeps the module's import surface narrow; the
+        # urllib subimport is otherwise unused here.
+        from urllib.request import urlopen as _urlopen
+
+        def _open(u: str, t: float) -> Any:  # noqa: ANN401
+            return _urlopen(u, timeout=t)
+
+        opener = _open
+    else:
+        opener = url_opener
+
+    bytes_done = 0
+    total: int | None = None
+    try:
+        with opener(url, timeout_s) as resp:
+            total_hdr = None
+            try:
+                total_hdr = resp.headers.get("Content-Length")
+            except Exception:
+                total_hdr = None
+            if total_hdr:
+                try:
+                    total = int(total_hdr)
+                except (TypeError, ValueError):
+                    total = None
+            with partial.open("wb") as f:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    bytes_done += len(chunk)
+                    if progress is not None:
+                        try:
+                            progress(bytes_done, total)
+                        except Exception:
+                            # A misbehaving progress callback shouldn't
+                            # nuke the download.
+                            pass
+        partial.replace(target)
+    except Exception:
+        # Leave the partial file behind for a future "resume" feature
+        # to inspect, but never hand back a half-written target.
+        if target.is_file():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        raise
+    return target
+
+
 def list_catalogue(cache_dir: Path | None = None) -> list[ModelEntry]:
     """Return a :class:`ModelEntry` for every supported (model, quant) pair.
 

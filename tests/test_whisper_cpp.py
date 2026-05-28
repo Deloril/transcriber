@@ -531,3 +531,196 @@ class TestSentenceEnd:
 
     def test_strips_trailing_whitespace(self) -> None:
         assert wcpp._is_sentence_end("Hello. ") is True
+
+
+# --------------------------------------------------------------------------- #
+# download_gguf — streamed fetch with progress callback
+# --------------------------------------------------------------------------- #
+
+
+class _FakeStream:
+    """In-memory stand-in for the urlopen() context manager.
+
+    Yields ``payload`` in fixed-size chunks. Optional ``content_length``
+    populates the Content-Length header so the real progress code path
+    that reads ``resp.headers.get("Content-Length")`` is exercised.
+    """
+
+    def __init__(
+        self, payload: bytes, *, content_length: int | None,
+        chunk_size: int = 16,
+    ) -> None:
+        self._payload = payload
+        self._pos = 0
+        self._chunk_size = chunk_size
+
+        class _Headers:
+            def __init__(self, total: int | None) -> None:
+                self._total = total
+
+            def get(self, key: str) -> str | None:
+                if key.lower() != "content-length":
+                    return None
+                return None if self._total is None else str(self._total)
+
+        self.headers = _Headers(content_length)
+
+    def read(self, n: int) -> bytes:
+        chunk = self._payload[self._pos : self._pos + n]
+        self._pos += len(chunk)
+        return chunk
+
+    def __enter__(self) -> "_FakeStream":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class TestDownloadGguf:
+    def test_writes_file_atomically(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        payload = b"GGUF-bytes" * 100
+        opener_calls: list[str] = []
+
+        def fake_opener(url: str, timeout: float):
+            opener_calls.append(url)
+            return _FakeStream(payload, content_length=len(payload))
+
+        out = wcpp.download_gguf(
+            "large-v3", "q5_0",
+            cache_dir=tmp_path,
+            url_opener=fake_opener,
+        )
+        assert out == tmp_path / "ggml-large-v3-q5_0.bin"
+        assert out.read_bytes() == payload
+        # No leftover .partial after a clean download.
+        assert not (tmp_path / "ggml-large-v3-q5_0.bin.partial").exists()
+        # URL is the canonical Hugging Face one.
+        assert opener_calls == [wcpp.hf_download_url("large-v3", "q5_0")]
+
+    def test_invokes_progress_with_running_totals(
+        self, tmp_path: Path,
+    ) -> None:
+        payload = b"x" * 100
+        events: list[tuple[int, int | None]] = []
+
+        def fake_opener(url: str, timeout: float):
+            return _FakeStream(payload, content_length=100, chunk_size=20)
+
+        wcpp.download_gguf(
+            "large-v3", "q5_0",
+            cache_dir=tmp_path,
+            progress=lambda done, total: events.append((done, total)),
+            url_opener=fake_opener,
+            chunk_size=20,
+        )
+        # Progress called once per chunk, last value equals payload size.
+        assert events[-1] == (100, 100)
+        # Monotonic non-decreasing.
+        for prev, curr in zip(events, events[1:]):
+            assert curr[0] >= prev[0]
+
+    def test_progress_total_none_when_no_content_length(
+        self, tmp_path: Path,
+    ) -> None:
+        payload = b"abc" * 10
+
+        def fake_opener(url: str, timeout: float):
+            return _FakeStream(payload, content_length=None, chunk_size=8)
+
+        seen: list[tuple[int, int | None]] = []
+        wcpp.download_gguf(
+            "large-v3", "q5_0",
+            cache_dir=tmp_path,
+            progress=lambda done, total: seen.append((done, total)),
+            url_opener=fake_opener,
+            chunk_size=8,
+        )
+        assert seen
+        assert all(total is None for _, total in seen)
+
+    def test_idempotent_when_cached(
+        self, tmp_path: Path,
+    ) -> None:
+        target = tmp_path / "ggml-large-v3-q5_0.bin"
+        target.write_bytes(b"already-here")
+        opener_called = False
+
+        def fake_opener(url: str, timeout: float):
+            nonlocal opener_called
+            opener_called = True
+            return _FakeStream(b"new-bytes", content_length=9)
+
+        out = wcpp.download_gguf(
+            "large-v3", "q5_0",
+            cache_dir=tmp_path,
+            url_opener=fake_opener,
+        )
+        # Cached path returned without re-fetching.
+        assert out == target
+        assert opener_called is False
+        assert target.read_bytes() == b"already-here"
+
+    def test_failure_does_not_leave_target_file(
+        self, tmp_path: Path,
+    ) -> None:
+        def boom(url: str, timeout: float):
+            raise OSError("simulated network failure")
+
+        with pytest.raises(OSError):
+            wcpp.download_gguf(
+                "large-v3", "q5_0",
+                cache_dir=tmp_path,
+                url_opener=boom,
+            )
+        # No half-written target survives.
+        assert not (tmp_path / "ggml-large-v3-q5_0.bin").exists()
+
+    def test_progress_callback_failure_does_not_break_download(
+        self, tmp_path: Path,
+    ) -> None:
+        payload = b"y" * 30
+
+        def fake_opener(url: str, timeout: float):
+            return _FakeStream(payload, content_length=30, chunk_size=10)
+
+        def bad_progress(done, total):
+            raise RuntimeError("ignored")
+
+        out = wcpp.download_gguf(
+            "large-v3", "q5_0",
+            cache_dir=tmp_path,
+            progress=bad_progress,
+            url_opener=fake_opener,
+            chunk_size=10,
+        )
+        assert out.read_bytes() == payload
+
+    def test_creates_cache_dir(
+        self, tmp_path: Path,
+    ) -> None:
+        cache = tmp_path / "fresh"
+        # Doesn't exist yet.
+        assert not cache.exists()
+
+        def fake_opener(url: str, timeout: float):
+            return _FakeStream(b"x", content_length=1)
+
+        wcpp.download_gguf(
+            "large-v3", "q5_0",
+            cache_dir=cache,
+            url_opener=fake_opener,
+        )
+        assert cache.is_dir()
+
+    def test_validates_model_and_quant(
+        self, tmp_path: Path,
+    ) -> None:
+        with pytest.raises(ValueError):
+            wcpp.download_gguf(
+                "not-a-model", "q5_0",
+                cache_dir=tmp_path,
+                url_opener=lambda u, t: _FakeStream(b"", content_length=0),
+            )
