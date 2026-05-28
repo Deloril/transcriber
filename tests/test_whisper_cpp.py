@@ -826,6 +826,34 @@ class TestDecodeAudioForWhisperCpp:
         with pytest.raises(RuntimeError):
             wcpp.decode_audio_for_whisper_cpp(bogus)
 
+    def _install_fake_pywhispercpp(self, called_kwargs: list,
+                                    transcribe_arg: list):
+        """Spin up a fake pywhispercpp.Model that records the kwargs
+        passed at construction (so tests can assert n_threads) and the
+        single argument passed to ``.transcribe`` (the numpy array)."""
+        import sys, types
+
+        class _FakeSeg:
+            def __init__(self, t0, t1, text):
+                self.t0, self.t1, self.text = t0, t1, text
+
+        class _FakeModel:
+            def __init__(self, *a, **kw):
+                called_kwargs.append(kw)
+            def transcribe(self, audio):
+                transcribe_arg.append(audio)
+                return [_FakeSeg(0, 100, "hi")]
+
+        fake = types.ModuleType("pywhispercpp.model")
+        fake.Model = _FakeModel  # type: ignore[attr-defined]
+        sys.modules["pywhispercpp"] = types.ModuleType("pywhispercpp")
+        sys.modules["pywhispercpp.model"] = fake
+
+    def _uninstall_fake_pywhispercpp(self):
+        import sys
+        sys.modules.pop("pywhispercpp.model", None)
+        sys.modules.pop("pywhispercpp", None)
+
     def test_default_inference_calls_decode_helper(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -835,31 +863,13 @@ class TestDecodeAudioForWhisperCpp:
         the Model so the test runs without ffmpeg or pywhispercpp."""
         np = pytest.importorskip("numpy")
         decoded = np.zeros(3200, dtype=np.float32)
+        called_kwargs: list = []
         called_with: list = []
 
         monkeypatch.setattr(
             wcpp, "decode_audio_for_whisper_cpp", lambda p: decoded,
         )
-
-        # Fake Model class so we can prove .transcribe got the array.
-        class _FakeSeg:
-            def __init__(self, t0, t1, text):
-                self.t0, self.t1, self.text = t0, t1, text
-
-        class _FakeModel:
-            def __init__(self, *a, **kw):
-                pass
-            def transcribe(self, audio):
-                called_with.append(audio)
-                return [_FakeSeg(0, 100, "hi")]
-
-        # _default_inference imports lazily; inject a fake module.
-        import sys
-        import types
-        fake = types.ModuleType("pywhispercpp.model")
-        fake.Model = _FakeModel  # type: ignore[attr-defined]
-        sys.modules["pywhispercpp"] = types.ModuleType("pywhispercpp")
-        sys.modules["pywhispercpp.model"] = fake
+        self._install_fake_pywhispercpp(called_kwargs, called_with)
 
         try:
             out = wcpp._default_inference(
@@ -869,8 +879,7 @@ class TestDecodeAudioForWhisperCpp:
                 {},
             )
         finally:
-            del sys.modules["pywhispercpp.model"]
-            del sys.modules["pywhispercpp"]
+            self._uninstall_fake_pywhispercpp()
 
         # The single transcribe call got the decoded array, not the path.
         assert len(called_with) == 1
@@ -878,3 +887,62 @@ class TestDecodeAudioForWhisperCpp:
         assert called_with[0].dtype == np.float32
         # And the result was reshaped into the t0/t1/text dict shape.
         assert out == [{"t0": 0, "t1": 100, "text": "hi"}]
+
+    def test_default_inference_never_passes_zero_threads(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``n_threads=0`` to pywhispercpp is the bug. The docstring
+        promised "auto" but it's a footgun — sends 0 straight through
+        to whisper.cpp's thread-pool allocator, which raises
+        ``ValueError: cannot create std::vector larger than max_size()``
+        (truncated to ``ValueError: vector`` in the user's traceback).
+
+        This test pins that we always send a positive thread count,
+        regardless of the value sitting on the options dict.
+        """
+        np = pytest.importorskip("numpy")
+        decoded = np.zeros(3200, dtype=np.float32)
+        monkeypatch.setattr(
+            wcpp, "decode_audio_for_whisper_cpp", lambda p: decoded,
+        )
+
+        for option_value in (None, 0, "0", -1, ""):
+            kwargs: list = []
+            arg: list = []
+            self._install_fake_pywhispercpp(kwargs, arg)
+            try:
+                wcpp._default_inference(
+                    tmp_path / "audio.wav",
+                    tmp_path / "ggml.bin",
+                    "en",
+                    {"n_threads": option_value},
+                )
+            finally:
+                self._uninstall_fake_pywhispercpp()
+            assert kwargs and "n_threads" in kwargs[0]
+            assert kwargs[0]["n_threads"] >= 1, (
+                f"options[n_threads]={option_value!r} → "
+                f"got {kwargs[0]['n_threads']!r}; pywhispercpp needs ≥1"
+            )
+
+    def test_default_inference_honours_explicit_thread_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        np = pytest.importorskip("numpy")
+        decoded = np.zeros(3200, dtype=np.float32)
+        monkeypatch.setattr(
+            wcpp, "decode_audio_for_whisper_cpp", lambda p: decoded,
+        )
+        kwargs: list = []
+        arg: list = []
+        self._install_fake_pywhispercpp(kwargs, arg)
+        try:
+            wcpp._default_inference(
+                tmp_path / "audio.wav",
+                tmp_path / "ggml.bin",
+                "en",
+                {"n_threads": 8},
+            )
+        finally:
+            self._uninstall_fake_pywhispercpp()
+        assert kwargs[0]["n_threads"] == 8

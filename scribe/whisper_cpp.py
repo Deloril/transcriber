@@ -546,16 +546,39 @@ def _default_inference(
     language: str,
     options: dict[str, Any],
 ) -> list[dict[str, Any]]:  # pragma: no cover - requires pywhispercpp
-    """Real inference path. Imports pywhispercpp lazily; never called by tests."""
+    """Real inference path. Imports pywhispercpp lazily; never called by tests.
+
+    Two pywhispercpp footguns the kwargs below dodge:
+
+    1. **n_threads=0 doesn't mean "auto".** The docstring claims it
+       falls through to ``os.cpu_count()`` but in 1.4.x it just passes
+       ``0`` to whisper.cpp's thread-pool allocator, which raises
+       ``ValueError: cannot create std::vector larger than max_size()``
+       — surfaced through Scribe's job pipeline as a truncated
+       ``ValueError: vector``. Default to a real positive thread
+       count and clamp anything <= 0 to that.
+
+    2. **Audio comes in as a numpy array we decode ourselves.** Passing
+       a path lets pywhispercpp's bundled loader try to decode the
+       file, which is fragile on macOS. ``decode_audio_for_whisper_cpp``
+       routes through ffmpeg → 16 kHz mono float32, which is what the
+       binding wants natively.
+    """
     from pywhispercpp.model import Model  # type: ignore[import-not-found]
+
+    # Pick a sane default thread count so n_threads=0 doesn't flow
+    # through to whisper.cpp. ``os.cpu_count()`` returns None on some
+    # exotic platforms; fall through to 4 in that case.
+    cpu_default = os.cpu_count() or 4
+    n_threads = int(options.get("n_threads") or cpu_default)
+    if n_threads < 1:
+        n_threads = cpu_default
 
     model = Model(
         str(gguf_path),
         language=None if language in (None, "", "auto") else language,
         token_timestamps=True,
-        # Surface the only knob users typically tune — n_threads.
-        # Sensible default; pywhispercpp picks os.cpu_count() if 0.
-        n_threads=int(options.get("n_threads", 0) or 0),
+        n_threads=n_threads,
     )
     # Decode ourselves rather than letting pywhispercpp's loader do
     # it; see decode_audio_for_whisper_cpp() for why.
