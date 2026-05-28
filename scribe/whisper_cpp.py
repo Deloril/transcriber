@@ -449,48 +449,80 @@ InferenceFn = Callable[[Path, Path, str, dict[str, Any]], list[dict[str, Any]]]
 def decode_audio_for_whisper_cpp(audio_path: Path) -> "Any":  # numpy.ndarray at runtime
     """Decode any audio/video file to 16 kHz mono float32 PCM via ffmpeg.
 
-    ``pywhispercpp.Model.transcribe`` accepts either a path (it then
-    tries to decode internally) or a pre-decoded numpy array. The
-    path code path is fragile on macOS — pywhispercpp's bundled
-    loader sometimes returns an empty vector and the underlying
-    C++ binding raises ``ValueError: vector`` from
-    ``whisper_full``. Decoding ourselves with ffmpeg sidesteps the
-    bug entirely and gives us a single, well-tested decoder across
-    every platform.
+    ``pywhispercpp.Model.transcribe`` accepts either a path (its own
+    loader) or a pre-decoded numpy array. The path code path is
+    fragile on macOS, and the array path itself is fussy: the
+    pybind11 binding behind ``whisper_full`` constructs a
+    ``std::vector<float>`` from the numpy buffer and raises a
+    cryptic ``ValueError: vector`` if the array is read-only,
+    non-C-contiguous, non-writable, mis-aligned, empty, or the
+    wrong dtype. We decode with ffmpeg ourselves and hand back an
+    array that satisfies all of those constraints.
 
-    Returns a 1-D ``numpy.ndarray`` of dtype ``float32`` in
-    [-1.0, 1.0]. Raises :class:`RuntimeError` if ffmpeg returns a
-    non-zero exit code or an empty stream (e.g. the file has no
-    audio track).
+    The bytes are written to a temp file rather than read from
+    ffmpeg's stdout pipe because for long recordings (multi-hour
+    interviews → hundreds of MB) the OS pipe buffer can stall, and
+    the resulting array gets silently truncated on some macOS
+    builds. ``np.fromfile`` reads the whole thing in one syscall.
+
+    Returns a writable, C-contiguous, 1-D ``numpy.ndarray`` of
+    dtype ``float32`` in roughly [-1.0, 1.0]. Raises
+    :class:`RuntimeError` if ffmpeg fails or the source has no
+    audio.
     """
     import subprocess
+    import tempfile
 
-    import numpy as np  # imported lazily — not every dev machine has numpy
+    import numpy as np  # lazy import
 
     ffmpeg = _ffmpeg_or_die()
-    cmd = [
-        ffmpeg, "-loglevel", "error",
-        "-i", str(audio_path),
-        "-f", "f32le",         # raw 32-bit little-endian float
-        "-ac", "1",            # mono
-        "-ar", "16000",        # 16 kHz (whisper.cpp's native rate)
-        "-vn",                 # discard any video stream
-        "-",
-    ]
+    with tempfile.NamedTemporaryFile(
+        prefix="scribe-whispercpp-", suffix=".f32",
+        delete=False,
+    ) as fh:
+        pcm_path = Path(fh.name)
     try:
-        proc = subprocess.run(cmd, check=True, capture_output=True)
-    except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or b"").decode("utf-8", errors="replace").strip()
-        raise RuntimeError(
-            f"ffmpeg failed to decode {audio_path}: {stderr or e}"
-        ) from e
-    raw = proc.stdout
-    if not raw:
-        raise RuntimeError(
-            f"ffmpeg produced no audio bytes for {audio_path}. "
-            "The file may have no audio track."
-        )
-    return np.frombuffer(raw, dtype=np.float32)
+        cmd = [
+            ffmpeg, "-y", "-loglevel", "error",
+            "-i", str(audio_path),
+            "-f", "f32le",
+            "-ac", "1",
+            "-ar", "16000",
+            "-vn",
+            str(pcm_path),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or b"").decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"ffmpeg failed to decode {audio_path}: {stderr or e}"
+            ) from e
+        size = pcm_path.stat().st_size
+        if size == 0:
+            raise RuntimeError(
+                f"ffmpeg produced no audio bytes for {audio_path}. "
+                "The file may have no audio track."
+            )
+        # ``np.fromfile`` returns a writable, C-contiguous array;
+        # we still defensively copy + ascontiguousarray so the
+        # array we hand pywhispercpp satisfies every flag the
+        # pybind11 binding inspects.
+        audio = np.fromfile(str(pcm_path), dtype=np.float32)
+        audio = np.ascontiguousarray(audio, dtype=np.float32)
+        if not audio.flags["WRITEABLE"]:  # pragma: no cover - belt + braces
+            audio = audio.copy()
+        if audio.size == 0:
+            raise RuntimeError(
+                f"Decoded zero samples from {audio_path}. The file's "
+                "audio track may be empty or unreadable."
+            )
+        return audio
+    finally:
+        try:
+            pcm_path.unlink()
+        except OSError:
+            pass
 
 
 def _ffmpeg_or_die() -> str:

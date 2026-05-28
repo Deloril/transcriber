@@ -765,6 +765,23 @@ class TestDecodeAudioForWhisperCpp:
         # check shape is in the right ballpark.
         assert 2_500 <= out.size <= 4_000
 
+    def test_array_satisfies_pywhispercpp_constraints(
+        self, tmp_path: Path,
+    ) -> None:
+        """The pybind11 binding behind ``whisper_full`` rejects the
+        buffer with ``ValueError: vector`` if it is non-writable,
+        non-C-contiguous, or the wrong dtype. Pin those flags so
+        regressions surface here, not at runtime against pywhispercpp."""
+        np = pytest.importorskip("numpy")
+        wav = self._silent_wav(tmp_path)
+        out = wcpp.decode_audio_for_whisper_cpp(wav)
+        assert out.flags["WRITEABLE"], "pywhispercpp needs a writable buffer"
+        assert out.flags["C_CONTIGUOUS"], (
+            "pywhispercpp needs a C-contiguous buffer"
+        )
+        assert out.dtype == np.float32
+        assert out.ndim == 1
+
     def test_decodes_to_16khz_mono(self, tmp_path: Path) -> None:
         # Make a non-mono, non-16kHz source and confirm we still get
         # back a flat mono 16kHz buffer.
