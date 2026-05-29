@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import os
@@ -24,7 +25,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .audio import compute_waveform, probe_audio_streams, probe_media_info
+from .audio import (
+    build_playback_mix,
+    compute_waveform,
+    probe_audio_streams,
+    probe_media_info,
+)
 from .engine import AdvancedOptions, Segment, TranscriptionResult, Word, transcribe
 from .writers import write_all, write_json, write_srt, write_txt, write_vtt
 
@@ -13023,9 +13029,50 @@ async def job_waveform(job_id: str, bins: int = 1000) -> JSONResponse:
     return JSONResponse(payload)
 
 
+def _resolve_playback_mix(
+    source_path: Path,
+    output_dir: Path,
+    selected_stream_indices: list[int] | None,
+) -> Path:
+    """Return the cached playback-mix path for ``source_path``.
+
+    Builds the mix on first call; subsequent calls return the cached
+    file. Cache key is a hash of the source mtime + the selection
+    list, so changing the picker selection (e.g. via Reattach) busts
+    the cache automatically. The output container matches the source
+    when there's video (mp4 → mp4, mkv → mkv) and falls back to mp3
+    for audio-only sources.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    has_video = source_path.suffix.lower() in {
+        ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi",
+    }
+    out_ext = source_path.suffix.lower() if has_video else ".mp3"
+    # Hash selection so a second request after the user trims the
+    # picker rebuilds the mix instead of serving stale audio.
+    sel_key = "all" if not selected_stream_indices else \
+        ",".join(str(i) for i in sorted(selected_stream_indices))
+    sel_hash = hashlib.sha1(sel_key.encode("utf-8")).hexdigest()[:8]
+    out_path = output_dir / f"playback.{sel_hash}{out_ext}"
+    return build_playback_mix(
+        source_path, out_path,
+        selected_stream_indices=selected_stream_indices,
+    )
+
+
 @app.get("/api/job/{job_id}/media")
 async def media(job_id: str, request: Request) -> Response:
-    """Serve the original recording with HTTP Range support so <video>/<audio> can seek."""
+    """Serve the original recording with HTTP Range support so <video>/<audio> can seek.
+
+    For recordings with **multiple audio tracks** (typical of
+    OBS-style dual-mic captures or field-recorder N-track sessions)
+    the browser's built-in media element only plays the default
+    audio stream — so the user only hears the first speaker. We
+    detect that case here and instead serve a cached *playback mix*
+    of every selected track, built once via ffmpeg's ``amix`` filter
+    and stored under ``<output_dir>/playback.<ext>``. Single-track
+    files take the original-source fast path unchanged.
+    """
     _check_job_id(job_id)
     with JOBS_LOCK:
         job = JOBS.get(job_id)
@@ -13034,11 +13081,38 @@ async def media(job_id: str, request: Request) -> Response:
         if job.media_discarded:
             raise HTTPException(410, "Source media discarded for this job")
         link = job.input_path
+        out_dir = job.output_dir
+        selected = list(job.selected_stream_indices) \
+            if job.selected_stream_indices else None
+        track_count = int(getattr(job, "audio_streams", 0) or 0)
     if not _link_or_path_is_under(link, UPLOAD_DIR):
         raise HTTPException(403, "Forbidden")
-    path = link.resolve()
-    if not path.exists():
+    source_path = link.resolve()
+    if not source_path.exists():
         raise HTTPException(404, "Source file is missing on disk")
+
+    # Decide what to serve. Single-track files get the original;
+    # everything else is routed through the cached playback mix.
+    # ``track_count`` was set at upload time (probe_audio_streams);
+    # we trust it rather than re-probing on every request.
+    needs_mix = track_count >= 2 or (selected is not None and len(selected) >= 2)
+    if needs_mix:
+        try:
+            path = _resolve_playback_mix(
+                source_path, out_dir, selected,
+            )
+        except Exception as e:  # noqa: BLE001
+            # If the mix can't be built, fall back to the source file
+            # rather than 500ing the player. The user will only hear
+            # the first track but at least the page loads.
+            print(
+                f"[scribe] playback-mix failed for job {job_id}: {e}; "
+                "falling back to source",
+                flush=True,
+            )
+            path = source_path
+    else:
+        path = source_path
 
     file_size = path.stat().st_size
     content_type, _ = mimetypes.guess_type(str(path))

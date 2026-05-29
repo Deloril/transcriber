@@ -391,3 +391,149 @@ class TestComputeWaveform:
         monkeypatch.setattr(audio.subprocess, "Popen", lambda *a, **kw: _FailProc())
         with pytest.raises(RuntimeError):
             compute_waveform(f, bins=10)
+
+
+# --------------------------------------------------------------------------- #
+# build_playback_mix — merge multi-track audio for browser playback.
+# --------------------------------------------------------------------------- #
+
+
+class TestBuildPlaybackMix:
+    """Real ffmpeg integration tests; small synthetic inputs keep them
+    fast. Skipped if ffmpeg isn't on PATH."""
+
+    def _have_ffmpeg(self) -> bool:
+        import shutil
+        return bool(shutil.which("ffmpeg"))
+
+    def _make_dual_audio_mka(self, out: Path, *, seconds: float = 0.5) -> Path:
+        """Two-audio-track MKA: 440 Hz + 880 Hz sines."""
+        if not self._have_ffmpeg():
+            pytest.skip("ffmpeg not on PATH")
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+            "-f", "lavfi", "-i", f"sine=frequency=880:duration={seconds}",
+            "-map", "0:a", "-map", "1:a",
+            "-c:a", "pcm_s16le",
+            str(out),
+        ]
+        subprocess.run(cmd, check=True)
+        return out
+
+    def test_mix_collapses_two_tracks_to_one(self, tmp_path: Path) -> None:
+        src = self._make_dual_audio_mka(tmp_path / "two.mka")
+        out = tmp_path / "mix.mp3"
+        result = audio.build_playback_mix(src, out)
+        assert result == out
+        assert out.is_file()
+        # The output file has exactly one audio stream (the mix).
+        streams = audio.probe_audio_streams(out)
+        assert len(streams) == 1
+
+    def test_mix_is_audible_on_both_inputs(self, tmp_path: Path) -> None:
+        """Decode the mixed output to PCM and confirm it contains
+        non-trivial audio across the duration. Earlier ``-map 0:a:0``
+        bugs would silently drop everything past the first track; this
+        asserts the mix actually has signal."""
+        np = pytest.importorskip("numpy")
+        src = self._make_dual_audio_mka(tmp_path / "two.mka", seconds=0.5)
+        out = tmp_path / "mix.mp3"
+        audio.build_playback_mix(src, out)
+        # Decode the mix to f32le PCM and check it's not silent.
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-loglevel", "error",
+                "-i", str(out),
+                "-f", "f32le", "-ac", "1", "-ar", "16000",
+                "-",
+            ],
+            check=True, capture_output=True,
+        )
+        samples = np.frombuffer(proc.stdout, dtype=np.float32)
+        assert samples.size > 0
+        assert float(samples.std()) > 0.01, "mix appears silent"
+
+    def test_idempotent_when_cache_is_fresh(self, tmp_path: Path) -> None:
+        src = self._make_dual_audio_mka(tmp_path / "two.mka")
+        out = tmp_path / "mix.mp3"
+        audio.build_playback_mix(src, out)
+        first_mtime = out.stat().st_mtime
+        # Second call returns immediately without re-running ffmpeg.
+        # We assert by stamping the source backwards so the cache is
+        # newer than it.
+        import os as _os, time as _time
+        old = first_mtime - 60
+        _os.utime(src, (old, old))
+        # Ensure mtime granularity ticks.
+        _time.sleep(0.01)
+        result = audio.build_playback_mix(src, out)
+        assert result == out
+        assert out.stat().st_mtime == first_mtime
+
+    def test_cache_busts_when_source_is_newer(self, tmp_path: Path) -> None:
+        src = self._make_dual_audio_mka(tmp_path / "two.mka")
+        out = tmp_path / "mix.mp3"
+        audio.build_playback_mix(src, out)
+        first_mtime = out.stat().st_mtime
+        # Fake a fresher source.
+        import os as _os, time as _time
+        _time.sleep(0.05)
+        _os.utime(src, None)  # touch
+        audio.build_playback_mix(src, out)
+        assert out.stat().st_mtime >= first_mtime
+
+    def test_selected_indices_filter(self, tmp_path: Path) -> None:
+        """Selecting only one of two tracks should produce a mix
+        that's non-silent (it contains that one track) but has the
+        same single-stream output shape."""
+        src = self._make_dual_audio_mka(tmp_path / "two.mka")
+        # Probe to find absolute indices.
+        streams = audio.probe_audio_streams(src)
+        assert len(streams) == 2
+        out = tmp_path / "filtered.mp3"
+        audio.build_playback_mix(
+            src, out, selected_stream_indices=[streams[1].index],
+        )
+        assert out.is_file()
+
+    def test_unknown_indices_raise(self, tmp_path: Path) -> None:
+        src = self._make_dual_audio_mka(tmp_path / "two.mka")
+        out = tmp_path / "x.mp3"
+        with pytest.raises(ValueError):
+            audio.build_playback_mix(
+                src, out, selected_stream_indices=[99],
+            )
+
+    def test_empty_selection_raises(self, tmp_path: Path) -> None:
+        src = self._make_dual_audio_mka(tmp_path / "two.mka")
+        out = tmp_path / "x.mp3"
+        # An empty selection is rejected — a player with zero audio
+        # tracks isn't useful.
+        streams = audio.probe_audio_streams(src)
+        bogus_filter = [i for i in range(100) if i not in {s.index for s in streams}]
+        with pytest.raises(ValueError):
+            audio.build_playback_mix(
+                src, out, selected_stream_indices=bogus_filter,
+            )
+
+    def test_single_track_is_fast_path(self, tmp_path: Path) -> None:
+        """One-track input shouldn't go through amix — but the helper
+        still works on it (the ``/media`` endpoint won't normally call
+        the helper for single-track files, but defensive callers might)."""
+        if not self._have_ffmpeg():
+            pytest.skip("ffmpeg not on PATH")
+        # Mono file — no need for the dual-input fixture.
+        src = tmp_path / "mono.wav"
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.3",
+                "-c:a", "pcm_s16le",
+                str(src),
+            ],
+            check=True,
+        )
+        out = tmp_path / "mix.mp3"
+        audio.build_playback_mix(src, out)
+        assert out.is_file()

@@ -89,6 +89,137 @@ def extract_track_to_wav(
     return out_path
 
 
+def _has_video(input_path: Path) -> bool:
+    """Best-effort: True if the file has at least one video stream."""
+    ffprobe = _require("ffprobe")
+    try:
+        out = subprocess.check_output(
+            [
+                ffprobe,
+                "-v", "error",
+                "-print_format", "json",
+                "-show_streams",
+                "-select_streams", "v",
+                str(input_path),
+            ]
+        )
+    except subprocess.CalledProcessError:
+        return False
+    try:
+        data = json.loads(out)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return bool(data.get("streams"))
+
+
+def build_playback_mix(
+    input_path: Path,
+    out_path: Path,
+    *,
+    selected_stream_indices: list[int] | None = None,
+) -> Path:
+    """Produce a single-audio-track playback file for the editor's ``<video>``.
+
+    Browsers' built-in media element only plays the *default* audio
+    stream of a multi-track file. For OBS-style recordings where
+    each speaker lives on their own track, that means the user only
+    hears track 0 — silently missing every other speaker.
+
+    This helper merges the chosen audio tracks (default: all of them)
+    into one stereo track via ffmpeg's ``amix`` filter and re-muxes
+    (or re-encodes for audio-only inputs) so the resulting file has
+    exactly one audio stream that contains all the selected
+    speakers. The function is destination-aware — if the source has
+    video, we keep the video track via ``-c:v copy`` and just
+    re-encode audio to AAC; if it doesn't, we write an MP3.
+
+    ``selected_stream_indices`` is the set of absolute ffprobe stream
+    indices to include in the mix. ``None`` mixes every audio stream
+    in the file. Indices not present in the file raise
+    :class:`ValueError`.
+
+    Idempotent: if ``out_path`` already exists and is newer than
+    ``input_path``, we return it without re-running ffmpeg. Callers
+    can force a rebuild by deleting the cache file first.
+    """
+    streams = probe_audio_streams(input_path)
+    if not streams:
+        raise ValueError(f"No audio streams in {input_path}")
+
+    if selected_stream_indices is None:
+        chosen = streams
+    else:
+        valid = {s.index for s in streams}
+        bad = [i for i in selected_stream_indices if i not in valid]
+        if bad:
+            raise ValueError(
+                f"selected_stream_indices contains entries not in "
+                f"{input_path}: {bad} (valid: {sorted(valid)})"
+            )
+        chosen = [s for s in streams if s.index in selected_stream_indices]
+        if not chosen:
+            raise ValueError(
+                "selected_stream_indices is empty after filtering"
+            )
+
+    # Cache hit: if the destination already exists and is newer than
+    # the input, reuse it. Cheap stat call avoids the 30+ second mix
+    # on every page load.
+    if out_path.is_file():
+        try:
+            if out_path.stat().st_mtime >= input_path.stat().st_mtime:
+                return out_path
+        except OSError:
+            pass
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = _require("ffmpeg")
+    cmd = [ffmpeg, "-y", "-loglevel", "error", "-i", str(input_path)]
+
+    # ``amix`` filter combines N audio streams into one. We feed each
+    # selected stream as a labelled input by absolute ffprobe index,
+    # then mix to stereo. ``normalize=0`` keeps each track at its
+    # original loudness instead of dividing by the input count
+    # (otherwise a quiet speaker on a 4-track recording becomes
+    # inaudible after the divide-by-4 default).
+    inputs = "".join(f"[0:{s.index}]" for s in chosen)
+    if len(chosen) == 1:
+        # Trivial case: one track, just re-mux that stream as the
+        # only audio. amix with one input would still work but
+        # we'd burn a re-encode for nothing.
+        filter_args = []
+        map_args = ["-map", "0:v?", "-map", f"0:{chosen[0].index}"]
+    else:
+        filter_complex = (
+            f"{inputs}amix=inputs={len(chosen)}:duration=longest:"
+            "normalize=0[mixed]"
+        )
+        filter_args = ["-filter_complex", filter_complex]
+        map_args = ["-map", "0:v?", "-map", "[mixed]"]
+
+    cmd.extend(filter_args)
+    cmd.extend(map_args)
+
+    if _has_video(input_path):
+        # Keep video as-is; encode the mixed audio to AAC inside the
+        # original container (mp4/mkv both accept AAC).
+        cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]
+    else:
+        # Audio-only path: write an MP3 regardless of source codec
+        # so the editor's <audio> always finds a playable stream.
+        cmd += ["-c:a", "libmp3lame", "-b:a", "192k"]
+
+    cmd.append(str(out_path))
+    proc = subprocess.run(cmd, check=False, capture_output=True)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"ffmpeg failed to build playback mix for {input_path}: "
+            f"{stderr or proc.returncode}"
+        )
+    return out_path
+
+
 def _safe_int(v: Any) -> int | None:
     try:
         return int(v) if v is not None and v != "" else None
