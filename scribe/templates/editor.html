@@ -410,6 +410,35 @@
       color: #0b1020;
       border: 0; font-weight: 600;
     }
+    .modal .actions .danger {
+      color: var(--err);
+      border-color: var(--border);
+    }
+    .modal .actions .danger:hover {
+      background: rgba(217, 106, 90, .14);
+      border-color: var(--err);
+    }
+    /* Delete-speaker option rows look like radio cards. */
+    .modal #speakerDeleteOptions label {
+      display: flex; gap: 8px; align-items: flex-start;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      cursor: pointer;
+      background: var(--panel-2);
+      color: var(--text);
+      font-size: 13px;
+    }
+    .modal #speakerDeleteOptions label:hover { border-color: var(--accent); }
+    .modal #speakerDeleteOptions input[type="radio"]:checked + .opt-text {
+      color: var(--text-strong);
+    }
+    .modal #speakerDeleteOptions .opt-text {
+      flex: 1; min-width: 0;
+    }
+    .modal #speakerDeleteOptions .opt-sub {
+      display: block; color: var(--muted); font-size: 11px; margin-top: 2px;
+    }
 
     /* Search */
     .search-bar {
@@ -578,8 +607,28 @@
     <label>Display name</label>
     <input id="speakerModalInput" type="text" autocomplete="off">
     <div class="actions">
+      <button id="speakerModalDelete" class="danger" style="margin-right:auto"
+              title="Remove this speaker. You'll be asked whether to reassign their segments to another speaker, or delete the segments entirely.">
+        Delete speaker…
+      </button>
       <button id="speakerModalCancel">Cancel</button>
       <button id="speakerModalSave" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Speaker delete modal — opens after the user clicks "Delete speaker…"
+     in the rename modal. Two-step on purpose: the user has to commit
+     to either reassigning or deleting before anything is written. -->
+<div id="speakerDeleteModal" class="modal-overlay">
+  <div class="modal">
+    <h3 id="speakerDeleteTitle">Delete speaker</h3>
+    <p class="hint" id="speakerDeleteSummary" style="margin:0 0 12px 0"></p>
+    <label>What should happen to their segments?</label>
+    <div id="speakerDeleteOptions" style="display:flex;flex-direction:column;gap:6px;margin:6px 0 12px"></div>
+    <div class="actions">
+      <button id="speakerDeleteCancel">Cancel</button>
+      <button id="speakerDeleteConfirm" class="danger">Delete speaker</button>
     </div>
   </div>
 </div>
@@ -1479,11 +1528,143 @@ import {
     if (e.key === "Enter") { e.preventDefault(); $("speakerModalSave").click(); }
   });
 
+  // ---- Speaker delete + reassign ----
+  //
+  // Two-step on purpose: rename modal → "Delete speaker…" button →
+  // delete modal where the user picks reassign-to-X or delete-all.
+  // Working principle: the existing speaker_names map is the
+  // user-facing label; the canonical id (SPEAKER_00 etc.) is the
+  // anchor everything else hangs off (segment.speaker, word.speaker,
+  // and every other place we reference that speaker). When the user
+  // deletes, we either:
+  //   * REASSIGN — rewrite every segment+word.speaker to point at the
+  //     replacement id, drop the deleted id from state.speakers, drop
+  //     its entry in speaker_names. The replacement's renamed label
+  //     (if any) stays as-is.
+  //   * DELETE ALL — drop every segment whose speaker matches, then
+  //     remove the id from state.speakers + speaker_names.
+  // Either way, ``state`` is the only mutation; the next autosave
+  // round-trips through PUT /api/job/<id>/transcript and the writers
+  // regenerate .txt/.srt/.vtt from the cleaned segments. This works
+  // identically for transcripts that pre-date the rename map (where
+  // speaker_names doesn't exist) — we just no-op the speaker_names
+  // delete in that case.
+  let _speakerDeleteCandidate = null;
+
+  function _segmentsBySpeaker(speakerId) {
+    return state.segments.filter(s => s.speaker === speakerId);
+  }
+
+  function openSpeakerDelete(speakerId) {
+    if (!speakerId) return;
+    _speakerDeleteCandidate = speakerId;
+    const segCount = _segmentsBySpeaker(speakerId).length;
+    const others = state.speakers.filter(s => s !== speakerId);
+    $("speakerDeleteTitle").textContent =
+      `Delete ${speakerLabel(speakerId)}?`;
+    $("speakerDeleteSummary").textContent = segCount === 0
+      ? `${speakerLabel(speakerId)} has no segments — delete the speaker?`
+      : `${speakerLabel(speakerId)} has ${segCount} segment${segCount === 1 ? "" : "s"}.`;
+    const opts = $("speakerDeleteOptions");
+    opts.innerHTML = "";
+    // Reassign options — one row per other speaker. Disabled when
+    // there are no others (the only speaker can't be reassigned to,
+    // so the user gets the delete-all path only).
+    others.forEach((sp, i) => {
+      const id = `sp-del-opt-${i}`;
+      const row = document.createElement("label");
+      row.innerHTML = `
+        <input type="radio" name="sp-del" value="reassign:${escapeHtml(sp)}" ${i === 0 ? "checked" : ""}>
+        <span class="opt-text">
+          <strong>Reassign to ${escapeHtml(speakerLabel(sp))}</strong>
+          <span class="opt-sub">Their ${segCount} segment${segCount === 1 ? "" : "s"} keep their text + timings, just under the new speaker label.</span>
+        </span>
+      `;
+      opts.appendChild(row);
+    });
+    // Delete-all is always available.
+    const delRow = document.createElement("label");
+    delRow.innerHTML = `
+      <input type="radio" name="sp-del" value="delete" ${others.length === 0 ? "checked" : ""}>
+      <span class="opt-text">
+        <strong>Delete all their segments</strong>
+        <span class="opt-sub">${segCount} segment${segCount === 1 ? "" : "s"} of speech are removed from the transcript.</span>
+      </span>
+    `;
+    opts.appendChild(delRow);
+    $("speakerModal").classList.remove("open");
+    $("speakerDeleteModal").classList.add("open");
+  }
+
+  $("speakerModalDelete").addEventListener("click", () => {
+    openSpeakerDelete(renamingSpeaker);
+  });
+  $("speakerDeleteCancel").addEventListener("click", () => {
+    $("speakerDeleteModal").classList.remove("open");
+    _speakerDeleteCandidate = null;
+  });
+  $("speakerDeleteConfirm").addEventListener("click", () => {
+    const speakerId = _speakerDeleteCandidate;
+    if (!speakerId) {
+      $("speakerDeleteModal").classList.remove("open");
+      return;
+    }
+    const choice = (document.querySelector(
+      "#speakerDeleteOptions input[name='sp-del']:checked"
+    ) || {}).value || "delete";
+    pushUndo();
+    if (choice.startsWith("reassign:")) {
+      const target = choice.slice("reassign:".length);
+      // Rewrite segments + words to point at the target.
+      state.segments.forEach(seg => {
+        if (seg.speaker === speakerId) {
+          seg.speaker = target;
+          (seg.words || []).forEach(w => {
+            if (w.speaker === speakerId) w.speaker = target;
+          });
+        }
+      });
+    } else {
+      // Delete all the deleted speaker's segments outright.
+      state.segments = state.segments.filter(s => s.speaker !== speakerId);
+    }
+    // Drop the speaker from the roster + rename map.
+    state.speakers = state.speakers.filter(s => s !== speakerId);
+    if (state.speaker_names && speakerId in state.speaker_names) {
+      delete state.speaker_names[speakerId];
+    }
+    $("speakerDeleteModal").classList.remove("open");
+    _speakerDeleteCandidate = null;
+    renamingSpeaker = null;
+    render(); markDirty();
+  });
+
+  // Pick the next free SPEAKER_NN id. Goes by ``length`` first (the
+  // typical case), but if that collides with an existing entry —
+  // e.g. SPEAKER_02 already in segments because a previous deletion
+  // moved its entry out of state.speakers without rewiring the
+  // segments — bump until we find a fresh slot. This keeps the
+  // delete/reassign code from accidentally minting an id that's
+  // already in use by an old transcript.
+  function _nextFreeSpeakerId() {
+    const used = new Set(state.speakers || []);
+    state.segments.forEach(s => used.add(s.speaker));
+    let i = state.speakers.length;
+    while (i < 1000) {
+      const candidate = `SPEAKER_${String(i).padStart(2, "0")}`;
+      if (!used.has(candidate)) return candidate;
+      i += 1;
+    }
+    // Genuinely unreachable; fall through with a stamp so we never
+    // return undefined.
+    return `SPEAKER_${Date.now()}`;
+  }
+
   $("addSpeakerBtn").addEventListener("click", () => {
     const v = prompt("New speaker label (e.g. Guest)");
     if (!v || !v.trim()) return;
     pushUndo();
-    const id = `SPEAKER_${String(state.speakers.length).padStart(2, "0")}`;
+    const id = _nextFreeSpeakerId();
     state.speakers.push(id);
     state.speaker_names = state.speaker_names || {};
     state.speaker_names[id] = v.trim();
@@ -1547,7 +1728,7 @@ import {
       const v = prompt("New speaker label (e.g. Guest)");
       if (!v || !v.trim()) return;
       pushUndo();
-      const newId = `SPEAKER_${String(state.speakers.length).padStart(2, "0")}`;
+      const newId = _nextFreeSpeakerId();
       state.speakers.push(newId);
       state.speaker_names = state.speaker_names || {};
       state.speaker_names[newId] = v.trim();

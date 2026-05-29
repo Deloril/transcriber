@@ -363,3 +363,30 @@ class TestEndToEndReachability:
         # The remaining dropdown items stayed.
         for kept in ("merge-prev", "merge-next", "insert-after", "reassign", "delete"):
             assert f'data-act="{kept}"' in body
+
+
+# --------------------------------------------------------------------------- #
+# Speaker delete + reassign — entry point in the rename modal.
+# --------------------------------------------------------------------------- #
+
+
+class TestSpeakerDeleteUI:
+    def test_rename_modal_carries_delete_button(self, server_env) -> None:
+        srv, client, _ = server_env
+        _seed_done_job(srv)
+        body = client.get("/edit/abc123def456").text
+        # The delete button + the new modal are both in the served HTML.
+        assert 'id="speakerModalDelete"' in body
+        assert 'id="speakerDeleteModal"' in body
+        assert "Delete speaker?" in body or "Delete speaker…" in body
+
+    def test_delete_modal_has_reassign_options_container(
+        self, server_env,
+    ) -> None:
+        srv, client, _ = server_env
+        _seed_done_job(srv)
+        body = client.get("/edit/abc123def456").text
+        # The radio options live inside this container; the JS
+        # populates it at modal-open time.
+        assert 'id="speakerDeleteOptions"' in body
+        assert 'id="speakerDeleteConfirm"' in body

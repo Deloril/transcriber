@@ -3279,3 +3279,98 @@ export function renderInlineGateBlockHtml(status, opts) {
     + `</div>`;
 }
 
+
+
+/**
+ * Pick the next unused SPEAKER_NN id given a state-shaped object.
+ * Used by the editor's "+ Add new speaker" + "+ Add new speaker (in
+ * popover)" entry points so an id can't collide with one that's
+ * already in use by ``state.speakers`` or sitting on a ``segment.speaker``
+ * from a previous transcript that pre-dates the canonical roster.
+ *
+ * Pure function — takes an object with ``speakers`` (array) and
+ * ``segments`` (array of ``{speaker}``), returns a string id. Tests
+ * pin both the happy path and the post-delete collision case.
+ */
+export function nextFreeSpeakerId(state) {
+  const used = new Set(Array.isArray(state && state.speakers) ? state.speakers : []);
+  for (const seg of (state && state.segments) || []) {
+    if (seg && typeof seg.speaker === "string") used.add(seg.speaker);
+  }
+  let i = used.size;
+  while (i < 1000) {
+    const candidate = `SPEAKER_${String(i).padStart(2, "0")}`;
+    if (!used.has(candidate)) return candidate;
+    i += 1;
+  }
+  return `SPEAKER_${Date.now()}`;
+}
+
+
+/**
+ * Delete a speaker from a transcript-state-shaped object.
+ *
+ * ``mode`` is either:
+ *   "delete"     — drop every segment whose ``segment.speaker``
+ *                  matches ``speakerId``.
+ *   "reassign"   — rewrite ``segment.speaker`` and ``word.speaker``
+ *                  on every matching segment to ``targetSpeakerId``.
+ *
+ * Either way, ``speakerId`` is removed from ``state.speakers`` and
+ * ``state.speaker_names`` (the latter only if it had an entry —
+ * legacy transcripts may not carry the rename map at all).
+ *
+ * Returns a *new* state object; the input is not mutated, which makes
+ * the function trivially testable and safe to invoke from a redux-
+ * style undo stack. ``segments_removed`` / ``segments_reassigned``
+ * counts are returned alongside so the UI can confirm.
+ */
+export function deleteSpeakerFromState(state, speakerId, opts = {}) {
+  if (!state || typeof state !== "object") {
+    throw new TypeError("state must be an object");
+  }
+  const mode = opts.mode || "delete";
+  if (mode !== "delete" && mode !== "reassign") {
+    throw new RangeError(`mode must be "delete" or "reassign"; got ${mode}`);
+  }
+  const target = opts.targetSpeakerId;
+  if (mode === "reassign" && (!target || target === speakerId)) {
+    throw new RangeError(
+      "reassign requires a targetSpeakerId distinct from speakerId",
+    );
+  }
+
+  const segs = Array.isArray(state.segments) ? state.segments : [];
+  const out = {...state};
+  let removed = 0;
+  let reassigned = 0;
+
+  if (mode === "delete") {
+    out.segments = segs.filter(s => {
+      const drop = s && s.speaker === speakerId;
+      if (drop) removed += 1;
+      return !drop;
+    });
+  } else {
+    out.segments = segs.map(s => {
+      if (!s || s.speaker !== speakerId) return s;
+      reassigned += 1;
+      const newWords = Array.isArray(s.words)
+        ? s.words.map(w =>
+            (w && w.speaker === speakerId) ? {...w, speaker: target} : w
+          )
+        : s.words;
+      return {...s, speaker: target, words: newWords};
+    });
+  }
+
+  out.speakers = (Array.isArray(state.speakers) ? state.speakers : [])
+    .filter(s => s !== speakerId);
+  if (state.speaker_names && Object.prototype.hasOwnProperty.call(state.speaker_names, speakerId)) {
+    const names = {...state.speaker_names};
+    delete names[speakerId];
+    out.speaker_names = names;
+  }
+
+  return {state: out, segments_removed: removed, segments_reassigned: reassigned};
+}
