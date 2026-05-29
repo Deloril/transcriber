@@ -1537,12 +1537,24 @@ def transcribe_multi_track(
     progress: ProgressFn = _noop_progress,
     whisper_backend: str | None = None,
     whisper_cpp_quant: str | None = None,
+    selected_stream_indices: list[int] | None = None,
 ) -> TranscriptionResult:
     """
     Transcribe a recording where each audio stream is one speaker.
 
     `speaker_labels`, if given, must have one entry per audio stream and is
     used as the spoken name for that track (e.g. ["Luke", "Guest"]).
+    Entries for tracks excluded by ``selected_stream_indices`` are
+    ignored, so the caller can pass labels for *every* track and we'll
+    pick out the ones that matter.
+
+    `selected_stream_indices` (optional) restricts transcription to a
+    subset of the file's audio streams. Each entry is the absolute
+    ffprobe stream index (matching ``AudioStream.index``). ``None``
+    transcribes every track — backwards-compatible with callers that
+    don't yet pass a selection. An empty list is rejected (a multi-track
+    job with no tracks transcribed has no useful output). Indices that
+    don't match a real stream raise :class:`ValueError`.
     """
     opts = options or AdvancedOptions()
     streams = probe_audio_streams(input_path)
@@ -1558,14 +1570,54 @@ def transcribe_multi_track(
             f"{len(streams)} audio streams"
         )
 
+    if selected_stream_indices is not None:
+        if not selected_stream_indices:
+            raise ValueError(
+                "selected_stream_indices is empty — pick at least one track "
+                "to transcribe, or pass None to transcribe all of them."
+            )
+        valid_indices = {s.index for s in streams}
+        invalid = [
+            i for i in selected_stream_indices if i not in valid_indices
+        ]
+        if invalid:
+            raise ValueError(
+                f"selected_stream_indices contains entries that aren't in "
+                f"the file: {invalid} (valid: {sorted(valid_indices)})"
+            )
+        keep = set(selected_stream_indices)
+    else:
+        keep = None
+
     work_dir.mkdir(parents=True, exist_ok=True)
     all_segments: list[Segment] = []
     used_language = language
     labels: list[str] = []
 
-    n = len(streams)
-    for i, stream in enumerate(streams):
-        label = _label_for_track(stream, i, speaker_labels[i] if speaker_labels else None)
+    # Tracks the user opted out of are skipped entirely — no extract,
+    # no Whisper pass — but we still record their labels in the
+    # speaker roster (with a "(not transcribed)" suffix) so the
+    # downstream UI can show that the track was acknowledged.
+    selected_streams = [
+        s for s in streams if (keep is None or s.index in keep)
+    ]
+    if not selected_streams:
+        # Should be unreachable thanks to the validation above; defend
+        # against future refactors that lose the empty-list check.
+        raise ValueError(
+            "No audio streams selected for transcription"
+        )
+
+    n = len(selected_streams)
+    for i, stream in enumerate(selected_streams):
+        # Position in original streams list for label fallback +
+        # speaker_labels lookup (the labels list is indexed by the
+        # original ordinal, not by the filtered position).
+        original_pos = streams.index(stream)
+        label = _label_for_track(
+            stream, original_pos,
+            speaker_labels[original_pos] if speaker_labels else None,
+        )
         labels.append(label)
         track_wav = work_dir / f"track_{i:02d}_{label}.wav"
 
@@ -1785,6 +1837,7 @@ def transcribe(
     progress: ProgressFn = _noop_progress,
     whisper_backend: str | None = None,
     whisper_cpp_quant: str | None = None,
+    selected_stream_indices: list[int] | None = None,
 ) -> TranscriptionResult:
     """
     Entry point.
@@ -1817,6 +1870,7 @@ def transcribe(
             progress=progress,
             whisper_backend=whisper_backend,
             whisper_cpp_quant=whisper_cpp_quant,
+            selected_stream_indices=selected_stream_indices,
         )
     return transcribe_diarize(
         input_path,

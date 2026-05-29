@@ -673,13 +673,33 @@
 
       <div class="row">
         <div>
-          <label>Speaker names (multi-track only) — comma-separated, in track order</label>
+          <label>Speaker names (multi-track only) — comma-separated, in track order
+            <span class="help" title="Used when no per-track picker is shown. The picker (which appears for files with ≥2 audio tracks) takes precedence and lets you name each track + preview a sample.">?</span>
+          </label>
           <input id="speakers" type="text" placeholder="e.g. Luke, Guest">
         </div>
         <div>
           <label>Number of speakers (diarize only — leave blank to auto-detect)</label>
           <input id="numSpeakers" type="number" min="1" max="10" placeholder="e.g. 2">
         </div>
+      </div>
+
+      <!-- Multi-track picker. Hidden by default; populated after the
+           user picks a file with ≥2 audio tracks. Each row gets a
+           checkbox (transcribe yes/no), a ▶ play button (loads a 20s
+           preview), and a speaker-name input. -->
+      <div id="trackPicker" class="hidden" data-test-id="track-picker"
+           style="margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:var(--panel-2)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <strong>Audio tracks detected</strong>
+          <span id="trackCount" class="hint" style="margin:0"></span>
+        </div>
+        <p class="hint" style="margin:0 0 10px 0">
+          Click ▶ to preview 20 seconds of a track. Untick a track to
+          skip it. Speaker names land in the transcript as the speaker
+          label for that track.
+        </p>
+        <div id="trackList"></div>
       </div>
 
       <div id="advWrap" class="adv-wrap">
@@ -1213,11 +1233,177 @@
       if (fileInput.files && fileInput.files.length) setFile(fileInput.files[0]);
     });
 
-    function setFile(f) {
+    // -------- Multi-track picker state --------
+    //
+    // Populated by probeTracks() whenever the user picks a file. Three
+    // pieces of state survive setFile -> goBtn:
+    //
+    //   stagedToken      — server-side token for the already-uploaded
+    //                      file. Without this we'd re-upload the bytes
+    //                      a second time on goBtn.click.
+    //   trackInfo[]      — {index, ordinal, default_label, channels,
+    //                      title, language, codec} per detected track.
+    //   trackPreviewUrl  — function returning the /preview URL the
+    //                      ▶ button feeds into <audio>.src.
+    //
+    // When trackInfo has < 2 tracks the picker stays hidden and the
+    // upload flow is identical to the old one (single-stream files
+    // never needed a picker).
+    let stagedToken = null;
+    let trackInfo = [];
+    function trackPreviewUrl(idx) {
+      return `/api/probe-tracks/${encodeURIComponent(stagedToken)}/preview/${idx}?seconds=20`;
+    }
+
+    async function setFile(f) {
       chosenFile = f;
       const mb = (f.size / (1024*1024)).toFixed(1);
       fileInfo.textContent = `${f.name} · ${mb} MB`;
+      goBtn.disabled = true;
+      // Drop any previous staged token before kicking off a new probe.
+      if (stagedToken) {
+        // Best-effort; we ignore errors because the GC sweeps stale tokens.
+        fetch(`/api/probe-tracks/${encodeURIComponent(stagedToken)}`,
+              {method: "DELETE"}).catch(() => {});
+        stagedToken = null;
+      }
+      trackInfo = [];
+      $("trackPicker").classList.add("hidden");
+      $("trackList").innerHTML = "";
+      // Probe the file so we can decide whether to show the picker.
+      // For single-track files this is wasted work, but the cost is
+      // small (one ffprobe + one upload) and it gives us the same
+      // picker affordance for any future "multi-track in disguise"
+      // file (e.g. a stereo file the user actually wanted treated
+      // as two speakers — that's still single-stream and skips the
+      // picker, but a fresh implementation could surface it here).
+      try {
+        const fd = new FormData();
+        fd.append("file", f);
+        const r = await fetch("/api/probe-tracks", {method: "POST", body: fd});
+        if (r.ok) {
+          const body = await r.json();
+          stagedToken = body.token;
+          trackInfo = body.tracks || [];
+          if (trackInfo.length >= 2) {
+            renderTrackPicker(trackInfo);
+          }
+        }
+      } catch (e) {
+        // Probe is best-effort; if it fails we still let the user
+        // upload via the legacy path. Surface the error in the file
+        // info line so they're not flying blind.
+        fileInfo.textContent =
+          `${f.name} · ${mb} MB (track probe failed: ${(e && e.message) || e})`;
+      }
       goBtn.disabled = false;
+    }
+
+    function renderTrackPicker(tracks) {
+      const picker = $("trackPicker");
+      const list = $("trackList");
+      $("trackCount").textContent =
+        `${tracks.length} tracks — pick which to transcribe and assign a speaker name to each.`;
+      list.innerHTML = "";
+      tracks.forEach((t) => {
+        const row = document.createElement("div");
+        row.className = "track-row";
+        row.style.cssText =
+          "display:grid;grid-template-columns:auto auto 1fr auto;gap:10px;align-items:center;padding:6px 4px;border-bottom:1px dashed var(--border)";
+        // Checkbox
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = true;
+        cb.dataset.kind = "select";
+        cb.dataset.index = String(t.index);
+        cb.title = "Untick to exclude this track from transcription.";
+        // Play button
+        const playBtn = document.createElement("button");
+        playBtn.type = "button";
+        playBtn.textContent = "▶";
+        playBtn.className = "ctrl-btn";
+        playBtn.style.cssText = "padding:2px 10px;font-size:14px";
+        playBtn.title = "Preview 20 seconds of this track.";
+        playBtn.addEventListener("click", () => playTrack(row, t.index, playBtn));
+        // Speaker name input
+        const nameWrap = document.createElement("div");
+        const codec = t.codec ? `<span class="hint" style="margin-left:6px">${t.codec}${t.channels > 1 ? ` · ${t.channels}ch` : ""}${t.language ? ` · ${t.language}` : ""}</span>` : "";
+        nameWrap.innerHTML = `
+          <input type="text" data-kind="name" data-index="${t.index}"
+                 value="${escapeAttr(t.default_label || "")}"
+                 placeholder="Speaker name"
+                 style="width:100%;padding:4px 8px">
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">
+            Track ${t.ordinal + 1}${t.title ? ` — “${escapeText(t.title)}”` : ""}${codec}
+          </div>
+        `;
+        // Status + audio element column (lazy-built)
+        const status = document.createElement("div");
+        status.className = "track-status hint";
+        status.style.cssText = "min-width:0";
+        row.appendChild(cb);
+        row.appendChild(playBtn);
+        row.appendChild(nameWrap);
+        row.appendChild(status);
+        list.appendChild(row);
+      });
+      picker.classList.remove("hidden");
+    }
+
+    function escapeAttr(s) {
+      return String(s == null ? "" : s).replace(/"/g, "&quot;").replace(/&/g, "&amp;");
+    }
+    function escapeText(s) {
+      return String(s == null ? "" : s).replace(/[&<>]/g, c =>
+        ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[c]));
+    }
+
+    function playTrack(row, streamIndex, btn) {
+      // Lazy-build the <audio> element on first click so we don't
+      // fetch decode samples for tracks the user never previews.
+      let audio = row.querySelector("audio.preview");
+      if (!audio) {
+        audio = document.createElement("audio");
+        audio.className = "preview";
+        audio.controls = true;
+        audio.preload = "none";
+        audio.style.cssText = "max-width:100%;margin-top:6px";
+        audio.src = trackPreviewUrl(streamIndex);
+        row.querySelector(".track-status").appendChild(audio);
+      }
+      if (audio.paused) {
+        audio.play().catch((e) => {
+          row.querySelector(".track-status").textContent =
+            `Preview failed: ${e && e.message || e}`;
+        });
+        btn.textContent = "⏸";
+        audio.addEventListener("pause", () => { btn.textContent = "▶"; }, {once: true});
+        audio.addEventListener("ended", () => { btn.textContent = "▶"; }, {once: true});
+      } else {
+        audio.pause();
+        btn.textContent = "▶";
+      }
+    }
+
+    function gatherTrackPickerSelections() {
+      // Returns {selected_streams: "0,2", track_speaker_labels: "{...}"}
+      // when the picker is visible + populated; otherwise {} so the
+      // legacy ``speakers`` comma-list still works.
+      const picker = $("trackPicker");
+      if (picker.classList.contains("hidden")) return {};
+      const selected = [];
+      const labels = {};
+      picker.querySelectorAll("input[data-kind='select']").forEach(cb => {
+        if (cb.checked) selected.push(cb.dataset.index);
+      });
+      picker.querySelectorAll("input[data-kind='name']").forEach(inp => {
+        const v = (inp.value || "").trim();
+        if (v) labels[inp.dataset.index] = v;
+      });
+      return {
+        selected_streams: selected.join(","),
+        track_speaker_labels: JSON.stringify(labels),
+      };
     }
 
     function fmtTime(s) {
@@ -1798,7 +1984,16 @@
       progressMsg.textContent = "Uploading…";
 
       const fd = new FormData();
-      fd.append("file", chosenFile);
+      // Staged token vs raw file: when the multi-track picker probed
+      // the file we already wrote it server-side; submit the token so
+      // the server doesn't have to re-receive the bytes. Otherwise
+      // (probe failed or single-track file) fall through to the
+      // legacy upload path.
+      if (stagedToken) {
+        fd.append("staged_token", stagedToken);
+      } else {
+        fd.append("file", chosenFile);
+      }
       fd.append("mode", $("mode").value);
       fd.append("speakers", $("speakers").value);
       fd.append("num_speakers", $("numSpeakers").value);
@@ -1806,6 +2001,13 @@
       fd.append("model", $("model").value);
       fd.append("batch_size", String(getBatchSize()));
       fd.append("options", JSON.stringify(getAdvancedOptionsOnly()));
+      // Multi-track picker: per-track selection + speaker labels.
+      // Empty values fall through to the legacy comma-list above.
+      const pickerSel = gatherTrackPickerSelections();
+      if (pickerSel.selected_streams !== undefined) {
+        fd.append("selected_streams", pickerSel.selected_streams);
+        fd.append("track_speaker_labels", pickerSel.track_speaker_labels);
+      }
       // G7.1 — pluggable Whisper backend. Element only exists when
       // the server rendered a backends list; otherwise we fall
       // through to the server-side default (``faster-whisper``).

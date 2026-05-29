@@ -8,7 +8,9 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -107,6 +109,13 @@ class Job:
     # 2× the disk). Ignored for the faster-whisper / Parakeet paths.
     # See :data:`scribe.whisper_cpp.SUPPORTED_QUANTS`.
     whisper_cpp_quant: str = "q5_0"
+    # Multi-track only: when set, restricts transcription to these
+    # absolute ffprobe stream indices. ``None`` (default) transcribes
+    # every audio track in the file — backwards-compatible with old
+    # jobs that pre-date the picker. Persisted alongside the rest of
+    # the job state so a server restart can resume on the same
+    # selection.
+    selected_stream_indices: list[int] | None = None
 
     def to_state(self) -> dict[str, Any]:
         d = asdict(self)
@@ -145,6 +154,11 @@ class Job:
             ),
             whisper_cpp_quant=str(
                 d.get("whisper_cpp_quant") or "q5_0"
+            ),
+            selected_stream_indices=(
+                [int(i) for i in d["selected_stream_indices"]]
+                if isinstance(d.get("selected_stream_indices"), list)
+                else None
             ),
         )
 
@@ -11679,9 +11693,259 @@ async def delete_memo_draft_endpoint(
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# Multi-track preview: stage the upload before kicking off transcription so
+# the user can preview each audio track + pick which to transcribe + assign
+# speaker names per track.
+#
+#   POST /api/probe-tracks                  → write file to staging,
+#                                             return {"token", "tracks": [...]}
+#   GET  /api/probe-tracks/<token>/preview/<stream_index>?seconds=20
+#                                            → 16kHz mono WAV sample
+#   DELETE /api/probe-tracks/<token>        → drop the staged upload
+#
+# Stage layout: ``UPLOAD_DIR / staged-<token> / <safe_name>``. When the user
+# confirms the picker and the JS posts to /api/upload with ``staged_token``,
+# the file is *moved* into ``UPLOAD_DIR / <job_id> /``. Staged uploads are
+# garbage-collected after 12 hours so a half-finished picker session doesn't
+# leak disk forever.
+# --------------------------------------------------------------------------- #
+
+
+_STAGED_TOKEN_RE = re.compile(r"^[a-f0-9]{12}$")
+_STAGED_PREVIEW_MAX_SECONDS = 60.0
+_STAGED_TTL_S = 12 * 3600
+
+
+def _staged_dir(token: str) -> Path:
+    if not _STAGED_TOKEN_RE.match(token):
+        raise HTTPException(400, "Invalid staged token")
+    return UPLOAD_DIR / f"staged-{token}"
+
+
+def _staged_input_path(token: str) -> Path:
+    """Find the single uploaded file inside ``staged-<token>/``.
+
+    The directory contains one file (the upload). We accept whatever
+    name the user uploaded — sanitised by the upload step — and return
+    the first regular file we find.
+    """
+    d = _staged_dir(token)
+    if not d.is_dir():
+        raise HTTPException(404, "Staged upload not found")
+    for child in d.iterdir():
+        if child.is_file():
+            return child
+    raise HTTPException(404, "Staged upload directory is empty")
+
+
+def _claim_staged_upload(token: str, target_dir: Path) -> Path:
+    """Move the staged file into the real job directory.
+
+    Atomic-ish: ``shutil.move`` falls back to copy+delete on cross-
+    device renames. Either way, the staged dir is removed afterwards
+    so it doesn't sit around eating disk + confusing the GC.
+    Returns the new path under ``target_dir``.
+    """
+    staged_input = _staged_input_path(token)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    new_path = target_dir / staged_input.name
+    shutil.move(str(staged_input), str(new_path))
+    # Drop the staging dir; it's now empty (or about to be).
+    try:
+        shutil.rmtree(staged_input.parent, ignore_errors=True)
+    except Exception:
+        pass
+    return new_path
+
+
+def _gc_old_staged_uploads() -> None:
+    """Drop staged uploads older than the TTL.
+
+    Best-effort; called on every probe-tracks POST so the staging
+    directory doesn't grow without bound. Tolerant of missing dirs,
+    permission errors, etc.
+    """
+    if not UPLOAD_DIR.exists():
+        return
+    now = time.time()
+    for child in UPLOAD_DIR.iterdir():
+        if not child.is_dir() or not child.name.startswith("staged-"):
+            continue
+        try:
+            age = now - child.stat().st_mtime
+        except OSError:
+            continue
+        if age > _STAGED_TTL_S:
+            shutil.rmtree(child, ignore_errors=True)
+
+
+@app.post("/api/probe-tracks")
+async def probe_tracks_endpoint(
+    file: UploadFile = File(...),
+) -> JSONResponse:
+    """Write the upload to a staging dir and return per-track metadata.
+
+    Used by the multi-track picker on the upload page: the user
+    selects a file, the JS posts here, the server saves it once,
+    and the response gives the UI everything it needs to render a
+    per-track row (codec, channels, language tag, duration).
+
+    The token returned here is then either:
+      * passed back to ``POST /api/upload`` as ``staged_token`` to
+        commit the file as a real job (with the picker's choices), OR
+      * left to expire — staged uploads older than 12 hours are
+        cleaned up on the next probe call.
+    """
+    _gc_old_staged_uploads()
+
+    token = uuid.uuid4().hex[:12]
+    stage_dir = _staged_dir(token)
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = Path(file.filename or "upload.bin").name
+    target = stage_dir / safe_name
+    try:
+        with target.open("wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                f.write(chunk)
+    except Exception:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+        raise
+
+    try:
+        streams = probe_audio_streams(target)
+    except Exception as e:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+        raise HTTPException(400, f"Could not read audio streams: {e}")
+    try:
+        media_info = probe_media_info(target)
+    except Exception:
+        media_info = None
+    duration = (media_info or {}).get("duration") if media_info else None
+
+    return JSONResponse({
+        "token": token,
+        "filename": safe_name,
+        "duration_s": duration,
+        "audio_streams": len(streams),
+        "tracks": [
+            {
+                "index": s.index,
+                "ordinal": i,
+                "channels": s.channels,
+                "title": s.title or "",
+                "language": s.language or "",
+                "codec": s.codec,
+                "default_label": (
+                    s.title.strip()
+                    if s.title and s.title.strip()
+                    else f"SPEAKER_{i + 1:02d}"
+                ),
+            }
+            for i, s in enumerate(streams)
+        ],
+    })
+
+
+@app.get("/api/probe-tracks/{token}/preview/{stream_index}")
+async def probe_tracks_preview_endpoint(
+    token: str, stream_index: int, seconds: float = 20.0,
+) -> Response:
+    """Return a short audio sample of one track as 16kHz mono WAV.
+
+    The picker uses this as the source for an inline ``<audio>``
+    element so the user can click "▶" on a track and hear it before
+    deciding whether to transcribe / how to label the speaker.
+
+    ``seconds`` is clamped to [1, :data:`_STAGED_PREVIEW_MAX_SECONDS`]
+    so a hostile client can't ask for 10 hours of decoded PCM.
+    """
+    if not _STAGED_TOKEN_RE.match(token):
+        raise HTTPException(400, "Invalid staged token")
+    try:
+        seconds = max(1.0, min(_STAGED_PREVIEW_MAX_SECONDS, float(seconds)))
+    except (TypeError, ValueError):
+        seconds = 20.0
+
+    src = _staged_input_path(token)
+    valid = {s.index for s in probe_audio_streams(src)}
+    if stream_index not in valid:
+        raise HTTPException(
+            404,
+            f"Stream {stream_index} not in this file (have: {sorted(valid)})",
+        )
+
+    # Decode the requested track to a small WAV in-memory + return
+    # the bytes. ffmpeg writes to a temp file because piping WAV
+    # via stdout requires the format to support partial-write
+    # (it doesn't reliably) — and the file is tiny (≈640 KB for 20s
+    # of 16kHz mono PCM_S16LE) so the temp-file overhead is fine.
+    import tempfile
+    ffmpeg = _require_ffmpeg()
+    with tempfile.NamedTemporaryFile(
+        prefix="scribe-preview-", suffix=".wav", delete=False,
+    ) as fh:
+        out_path = Path(fh.name)
+    try:
+        cmd = [
+            ffmpeg, "-y", "-loglevel", "error",
+            "-t", f"{seconds:.2f}",
+            "-i", str(src),
+            "-map", f"0:{stream_index}",
+            "-vn",
+            "-ac", "1",
+            "-ar", "16000",
+            "-c:a", "pcm_s16le",
+            str(out_path),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or b"").decode("utf-8", errors="replace")
+            raise HTTPException(
+                500, f"ffmpeg preview failed: {stderr.strip() or e}",
+            )
+        data = out_path.read_bytes()
+    finally:
+        try:
+            out_path.unlink()
+        except OSError:
+            pass
+    headers = {
+        "Cache-Control": "no-cache, no-store",
+        "Content-Disposition": f'inline; filename="track-{stream_index}.wav"',
+    }
+    return Response(content=data, media_type="audio/wav", headers=headers)
+
+
+@app.delete("/api/probe-tracks/{token}")
+async def probe_tracks_delete_endpoint(token: str) -> JSONResponse:
+    """Drop a staged upload manually. The picker calls this if the
+    user closes the panel without submitting; the GC sweep will
+    catch anything that slips through, but cleaning up promptly
+    keeps disk usage tidy."""
+    if not _STAGED_TOKEN_RE.match(token):
+        raise HTTPException(400, "Invalid staged token")
+    d = _staged_dir(token)
+    if d.is_dir():
+        shutil.rmtree(d, ignore_errors=True)
+    return JSONResponse({"ok": True})
+
+
+def _require_ffmpeg() -> str:
+    """Resolve ffmpeg or raise a useful HTTP 500."""
+    import shutil as _sh
+    p = _sh.which("ffmpeg")
+    if not p:
+        raise HTTPException(
+            500, "ffmpeg not found on PATH (install via brew install ffmpeg)",
+        )
+    return p
+
+
 @app.post("/api/upload")
 async def upload(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
     mode: str = Form("auto"),
     speakers: str = Form(""),
     num_speakers: str = Form(""),
@@ -11691,21 +11955,48 @@ async def upload(
     options: str = Form("{}"),
     backend: str = Form("faster-whisper"),
     whisper_cpp_quant: str = Form("q5_0"),
+    # Multi-track picker: a comma-separated list of absolute ffprobe
+    # stream indices to transcribe. Empty / unset means "all of them"
+    # (backwards-compatible). The form also accepts a JSON object map
+    # ``track_speaker_labels`` of {stream_index: name} so per-track
+    # speaker names survive into job.speakers in the right slot order.
+    selected_streams: str = Form(""),
+    track_speaker_labels: str = Form(""),
+    # When the file was already uploaded via POST /api/probe-tracks
+    # (the multi-track picker flow), the client passes back the
+    # staged-upload token instead of re-uploading the file.
+    staged_token: str = Form(""),
 ) -> JSONResponse:
     job_id = uuid.uuid4().hex[:12]
-    safe_name = Path(file.filename or "upload.bin").name
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    input_path = job_dir / safe_name
 
-    with input_path.open("wb") as f:
-        while chunk := await file.read(1024 * 1024):
-            f.write(chunk)
+    staged_id = (staged_token or "").strip()
+    if staged_id:
+        # Multi-track picker flow: the file is already on disk under
+        # ``UPLOAD_DIR / staged-<token>/``. Promote it to the real
+        # job directory so the rest of the pipeline (job persistence,
+        # /media endpoint, discard-media) treats it identically to a
+        # direct upload.
+        promoted = _claim_staged_upload(staged_id, job_dir)
+        input_path = promoted
+        safe_name = promoted.name
+    else:
+        if file is None:
+            raise HTTPException(
+                400,
+                "Either upload a file or pass a staged_token from "
+                "/api/probe-tracks.",
+            )
+        safe_name = Path(file.filename or "upload.bin").name
+        input_path = job_dir / safe_name
+        with input_path.open("wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                f.write(chunk)
 
     output_dir = OUTPUT_DIR / job_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    speakers_list = [s.strip() for s in speakers.split(",") if s.strip()] or None
     nspk = int(num_speakers) if num_speakers.strip().isdigit() else None
 
     try:
@@ -11762,6 +12053,71 @@ async def upload(
     except Exception:
         media_info = None
 
+    # Multi-track picker: parse the optional per-track selection +
+    # speaker labels. The picker submits both fields together; if it
+    # didn't (legacy upload path) we fall through to the comma-list
+    # ``speakers`` field. Order matters: ``track_speaker_labels``
+    # wins because it's per-stream-index, the comma-list is positional.
+    selected_indices_for_job: list[int] | None = None
+    raw_sel = (selected_streams or "").strip()
+    if raw_sel:
+        try:
+            selected_indices_for_job = [
+                int(s) for s in raw_sel.split(",") if s.strip()
+            ]
+        except ValueError:
+            raise HTTPException(
+                400, "selected_streams must be a comma-list of integers",
+            )
+        if not selected_indices_for_job:
+            raise HTTPException(
+                400, "selected_streams must contain at least one index",
+            )
+        valid_idx = {s.index for s in streams}
+        bogus = [i for i in selected_indices_for_job if i not in valid_idx]
+        if bogus:
+            raise HTTPException(
+                400,
+                f"selected_streams contains indices that aren't in the "
+                f"file: {bogus}",
+            )
+
+    speakers_list: list[str] | None
+    raw_track_labels = (track_speaker_labels or "").strip()
+    if raw_track_labels:
+        try:
+            label_map_raw = json.loads(raw_track_labels)
+        except Exception as e:
+            raise HTTPException(
+                400, f"track_speaker_labels must be valid JSON: {e}",
+            )
+        if not isinstance(label_map_raw, dict):
+            raise HTTPException(
+                400, "track_speaker_labels must be a JSON object",
+            )
+        # Build a list of one label per stream (in original order) so
+        # the engine's positional ``speaker_labels`` contract still
+        # holds. Missing entries fall back to "" (engine substitutes
+        # SPEAKER_NN). Keys are stringified JSON; coerce both ways.
+        label_map: dict[int, str] = {}
+        for k, v in label_map_raw.items():
+            try:
+                label_map[int(k)] = str(v).strip()
+            except (TypeError, ValueError):
+                continue
+        speakers_list = [
+            label_map.get(s.index, "") for s in streams
+        ]
+        # Drop the leading-and-trailing empties that would otherwise
+        # leave the list ``[""] * N`` when the user never typed
+        # anything — legacy callers expect None in that case.
+        if not any(speakers_list):
+            speakers_list = None
+    else:
+        speakers_list = (
+            [s.strip() for s in speakers.split(",") if s.strip()] or None
+        )
+
     job = Job(
         id=job_id,
         input_path=input_path,
@@ -11778,6 +12134,7 @@ async def upload(
         batch_size=bs,
         whisper_backend=backend_id,
         whisper_cpp_quant=quant_id,
+        selected_stream_indices=selected_indices_for_job,
     )
     with JOBS_LOCK:
         JOBS[job_id] = job
@@ -11830,6 +12187,7 @@ def _run_job(job_id: str) -> None:
             progress=lambda m, f: _set_progress(job_id, m, f),
             whisper_backend=job.whisper_backend,
             whisper_cpp_quant=job.whisper_cpp_quant,
+            selected_stream_indices=job.selected_stream_indices,
         )
         base = job.output_dir / job.input_path.stem
         paths = write_all(result, base)
