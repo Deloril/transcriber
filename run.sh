@@ -8,9 +8,16 @@
 # so template + Python edits land on the next page load.
 #
 # Usage:
-#   ./run.sh                      # default: 127.0.0.1:8765
+#   ./run.sh                      # default: 0.0.0.0:8765 (LAN-reachable)
+#   HOST=127.0.0.1 ./run.sh       # localhost-only
 #   PORT=8000 ./run.sh
-#   HOST=0.0.0.0 PORT=8765 ./run.sh
+#
+# Default binds 0.0.0.0 so anything else on the same network — your
+# phone, another machine — can reach the UI at
+# http://<this-host's-LAN-ip>:8765. There is no auth on the app: anyone
+# who can route to this port can read every project + transcript on
+# disk. If that's not what you want, set HOST=127.0.0.1 (or run inside
+# an SSH tunnel, etc.).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -27,7 +34,7 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 
 PORT="${PORT:-8765}"
-HOST="${HOST:-127.0.0.1}"
+HOST="${HOST:-0.0.0.0}"
 
 # Stop anything already listening on the port. Without this, an old
 # uvicorn from a previous session keeps serving stale templates and the
@@ -64,6 +71,34 @@ stop_existing() {
 stop_existing
 
 echo "Scribe → http://${HOST}:${PORT}"
+if [ "${HOST}" = "0.0.0.0" ]; then
+  # Surface the LAN URLs as well so the user knows what to type into
+  # a phone / another laptop. ``hostname -I`` exists on Linux;
+  # ``ipconfig getifaddr en0`` is the macOS equivalent. Either way
+  # we just print whatever we can find — the headline still says
+  # 0.0.0.0 so anyone scripting against this output isn't surprised.
+  if command -v hostname >/dev/null 2>&1; then
+    lan_ips="$(hostname -I 2>/dev/null || true)"
+  else
+    lan_ips=""
+  fi
+  if [ -z "${lan_ips}" ] && command -v ipconfig >/dev/null 2>&1; then
+    # macOS: try the usual interface names.
+    for iface in en0 en1 en2; do
+      ip="$(ipconfig getifaddr "${iface}" 2>/dev/null || true)"
+      if [ -n "${ip}" ]; then
+        lan_ips="${lan_ips:+${lan_ips} }${ip}"
+      fi
+    done
+  fi
+  if [ -n "${lan_ips}" ]; then
+    echo "        Reachable on the LAN at:"
+    for ip in ${lan_ips}; do
+      echo "          http://${ip}:${PORT}"
+    done
+  fi
+  echo "        (no auth — anyone on the network can use the app.)"
+fi
 exec uvicorn scribe.server:app \
   --host "$HOST" --port "$PORT" \
   --log-level info \
