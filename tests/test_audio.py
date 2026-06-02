@@ -286,6 +286,38 @@ class TestExtractTrackToWav:
         extract_track_to_wav(f, out)
         assert out.parent.is_dir()
 
+    def test_uses_copyts_and_start_at_zero(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        """The extraction must preserve the stream's container-level
+        start time so multi-track segment timestamps are absolute,
+        not relative to each track's first non-silent moment.
+
+        Without ``-copyts -start_at_zero``, ffmpeg rebases the
+        stream's internal time so the first audio sample lands at
+        0:00 in the output WAV — Whisper then transcribes timestamps
+        relative to the stream's first sample, the user sees every
+        speaker "start at 00:00", and the multi-track sort produces
+        an out-of-order transcript.
+        """
+        f = tmp_path / "in.mp4"
+        f.write_bytes(b"")
+        out = tmp_path / "out.wav"
+        captured: list[list[str]] = []
+        monkeypatch.setattr(
+            audio.subprocess, "run",
+            lambda cmd, **kw: (captured.append(list(cmd)), MagicMock(returncode=0))[1],
+        )
+        extract_track_to_wav(f, out, stream_index=2)
+        cmd = captured[0]
+        # Both flags must be present, AND they must come before the
+        # ``-i`` so they apply to the input demuxer (not the output).
+        assert "-copyts" in cmd
+        assert "-start_at_zero" in cmd
+        i_input = cmd.index("-i")
+        assert cmd.index("-copyts") < i_input
+        assert cmd.index("-start_at_zero") < i_input
+
 
 # --------------------------------------------------------------------------- #
 # compute_waveform

@@ -1697,8 +1697,19 @@ def transcribe_diarize(
     progress: ProgressFn = _noop_progress,
     whisper_backend: str | None = None,
     whisper_cpp_quant: str | None = None,
+    selected_stream_indices: list[int] | None = None,
 ) -> TranscriptionResult:
-    """Single-track transcription with pyannote AI diarization."""
+    """Single-track transcription with pyannote AI diarization.
+
+    ``selected_stream_indices`` (optional) restricts the audio
+    extraction to a single ffprobe stream from a multi-stream
+    container — useful when the user picked one track from a
+    6-track recording and *wants* diarization on only that stream
+    rather than every track being transcribed as a separate
+    speaker. Multi-entry selections aren't supported here (they
+    belong in ``transcribe_multi_track``); we raise if the caller
+    asks for more than one.
+    """
     if not hf_token:
         raise RuntimeError(
             "Diarization mode requires a Hugging Face token. Set HF_TOKEN in .env "
@@ -1709,8 +1720,18 @@ def transcribe_diarize(
     work_dir.mkdir(parents=True, exist_ok=True)
     wav_path = work_dir / "input.wav"
 
+    extract_index: int | None = None
+    if selected_stream_indices:
+        if len(selected_stream_indices) > 1:
+            raise ValueError(
+                "transcribe_diarize accepts at most one stream index; "
+                f"got {selected_stream_indices}. Use transcribe_multi_track "
+                "for multi-stream selection."
+            )
+        extract_index = int(selected_stream_indices[0])
+
     progress("Extracting audio", 0.02)
-    extract_track_to_wav(input_path, wav_path, stream_index=None)
+    extract_track_to_wav(input_path, wav_path, stream_index=extract_index)
 
     seg_dicts, detected_lang = _transcribe_with_alignment(
         wav_path,
@@ -1854,9 +1875,20 @@ def transcribe(
     ``whisper_backend == "whisper.cpp"``. Ignored otherwise.
     """
     opts = options or AdvancedOptions()
+    # Selection-aware auto: if the user picked exactly one stream out
+    # of a multi-stream file, that's a single-track job — multi-track
+    # mode would re-extract every stream and ignore the picker. The
+    # picker only ever submits non-empty selections, so an empty list
+    # here means "default = all streams".
+    effective_track_count: int | None = None
+    if selected_stream_indices is not None:
+        effective_track_count = len(selected_stream_indices)
     if mode == "auto":
-        streams = probe_audio_streams(input_path)
-        mode = "multi-track" if len(streams) >= 2 else "diarize"
+        if effective_track_count is not None:
+            mode = "multi-track" if effective_track_count >= 2 else "diarize"
+        else:
+            streams = probe_audio_streams(input_path)
+            mode = "multi-track" if len(streams) >= 2 else "diarize"
 
     if mode == "multi-track":
         return transcribe_multi_track(
@@ -1886,4 +1918,5 @@ def transcribe(
         progress=progress,
         whisper_backend=whisper_backend,
         whisper_cpp_quant=whisper_cpp_quant,
+        selected_stream_indices=selected_stream_indices,
     )

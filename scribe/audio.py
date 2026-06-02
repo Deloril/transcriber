@@ -63,15 +63,42 @@ def extract_track_to_wav(
     sample_rate: int = 16000,
 ) -> Path:
     """
-    Extract a single audio track to mono 16-bit PCM WAV at `sample_rate`.
+    Extract a single audio track to mono 16-bit PCM WAV at `sample_rate`,
+    preserving the stream's absolute start time relative to t=0 of the
+    container.
 
-    `stream_index` is the absolute stream index from ffprobe (e.g. 1 for the
-    second stream overall). If None, ffmpeg picks the default audio stream.
+    Critical for multi-track / multi-stream recordings: each stream in
+    a container can carry its own ``start_time`` (OBS, field
+    recorders, and any container that pads with silence-before-speech
+    do this). Without ``-copyts -start_at_zero`` the stream rebases
+    its internal time so the first audio sample lands at 0:00 in the
+    output WAV — Whisper then transcribes timestamps that are
+    *relative to the stream's first sample*, not absolute against the
+    recording. The result: each speaker appears to start talking at
+    "00:00" and the transcript ends up out of order when sorted by
+    start.
+
+    With these flags, the output WAV has leading silence padded to
+    match the original timeline so downstream timestamps are
+    comparable across tracks.
+
+    `stream_index` is the absolute ffprobe stream index (e.g. 1 for
+    the second stream overall). ``None`` picks the default audio
+    stream.
     """
     ffmpeg = _require("ffmpeg")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         ffmpeg, "-y", "-loglevel", "error",
+        # ``-copyts`` keeps the original container timestamps on the
+        # output instead of rebasing to zero. ``-start_at_zero``
+        # then pads the leading-silence gap so the output WAV's
+        # samples line up with the recording's t=0. Together they
+        # mean a stream that starts speaking at 30s in the original
+        # produces a WAV that has 30s of silence before any speech,
+        # so downstream timestamps are absolute.
+        "-copyts",
+        "-start_at_zero",
         "-i", str(input_path),
     ]
     if stream_index is not None:

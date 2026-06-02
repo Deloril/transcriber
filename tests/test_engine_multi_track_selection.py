@@ -143,3 +143,161 @@ class TestSelectedStreamIndices:
         assert "RENAMED-ANON" in speakers
         # Stream 1's label doesn't show up — that track wasn't transcribed.
         assert "RENAMED-MARIA" not in speakers
+
+
+# --------------------------------------------------------------------------- #
+# transcribe()'s mode auto-detection — fixes the "I picked one channel and
+# it transcribed all six" report. A single-track selection on an N-track
+# file must route through diarize on that one stream, not multi-track on
+# every stream.
+# --------------------------------------------------------------------------- #
+
+
+class TestSingleSelectionRoutesToDiarize:
+    def test_one_selected_stream_picks_diarize_under_auto(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        streams: list[AudioStream],
+    ) -> None:
+        # ``transcribe()``'s auto-detection used to call
+        # ``probe_audio_streams`` and pick multi-track whenever
+        # the file had ≥2 streams — even if the user only selected
+        # one. That was the bug: 6-track file + selection=[3] still
+        # spawned 6 transcription passes. Now a 1-element selection
+        # forces diarize.
+        monkeypatch.setattr(engine, "probe_audio_streams", _stub_probe(streams))
+        called: dict[str, bool] = {"diarize": False, "multi_track": False}
+
+        def fake_diarize(input_path, *, work_dir, hf_token, **kwargs):
+            called["diarize"] = True
+            assert kwargs.get("selected_stream_indices") == [1]
+            return engine.TranscriptionResult(
+                segments=[],
+                language="en",
+                mode="diarize",
+                speaker_labels=[],
+                audio_path=input_path,
+            )
+
+        def fake_multi_track(*a, **kw):
+            called["multi_track"] = True
+            raise AssertionError(
+                "transcribe() must not route a single-stream selection "
+                "through transcribe_multi_track"
+            )
+
+        monkeypatch.setattr(engine, "transcribe_diarize", fake_diarize)
+        monkeypatch.setattr(engine, "transcribe_multi_track", fake_multi_track)
+
+        engine.transcribe(
+            tmp_path / "in.wav",
+            work_dir=tmp_path / "work",
+            mode="auto",
+            selected_stream_indices=[1],
+            hf_token="fake-token-for-test",
+        )
+        assert called["diarize"] is True
+        assert called["multi_track"] is False
+
+    def test_multiple_selected_streams_routes_to_multi_track(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        streams: list[AudioStream],
+    ) -> None:
+        monkeypatch.setattr(engine, "probe_audio_streams", _stub_probe(streams))
+        called: dict[str, bool] = {"diarize": False, "multi_track": False}
+
+        def fake_multi_track(input_path, *, work_dir, **kwargs):
+            called["multi_track"] = True
+            assert kwargs.get("selected_stream_indices") == [0, 2]
+            return engine.TranscriptionResult(
+                segments=[],
+                language="en",
+                mode="multi-track",
+                speaker_labels=[],
+                audio_path=input_path,
+            )
+
+        def fake_diarize(*a, **kw):
+            called["diarize"] = True
+            raise AssertionError(
+                "transcribe() must route ≥2-stream selections through "
+                "transcribe_multi_track, not transcribe_diarize"
+            )
+
+        monkeypatch.setattr(engine, "transcribe_multi_track", fake_multi_track)
+        monkeypatch.setattr(engine, "transcribe_diarize", fake_diarize)
+
+        engine.transcribe(
+            tmp_path / "in.wav",
+            work_dir=tmp_path / "work",
+            mode="auto",
+            selected_stream_indices=[0, 2],
+        )
+        assert called["multi_track"] is True
+        assert called["diarize"] is False
+
+
+class TestDiarizeHonoursSelection:
+    def test_diarize_rejects_multi_stream_selection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A multi-stream selection should land in
+        ``transcribe_multi_track``; ``transcribe_diarize`` rejects
+        ≥2 entries so a routing bug doesn't silently degrade."""
+        with pytest.raises(ValueError, match="at most one stream"):
+            engine.transcribe_diarize(
+                tmp_path / "in.wav",
+                work_dir=tmp_path / "work",
+                hf_token="t",
+                selected_stream_indices=[0, 1],
+            )
+
+    def test_diarize_uses_selected_index_for_extraction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The selected index must reach ``extract_track_to_wav`` so the
+        WAV is the user's chosen stream, not ffmpeg's default. We
+        intercept the function early — extract_track_to_wav raising
+        StopIteration short-circuits the rest of the diarize body."""
+        seen: list = []
+
+        class _Stop(Exception):
+            pass
+
+        def fake_extract(input_path, out_path, stream_index=None, sample_rate=16000):
+            seen.append(stream_index)
+            raise _Stop("expected — short-circuits the rest of diarize")
+
+        monkeypatch.setattr(engine, "extract_track_to_wav", fake_extract)
+
+        with pytest.raises(_Stop):
+            engine.transcribe_diarize(
+                tmp_path / "in.wav",
+                work_dir=tmp_path / "work",
+                hf_token="t",
+                selected_stream_indices=[3],
+            )
+        assert seen == [3]
+
+    def test_diarize_no_selection_falls_through_to_default_stream(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No selection → extract uses ``stream_index=None`` so ffmpeg
+        picks the default audio stream — backwards-compatible with
+        every job that pre-dates the picker."""
+        seen: list = []
+
+        class _Stop(Exception):
+            pass
+
+        def fake_extract(input_path, out_path, stream_index=None, sample_rate=16000):
+            seen.append(stream_index)
+            raise _Stop()
+
+        monkeypatch.setattr(engine, "extract_track_to_wav", fake_extract)
+        with pytest.raises(_Stop):
+            engine.transcribe_diarize(
+                tmp_path / "in.wav",
+                work_dir=tmp_path / "work",
+                hf_token="t",
+            )
+        assert seen == [None]
