@@ -193,6 +193,26 @@
       margin-bottom: 4px;
     }
     .segment.current { background: rgba(122,167,255,.06); }
+    /* Drag-and-drop affordance. The handle is draggable, the rest of
+       the row isn't — so contenteditable selection still works. */
+    .segment .seg-drag {
+      cursor: grab;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1;
+      padding: 2px 0;
+      user-select: none;
+      letter-spacing: -2px;
+      visibility: hidden;
+    }
+    .segment:hover .seg-drag { visibility: visible; }
+    .segment .seg-drag:active { cursor: grabbing; }
+    .segment.dragging { opacity: 0.45; }
+    /* Drop indicator: a 2px line *between* segments. We toggle the
+       top vs bottom edge based on hover position so the user knows
+       whether the drop will land before or after the target row. */
+    .segment.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+    .segment.drop-after  { box-shadow: inset 0 -2px 0 var(--accent); }
     .segment .meta {
       display: flex;
       flex-direction: column;
@@ -1014,10 +1034,25 @@ import {
     const div = document.createElement("div");
     div.className = "segment";
     div.dataset.idx = idx;
+    // The handle below is the draggable bit, not the whole row —
+    // ``draggable=false`` here keeps the contenteditable text usable
+    // (otherwise dragging a word selection would start a row drag).
+    div.draggable = false;
 
     // meta column
     const meta = document.createElement("div");
     meta.className = "meta";
+    // Drag handle. Stays in the meta column so it sits next to the
+    // timestamp + speaker chip. Hidden until the row is hovered so
+    // it doesn't clutter the read view.
+    const drag = document.createElement("div");
+    drag.className = "seg-drag";
+    drag.textContent = "⋮⋮";
+    drag.title = "Drag to reorder this line";
+    drag.draggable = true;
+    drag.addEventListener("dragstart", (e) => onSegmentDragStart(e, idx, div));
+    drag.addEventListener("dragend", () => onSegmentDragEnd(div));
+    meta.appendChild(drag);
     const t = document.createElement("button");
     t.className = "seg-time";
     t.textContent = fmtBracket(seg.start);
@@ -1031,6 +1066,12 @@ import {
     meta.appendChild(t);
     meta.appendChild(sp);
     div.appendChild(meta);
+
+    // Drop targets for reorder. We listen on the row itself rather
+    // than per-element so the user can drop anywhere on the line.
+    div.addEventListener("dragover", onSegmentDragOver);
+    div.addEventListener("dragleave", onSegmentDragLeave);
+    div.addEventListener("drop", onSegmentDrop);
 
     // text column
     const text = document.createElement("div");
@@ -1502,6 +1543,88 @@ import {
     if (!confirm("Delete this segment?")) return;
     pushUndo();
     state.segments.splice(idx, 1);
+    render(); markDirty();
+  }
+
+  // ---- Drag-and-drop reordering ----
+  //
+  // The drag handle on each row's meta column triggers these. We
+  // store the source idx in module-scope state rather than via
+  // ``DataTransfer`` so we don't have to re-parse a string at drop
+  // time, and so we can guard against weird drops from outside the
+  // segment list.
+  //
+  // Reordering doesn't change segment timestamps — those describe
+  // when the words were spoken in the audio, which the user can't
+  // edit by moving lines around. The visual order is what changes;
+  // the editor's contract is that ``state.segments[i]`` is rendered
+  // at row ``i`` regardless of timestamps. (Whisper output happens
+  // to be time-sorted by default; the user moving a row to break
+  // that order is a deliberate edit.)
+  let _dragSrcIdx = null;
+
+  function onSegmentDragStart(e, idx, rowDiv) {
+    _dragSrcIdx = idx;
+    rowDiv.classList.add("dragging");
+    // ``effectAllowed = "move"`` so the cursor reflects what's
+    // actually happening; some browsers refuse to fire ``dragover``
+    // without ``DataTransfer`` carrying *something*, so we set a
+    // tiny payload too.
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      try {
+        e.dataTransfer.setData("text/plain", String(idx));
+      } catch (_e) {
+        // setData throws on some sandboxed contexts; safe to ignore.
+      }
+    }
+  }
+  function onSegmentDragEnd(rowDiv) {
+    rowDiv.classList.remove("dragging");
+    _dragSrcIdx = null;
+    document.querySelectorAll(".segment.drop-before, .segment.drop-after")
+      .forEach(el => el.classList.remove("drop-before", "drop-after"));
+  }
+  function onSegmentDragOver(e) {
+    if (_dragSrcIdx === null) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    const row = e.currentTarget;
+    const rect = row.getBoundingClientRect();
+    const before = (e.clientY - rect.top) < rect.height / 2;
+    document.querySelectorAll(".segment.drop-before, .segment.drop-after")
+      .forEach(el => el.classList.remove("drop-before", "drop-after"));
+    row.classList.add(before ? "drop-before" : "drop-after");
+  }
+  function onSegmentDragLeave(e) {
+    e.currentTarget.classList.remove("drop-before", "drop-after");
+  }
+  function onSegmentDrop(e) {
+    if (_dragSrcIdx === null) return;
+    e.preventDefault();
+    const row = e.currentTarget;
+    const dstIdx = parseInt(row.dataset.idx, 10);
+    const rect = row.getBoundingClientRect();
+    const before = (e.clientY - rect.top) < rect.height / 2;
+    document.querySelectorAll(".segment.drop-before, .segment.drop-after")
+      .forEach(el => el.classList.remove("drop-before", "drop-after"));
+    moveSegmentTo(_dragSrcIdx, dstIdx, before);
+    _dragSrcIdx = null;
+  }
+  function moveSegmentTo(srcIdx, dstIdx, before) {
+    if (srcIdx === dstIdx) return;
+    if (!Number.isInteger(srcIdx) || !Number.isInteger(dstIdx)) return;
+    if (srcIdx < 0 || srcIdx >= state.segments.length) return;
+    if (dstIdx < 0 || dstIdx >= state.segments.length) return;
+    pushUndo();
+    const [moved] = state.segments.splice(srcIdx, 1);
+    // After the splice, indices ≥ srcIdx have shifted by one. If the
+    // drop target sat after the source, its index has already moved
+    // up by one — adjust before splicing back in.
+    let landingIdx = dstIdx > srcIdx ? dstIdx - 1 : dstIdx;
+    if (!before) landingIdx += 1;
+    landingIdx = Math.max(0, Math.min(state.segments.length, landingIdx));
+    state.segments.splice(landingIdx, 0, moved);
     render(); markDirty();
   }
 

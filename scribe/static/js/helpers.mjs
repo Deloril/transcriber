@@ -3374,3 +3374,38 @@ export function deleteSpeakerFromState(state, speakerId, opts = {}) {
 
   return {state: out, segments_removed: removed, segments_reassigned: reassigned};
 }
+
+
+/**
+ * Compute the new ``state.segments`` array for a drag-and-drop move.
+ *
+ * Splits the editor's ``moveSegmentTo`` logic out so the index
+ * arithmetic — which has to account for the source slot disappearing
+ * before the destination is re-inserted — can be unit-tested without
+ * the editor's DOM.
+ *
+ * Returns a *new* segments array; the input is not mutated.
+ *
+ * ``before`` is ``true`` when the user drops above the destination row,
+ * ``false`` when they drop below it.
+ */
+export function reorderSegments(segments, srcIdx, dstIdx, before) {
+  if (!Array.isArray(segments)) {
+    throw new TypeError("segments must be an array");
+  }
+  const n = segments.length;
+  if (!Number.isInteger(srcIdx) || srcIdx < 0 || srcIdx >= n) {
+    throw new RangeError(`srcIdx out of range: ${srcIdx}`);
+  }
+  if (!Number.isInteger(dstIdx) || dstIdx < 0 || dstIdx >= n) {
+    throw new RangeError(`dstIdx out of range: ${dstIdx}`);
+  }
+  if (srcIdx === dstIdx) return segments.slice();
+  const out = segments.slice();
+  const [moved] = out.splice(srcIdx, 1);
+  let landingIdx = dstIdx > srcIdx ? dstIdx - 1 : dstIdx;
+  if (!before) landingIdx += 1;
+  landingIdx = Math.max(0, Math.min(out.length, landingIdx));
+  out.splice(landingIdx, 0, moved);
+  return out;
+}

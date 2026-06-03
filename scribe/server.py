@@ -102,19 +102,6 @@ class Job:
     # gracefully degrade (hide the player, disable seek/play) and
     # tells the library row to render a small "media discarded" icon.
     media_discarded: bool = False
-    # G7.1 — pluggable transcription-engine backend. The user picks
-    # this from the upload page's Engine selector (next to the model
-    # picker); the engine routes the inference call through
-    # :mod:`scribe.whisper_backend`. Default is ``faster-whisper``,
-    # the historical (and still recommended) backend on CUDA / ROCm /
-    # CPU. Apple Silicon users switch to ``whisper.cpp`` (G7.2).
-    whisper_backend: str = "faster-whisper"
-    # G7.2 — GGUF quantisation when ``whisper_backend == "whisper.cpp"``.
-    # One of "q5_0" (default; smallest, fastest), "q8_0" (higher
-    # accuracy, larger file), "f16" (closest to faster-whisper's FP16,
-    # 2× the disk). Ignored for the faster-whisper / Parakeet paths.
-    # See :data:`scribe.whisper_cpp.SUPPORTED_QUANTS`.
-    whisper_cpp_quant: str = "q5_0"
     # Multi-track only: when set, restricts transcription to these
     # absolute ffprobe stream indices. ``None`` (default) transcribes
     # every audio track in the file — backwards-compatible with old
@@ -155,12 +142,6 @@ class Job:
             started_at=d.get("started_at"),
             finished_at=d.get("finished_at"),
             media_discarded=_to_bool_persisted(d.get("media_discarded", False)),
-            whisper_backend=str(
-                d.get("whisper_backend") or "faster-whisper"
-            ),
-            whisper_cpp_quant=str(
-                d.get("whisper_cpp_quant") or "q5_0"
-            ),
             selected_stream_indices=(
                 [int(i) for i in d["selected_stream_indices"]]
                 if isinstance(d.get("selected_stream_indices"), list)
@@ -300,21 +281,7 @@ async def _startup() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
-    # G7.1 — surface the registered Whisper backends so the upload
-    # page can render an Engine selector. G7.2 also surfaces the
-    # whisper.cpp quant catalogue inline so the user can pick GGUF
-    # quantisation without a round-trip to /api/whisper-cpp/models.
-    # G7.3 — auto-recommend whisper.cpp on Apple Silicon: the page
-    # passes the active GPU backend label through to the helpers so
-    # ``default_backend_id()`` flips to whisper.cpp on mps and the
-    # template can render a recommendation banner.
-    from .whisper_backend import (
-        default_backend_id,
-        describe_backends,
-        recommended_backend_for_device,
-    )
     from .engine import gpu_backend
-    from . import whisper_cpp
     # G6.1 — surface the smoke-test plan so the home page can render a
     # read-only "Diagnostics" panel that shows the CLI invocation + the
     # ordered stage list. Defensive against an import failure (e.g. the
@@ -338,302 +305,20 @@ async def index(request: Request) -> HTMLResponse:
     except Exception:  # noqa: BLE001
         benchmark_plan_payload = None
 
-    # G7.4 — surface the whisper-backend benchmark plan with the same
-    # defensive shape. Where G6.2 compares the *same* backend across
-    # different hardware (CUDA vs ROCm), G7.4 compares *different*
-    # backends on the *same* machine (faster-whisper vs whisper.cpp)
-    # and reports WER vs an optional reference. The Apple Silicon
-    # audience landing on this page after seeing the G7.3
-    # whisper.cpp-recommendation banner needs a one-step path to
-    # actually measure the speedup before committing to the new
-    # default.
-    try:
-        from .scripts.bench_whisper import (
-            whisper_benchmark_plan as _whisper_bench_plan_fn,
-        )
-        whisper_benchmark_plan_payload = _whisper_bench_plan_fn()
-    except Exception:  # noqa: BLE001
-        whisper_benchmark_plan_payload = None
-
     active_backend = gpu_backend()
     return templates.TemplateResponse(
         request,
         "index.html",
         {
-            "whisper_backends": describe_backends(),
-            "default_whisper_backend": default_backend_id(active_backend),
-            # G7.3 — the active device label (cuda/rocm/mps/cpu) and a
-            # structured recommendation hint (or None). Template uses
-            # both: the label drives a data attribute on the engine
-            # row; the hint renders the banner.
             "active_gpu_backend": active_backend,
-            "whisper_backend_recommendation": (
-                recommended_backend_for_device(active_backend)
-            ),
-            # G7.2 — quant selector + supported model list for the
-            # whisper.cpp panel.
-            "whisper_cpp_supported_models": list(whisper_cpp.SUPPORTED_MODELS),
-            "whisper_cpp_supported_quants": list(whisper_cpp.SUPPORTED_QUANTS),
-            "whisper_cpp_default_quant": whisper_cpp.DEFAULT_QUANT,
             # G6.1 — read-only smoke-test plan; ``None`` only when the
             # script module fails to import (defensive).
             "smoke_test_plan": smoke_test_plan_payload,
             # G6.2 — read-only benchmark plan; ``None`` only when the
             # script module fails to import (defensive).
             "benchmark_plan": benchmark_plan_payload,
-            # G7.4 — read-only whisper-backend benchmark plan; ``None``
-            # only when the script module fails to import (defensive).
-            "whisper_benchmark_plan": whisper_benchmark_plan_payload,
         },
     )
-
-
-@app.get("/api/whisper-backends")
-async def whisper_backends_endpoint() -> JSONResponse:
-    """List the registered Whisper inference backends (G7.1).
-
-    Used by the upload page's engine selector and by callers that
-    want to A/B between backends programmatically. Returns one JSON
-    object per backend with its id, display name, description,
-    supported devices, model format, and a runtime ``available``
-    flag that's ``False`` when the backend's prerequisites aren't
-    installed (the UI greys out those options instead of hiding
-    them, so the user knows they exist).
-
-    G7.3 — also returns the active GPU backend label and (when
-    applicable) a structured ``recommendation`` block. On Apple
-    Silicon the ``default`` flips to ``whisper.cpp`` and the
-    recommendation describes the speedup.
-    """
-    from .whisper_backend import (
-        default_backend_id,
-        describe_backends,
-        recommended_backend_for_device,
-    )
-    from .engine import gpu_backend
-
-    active_backend = gpu_backend()
-    return JSONResponse({
-        "default": default_backend_id(active_backend),
-        "backends": describe_backends(),
-        "active_gpu_backend": active_backend,
-        "recommendation": recommended_backend_for_device(active_backend),
-    })
-
-
-@app.get("/api/whisper-cpp/models")
-async def whisper_cpp_models_endpoint() -> JSONResponse:
-    """List the GGUF model + quant catalogue for whisper.cpp (G7.2).
-
-    The Settings strip on the upload page populates a quant ``<select>``
-    from this; the table also exposes which combinations are already
-    cached on disk vs need a download. Returns:
-
-    .. code-block:: json
-
-        {
-          "supported_models": ["large-v3", ...],
-          "supported_quants": ["q5_0", "q8_0", "f16"],
-          "default_model": "large-v3",
-          "default_quant": "q5_0",
-          "cache_dir": "/home/.../whisper.cpp",
-          "pywhispercpp_available": false,
-          "pywhispercpp_unavailable_reason": "...",
-          "models": [{"model": "large-v3", "quant": "q5_0",
-                      "filename": "ggml-large-v3-q5_0.bin",
-                      "path": "/...", "cached": false,
-                      "size_bytes": null,
-                      "download_url": "https://..."}, ...]
-        }
-    """
-    from . import whisper_cpp
-    avail, reason = whisper_cpp.is_pywhispercpp_available()
-    return JSONResponse({
-        "supported_models": list(whisper_cpp.SUPPORTED_MODELS),
-        "supported_quants": list(whisper_cpp.SUPPORTED_QUANTS),
-        "default_model": whisper_cpp.DEFAULT_MODEL,
-        "default_quant": whisper_cpp.DEFAULT_QUANT,
-        "cache_dir": str(whisper_cpp.default_cache_dir()),
-        "pywhispercpp_available": avail,
-        "pywhispercpp_unavailable_reason": reason,
-        "models": [m.to_dict() for m in whisper_cpp.list_catalogue()],
-    })
-
-
-# --------------------------------------------------------------------------- #
-# whisper.cpp model download manager
-#
-# The user lands here when they pick whisper.cpp, hit Transcribe, and
-# get back ``GGUF model not cached: …``. The error already names the
-# Hugging Face URL, but copy-pasting curl into a terminal is bad UX.
-# This pair of endpoints kicks off the download in a background
-# thread and lets the UI poll progress so the upload page can show a
-# fill bar instead of silently freezing for 90 seconds while a 1 GB
-# blob trickles in.
-#
-#   POST /api/whisper-cpp/download         body: {"model": "..", "quant": ".."}
-#   GET  /api/whisper-cpp/download/{id}    polled status: {state, downloaded_bytes, total_bytes, error}
-#
-# State is in-memory only — restart the server and the download dict
-# resets. That's fine: a half-finished download leaves a ``.partial``
-# file the user can ``rm`` themselves if it's a problem; a fully
-# finished one shows up cached and the next click is a no-op.
-# --------------------------------------------------------------------------- #
-
-
-_WHISPER_CPP_DOWNLOADS: dict[str, dict[str, Any]] = {}
-_WHISPER_CPP_DOWNLOADS_LOCK = threading.Lock()
-
-
-def _wc_make_download_id() -> str:
-    return uuid.uuid4().hex[:12]
-
-
-def _wc_run_download(download_id: str, model: str, quant: str) -> None:
-    """Worker body for a whisper.cpp GGUF download.
-
-    Runs in a daemon thread spawned by the POST handler. Updates the
-    shared dict in place so the GET poller sees live byte counts.
-    """
-    from . import whisper_cpp as _wc
-
-    def _progress(done: int, total: int | None) -> None:
-        with _WHISPER_CPP_DOWNLOADS_LOCK:
-            entry = _WHISPER_CPP_DOWNLOADS.get(download_id)
-            if entry is None:
-                return
-            entry["downloaded_bytes"] = int(done)
-            if total is not None:
-                entry["total_bytes"] = int(total)
-
-    try:
-        path = _wc.download_gguf(model, quant, progress=_progress)
-        with _WHISPER_CPP_DOWNLOADS_LOCK:
-            entry = _WHISPER_CPP_DOWNLOADS.get(download_id)
-            if entry is None:
-                return
-            entry["state"] = "complete"
-            entry["path"] = str(path)
-            entry["finished_at"] = datetime.utcnow().isoformat() + "Z"
-    except Exception as e:  # noqa: BLE001
-        with _WHISPER_CPP_DOWNLOADS_LOCK:
-            entry = _WHISPER_CPP_DOWNLOADS.get(download_id)
-            if entry is None:
-                return
-            entry["state"] = "error"
-            entry["error"] = str(e)
-            entry["finished_at"] = datetime.utcnow().isoformat() + "Z"
-
-
-@app.post("/api/whisper-cpp/download")
-async def whisper_cpp_download_endpoint(request: Request) -> JSONResponse:
-    """Kick off a background download of a GGUF weight.
-
-    Body: ``{"model": "large-v3", "quant": "q5_0"}``. Returns a 202
-    with a download id the UI then polls every second via
-    :func:`whisper_cpp_download_status_endpoint`.
-
-    If the requested (model, quant) is already on disk we short-circuit
-    and return ``{"state": "complete", "already_cached": true}`` —
-    the UI then doesn't need to render a fill bar.
-
-    A fresh download id is minted per POST. If a download for the
-    same (model, quant) is already in flight, we return its id rather
-    than starting a duplicate worker.
-    """
-    from . import whisper_cpp as _wc
-
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(400, "Invalid JSON")
-    if not isinstance(body, dict):
-        raise HTTPException(400, "Expected JSON object")
-    model = str(body.get("model", "") or "")
-    quant = str(body.get("quant", "") or "")
-    if not _wc.is_supported_model(model):
-        raise HTTPException(
-            400,
-            f"Unsupported model {model!r}; expected one of "
-            f"{list(_wc.SUPPORTED_MODELS)}",
-        )
-    if not _wc.is_supported_quant(quant):
-        raise HTTPException(
-            400,
-            f"Unsupported quant {quant!r}; expected one of "
-            f"{list(_wc.SUPPORTED_QUANTS)}",
-        )
-
-    if _wc.is_cached(model, quant):
-        return JSONResponse({
-            "state": "complete",
-            "already_cached": True,
-            "model": model,
-            "quant": quant,
-            "path": str(_wc.gguf_path(model, quant)),
-        })
-
-    # Reuse an in-flight download for the same (model, quant) so a
-    # double-click doesn't spawn two workers writing to the same
-    # ``.partial`` file.
-    with _WHISPER_CPP_DOWNLOADS_LOCK:
-        for did, entry in _WHISPER_CPP_DOWNLOADS.items():
-            if (entry.get("model") == model
-                    and entry.get("quant") == quant
-                    and entry.get("state") == "running"):
-                return JSONResponse({
-                    "state": "running",
-                    "id": did,
-                    "model": model,
-                    "quant": quant,
-                    "downloaded_bytes": entry.get("downloaded_bytes", 0),
-                    "total_bytes": entry.get("total_bytes"),
-                    "url": _wc.hf_download_url(model, quant),
-                }, status_code=202)
-        download_id = _wc_make_download_id()
-        _WHISPER_CPP_DOWNLOADS[download_id] = {
-            "id": download_id,
-            "model": model,
-            "quant": quant,
-            "state": "running",
-            "downloaded_bytes": 0,
-            "total_bytes": None,
-            "url": _wc.hf_download_url(model, quant),
-            "started_at": datetime.utcnow().isoformat() + "Z",
-            "finished_at": None,
-            "error": None,
-            "path": None,
-        }
-
-    threading.Thread(
-        target=_wc_run_download,
-        args=(download_id, model, quant),
-        daemon=True,
-        name=f"whisper-cpp-download-{download_id}",
-    ).start()
-
-    with _WHISPER_CPP_DOWNLOADS_LOCK:
-        snapshot = dict(_WHISPER_CPP_DOWNLOADS[download_id])
-    return JSONResponse(snapshot, status_code=202)
-
-
-@app.get("/api/whisper-cpp/download/{download_id}")
-async def whisper_cpp_download_status_endpoint(
-    download_id: str,
-) -> JSONResponse:
-    """Status for one in-flight or finished download.
-
-    Returns the same snapshot shape the POST returned. The UI polls
-    until ``state`` is ``complete`` or ``error``.
-    """
-    if not re.fullmatch(r"[a-f0-9]{12}", download_id or ""):
-        raise HTTPException(400, "Invalid download id")
-    with _WHISPER_CPP_DOWNLOADS_LOCK:
-        entry = _WHISPER_CPP_DOWNLOADS.get(download_id)
-        if entry is None:
-            raise HTTPException(404, "Unknown download id")
-        snapshot = dict(entry)
-    return JSONResponse(snapshot)
 
 
 @app.get("/api/diagnostics/smoke-test-plan")
@@ -679,31 +364,6 @@ async def benchmark_plan_endpoint() -> JSONResponse:
     """
     from .scripts.bench_rocm import benchmark_plan
     return JSONResponse(benchmark_plan())
-
-
-@app.get("/api/diagnostics/whisper-benchmark-plan")
-async def whisper_benchmark_plan_endpoint() -> JSONResponse:
-    """Return the G7.4 whisper-backend benchmark plan as JSON.
-
-    Where G6.2's ``benchmark_plan`` describes a CUDA-vs-ROCm comparison
-    of the *same* backend, this route describes the
-    faster-whisper-vs-whisper.cpp comparison the G7.4 script
-    (``scribe.scripts.bench_whisper``) runs on the *same* machine.
-    Same shape as the other diagnostics-plan routes — read-only,
-    no torch / whisperx import, no model loads. Callers wanting to
-    actually run the benchmark shell out to
-    ``python -m scribe.scripts.bench_whisper <audio>`` using the
-    invocation strings in the response.
-
-    The ``modes`` list advertises three: ``speed`` (RTF only,
-    cheapest), ``accuracy`` (with ``--reference`` for WER), and
-    ``markdown`` (writes a Markdown table the README embeds). The
-    ``backends`` list mirrors the registry ids so callers can drive
-    the script with ``--backend faster-whisper --backend whisper.cpp``
-    and get a deterministic ordering.
-    """
-    from .scripts.bench_whisper import whisper_benchmark_plan
-    return JSONResponse(whisper_benchmark_plan())
 
 
 @app.get("/edit/{job_id}", response_class=HTMLResponse)
@@ -11959,8 +11619,6 @@ async def upload(
     model: str = Form("large-v3"),
     batch_size: str = Form("8"),
     options: str = Form("{}"),
-    backend: str = Form("faster-whisper"),
-    whisper_cpp_quant: str = Form("q5_0"),
     # Multi-track picker: a comma-separated list of absolute ffprobe
     # stream indices to transcribe. Empty / unset means "all of them"
     # (backwards-compatible). The form also accepts a JSON object map
@@ -12017,34 +11675,6 @@ async def upload(
     except ValueError:
         bs = 8
 
-    # G7.1 — validate the chosen Whisper backend against the registry
-    # before kicking off the job. An unknown id is a hard 400; the user
-    # will have got it from a stale UI / scripted client.
-    from .whisper_backend import is_valid_backend_id
-    backend_id = (backend or "").strip() or "faster-whisper"
-    if not is_valid_backend_id(backend_id):
-        raise HTTPException(
-            400,
-            f"Unknown transcription backend {backend_id!r}. "
-            "See GET /api/whisper-backends for the registered list.",
-        )
-
-    # G7.2 — validate whisper.cpp quant when relevant. The form field
-    # is always submitted (the upload page renders the select for
-    # every backend so JS doesn't have to mutate the form per-toggle),
-    # so blank falls through to the default. The validation is
-    # backend-aware: we only enforce the supported set when the user
-    # actually picked whisper.cpp, so an inert q5_0 sitting on a
-    # faster-whisper job persists as the default but never reaches
-    # the inference path.
-    from . import whisper_cpp as _wcpp
-    quant_id = (whisper_cpp_quant or "").strip() or _wcpp.DEFAULT_QUANT
-    if backend_id == "whisper.cpp" and not _wcpp.is_supported_quant(quant_id):
-        raise HTTPException(
-            400,
-            f"Unsupported whisper.cpp quant {quant_id!r}. "
-            f"Supported: {list(_wcpp.SUPPORTED_QUANTS)}.",
-        )
 
     try:
         streams = probe_audio_streams(input_path)
@@ -12138,8 +11768,6 @@ async def upload(
         input_filename=safe_name,
         options=opts_dict,
         batch_size=bs,
-        whisper_backend=backend_id,
-        whisper_cpp_quant=quant_id,
         selected_stream_indices=selected_indices_for_job,
     )
     with JOBS_LOCK:
@@ -12191,8 +11819,6 @@ def _run_job(job_id: str) -> None:
             hf_token=os.environ.get("HF_TOKEN"),
             options=AdvancedOptions.from_dict(job.options),
             progress=lambda m, f: _set_progress(job_id, m, f),
-            whisper_backend=job.whisper_backend,
-            whisper_cpp_quant=job.whisper_cpp_quant,
             selected_stream_indices=job.selected_stream_indices,
         )
         base = job.output_dir / job.input_path.stem

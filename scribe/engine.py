@@ -1311,13 +1311,6 @@ def _run_faster_whisper_inference(
     function deliberately stops after inference so the alignment model can
     claim the GPU.
 
-    Extracted as a free function so :class:`scribe.whisper_backend.\
-FasterWhisperBackend` can wrap the same code path the engine uses
-    today (G7.1). Keeps a single source of truth for the
-    ``_safe_load_model`` + ``asr.transcribe`` + ``_ProgressCapture``
-    dance — adding a new ``WhisperBackend`` subclass doesn't have to
-    re-implement faster-whisper's quirks.
-
     ``asr_options`` is the dict from :meth:`AdvancedOptions.asr_options`
     plus two extra keys read from the same source object:
 
@@ -1399,23 +1392,10 @@ def _transcribe_with_alignment(
     progress_base: float,
     progress_span: float,
     hf_token: str | None = None,
-    whisper_backend: str | None = None,
-    whisper_cpp_quant: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """
     Run transcription (Whisper or Parakeet) + word-level alignment on a single
     audio file. Returns (aligned_segments, detected_language).
-
-    ``whisper_backend`` selects the inference engine for non-Parakeet
-    models (G7.1). ``None`` / ``"faster-whisper"`` keeps the historical
-    behaviour. Other registered backend ids dispatch through
-    :mod:`scribe.whisper_backend`. Parakeet models always use the NeMo
-    path regardless of ``whisper_backend`` — the field is Whisper-only.
-
-    ``whisper_cpp_quant`` (G7.2) is the GGUF quantisation when
-    ``whisper_backend == "whisper.cpp"`` (one of ``"q5_0"`` / ``"q8_0"``
-    / ``"f16"`` — see :data:`scribe.whisper_cpp.SUPPORTED_QUANTS`).
-    Ignored for the faster-whisper / Parakeet paths.
     """
     whisperx = _load_whisperx()
 
@@ -1439,30 +1419,13 @@ def _transcribe_with_alignment(
         asr_result = {"segments": seg_dicts, "language": detected_lang}
         audio = whisperx.load_audio(str(audio_path))
     else:
-        # G7.1 — route the inference call through the registered
-        # backend. ``faster-whisper`` is the default and wraps
-        # :func:`_run_faster_whisper_inference` so the existing
-        # whisperx machinery stays the single source of truth. Other
-        # backends (``whisper.cpp`` etc.) ship their own adapter.
-        from .whisper_backend import (
-            default_backend_id,
-            get_backend,
-        )
-        backend_id = (whisper_backend or "").strip() or default_backend_id()
-        # Bake batch_size + chunk_size into asr_options so backend
-        # implementations have a single dict to consume instead of
-        # juggling extra kwargs on every call.
+        # faster-whisper inference: loads the model, transcribes, frees it.
+        # Bake batch_size + chunk_size into asr_options so the helper has
+        # a single dict to consume.
         asr_opts = dict(options.asr_options())
         asr_opts["batch_size"] = int(batch_size)
         asr_opts["chunk_size"] = int(options.chunk_size)
-        # G7.2 — surface whisper.cpp's quant choice through the same
-        # asr_options dict every backend reads from. Faster-whisper
-        # ignores it; the WhisperCppBackend pulls it out before
-        # dispatch.
-        if whisper_cpp_quant:
-            asr_opts["whisper_cpp_quant"] = str(whisper_cpp_quant)
-        backend = get_backend(backend_id)
-        backend_result = backend.transcribe(
+        backend_result = _run_faster_whisper_inference(
             audio_path,
             model_name=model_name,
             language=language,
@@ -1477,9 +1440,6 @@ def _transcribe_with_alignment(
             "language": backend_result["language"],
         }
         detected_lang = asr_result["language"]
-        # Re-load audio for the alignment pass — backends are free to
-        # internally use a different audio decoder, so the engine
-        # owns the canonical numpy array fed into whisperx.align.
         audio = whisperx.load_audio(str(audio_path))
 
     progress("Loading alignment model", progress_base + 0.55 * progress_span)
@@ -1535,8 +1495,6 @@ def transcribe_multi_track(
     batch_size: int = 8,
     options: AdvancedOptions | None = None,
     progress: ProgressFn = _noop_progress,
-    whisper_backend: str | None = None,
-    whisper_cpp_quant: str | None = None,
     selected_stream_indices: list[int] | None = None,
 ) -> TranscriptionResult:
     """
@@ -1635,8 +1593,6 @@ def transcribe_multi_track(
             progress_base=i / n,
             progress_span=1.0 / n,
             hf_token=os.environ.get("HF_TOKEN"),
-            whisper_backend=whisper_backend,
-            whisper_cpp_quant=whisper_cpp_quant,
         )
         used_language = detected
 
@@ -1695,8 +1651,6 @@ def transcribe_diarize(
     batch_size: int = 8,
     options: AdvancedOptions | None = None,
     progress: ProgressFn = _noop_progress,
-    whisper_backend: str | None = None,
-    whisper_cpp_quant: str | None = None,
     selected_stream_indices: list[int] | None = None,
 ) -> TranscriptionResult:
     """Single-track transcription with pyannote AI diarization.
@@ -1743,8 +1697,6 @@ def transcribe_diarize(
         progress_base=0.05,
         progress_span=0.7,
         hf_token=hf_token,
-        whisper_backend=whisper_backend,
-        whisper_cpp_quant=whisper_cpp_quant,
     )
 
     whisperx = _load_whisperx()
@@ -1856,8 +1808,6 @@ def transcribe(
     hf_token: str | None = None,
     options: AdvancedOptions | None = None,
     progress: ProgressFn = _noop_progress,
-    whisper_backend: str | None = None,
-    whisper_cpp_quant: str | None = None,
     selected_stream_indices: list[int] | None = None,
 ) -> TranscriptionResult:
     """
@@ -1865,14 +1815,6 @@ def transcribe(
 
     mode='auto' picks multi-track if the input has ≥2 audio streams,
     otherwise diarize.
-
-    ``whisper_backend`` (G7.1) selects the Whisper inference engine for
-    non-Parakeet models. ``None`` / ``"faster-whisper"`` keeps the
-    historical CTranslate2 path. Other registered backend ids dispatch
-    through :mod:`scribe.whisper_backend`.
-
-    ``whisper_cpp_quant`` (G7.2) selects the GGUF quantisation when
-    ``whisper_backend == "whisper.cpp"``. Ignored otherwise.
     """
     opts = options or AdvancedOptions()
     # Selection-aware auto: if the user picked exactly one stream out
@@ -1900,8 +1842,6 @@ def transcribe(
             batch_size=batch_size,
             options=opts,
             progress=progress,
-            whisper_backend=whisper_backend,
-            whisper_cpp_quant=whisper_cpp_quant,
             selected_stream_indices=selected_stream_indices,
         )
     return transcribe_diarize(
@@ -1916,7 +1856,5 @@ def transcribe(
         batch_size=batch_size,
         options=opts,
         progress=progress,
-        whisper_backend=whisper_backend,
-        whisper_cpp_quant=whisper_cpp_quant,
         selected_stream_indices=selected_stream_indices,
     )

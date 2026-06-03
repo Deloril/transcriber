@@ -390,3 +390,28 @@ class TestSpeakerDeleteUI:
         # populates it at modal-open time.
         assert 'id="speakerDeleteOptions"' in body
         assert 'id="speakerDeleteConfirm"' in body
+
+
+# --------------------------------------------------------------------------- #
+# Drag-and-drop reorder — a draggable handle on each segment row.
+# --------------------------------------------------------------------------- #
+
+
+class TestSegmentDragHandle:
+    def test_handle_class_present(self, server_env) -> None:
+        srv, client, _ = server_env
+        _seed_done_job(srv)
+        body = client.get("/edit/abc123def456").text
+        # The CSS rule + the JS that builds the handle must both be
+        # in the served document.
+        assert ".seg-drag" in body
+        assert "seg-drag" in body
+        assert "onSegmentDragStart" in body
+        assert "moveSegmentTo" in body
+
+    def test_handle_glyph_rendered_in_js(self, server_env) -> None:
+        srv, client, _ = server_env
+        _seed_done_job(srv)
+        body = client.get("/edit/abc123def456").text
+        # Stable proof the handle's icon is wired up.
+        assert 'drag.textContent = "⋮⋮"' in body
