@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -12584,6 +12585,126 @@ def _write_env_file(values: dict[str, str]) -> None:
         ENV_PATH.chmod(0o600)
     except OSError:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Backup + restore. See scribe.backup for the layout + caveats.
+#
+# Three routes:
+#   GET  /api/backup                     stream a fresh zip back
+#   POST /api/backup/inspect             dry-run: show manifest only
+#   POST /api/restore                    upload + restore (force=true required
+#                                        when targets are non-empty)
+# --------------------------------------------------------------------------- #
+
+
+def _backup_paths() -> "_backup.BackupPaths":
+    """Build a BackupPaths from the current server-globals snapshot.
+
+    Pulled into a helper so tests can monkeypatch UPLOAD_DIR /
+    OUTPUT_DIR / PROJECTS_DIR and the routes pick that up without
+    importing through stale closures.
+    """
+    return _backup.BackupPaths(
+        outputs_dir=OUTPUT_DIR,
+        projects_dir=PROJECTS_DIR,
+        uploads_dir=UPLOAD_DIR,
+        profiles_path=PROFILES_PATH,
+    )
+
+
+from . import backup as _backup  # noqa: E402  (after module-level state)
+
+
+@app.get("/api/backup")
+async def backup_endpoint(include_uploads: str = "true") -> Response:
+    """Stream a Scribe backup as a zip download.
+
+    ``include_uploads`` (query, ``true``/``false``; default ``true``)
+    toggles whether the source-media directory is packed. Setting
+    it false produces a much smaller archive — useful when the user
+    has reclaimed disk via Discard Media for most jobs anyway.
+    """
+    include = (include_uploads or "true").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    buf = io.BytesIO()
+    try:
+        _backup.create_backup(
+            _backup_paths(),
+            out_stream=buf,
+            include_uploads=include,
+        )
+    except _backup.BackupError as e:
+        raise HTTPException(500, f"Backup failed: {e}")
+    buf.seek(0)
+    filename = _backup.suggested_backup_filename()
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.post("/api/backup/inspect")
+async def backup_inspect_endpoint(file: UploadFile = File(...)) -> JSONResponse:
+    """Read the manifest from an uploaded backup without restoring.
+
+    The UI calls this before restore so the user sees what they're
+    about to overwrite (counts + size + creation date).
+    """
+    raw = await file.read()
+    try:
+        manifest = _backup.inspect_backup(io.BytesIO(raw))
+    except _backup.RestoreError as e:
+        raise HTTPException(400, str(e))
+    return JSONResponse(manifest)
+
+
+@app.post("/api/restore")
+async def restore_endpoint(
+    file: UploadFile = File(...),
+    force: str = Form("false"),
+    include_uploads: str = Form("true"),
+) -> JSONResponse:
+    """Restore a backup zip over the current install.
+
+    Refuses (400) when target directories are non-empty unless
+    ``force=true`` is passed. The UI is responsible for the "this
+    will overwrite N transcripts" confirmation; this route trusts
+    the flag.
+
+    On success returns the same shape as ``backup`` so the caller
+    can show "restored 203 outputs, 14 projects, 1.4 GB."
+    """
+    raw = await file.read()
+    do_force = (force or "").strip().lower() in {"1", "true", "yes", "on"}
+    do_uploads = (include_uploads or "true").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    try:
+        summary = _backup.restore_backup(
+            io.BytesIO(raw),
+            _backup_paths(),
+            force=do_force,
+            include_uploads=do_uploads,
+        )
+    except _backup.RestoreError as e:
+        raise HTTPException(400, str(e))
+    except _backup.BackupError as e:
+        raise HTTPException(500, str(e))
+    # The job registry is keyed off ``outputs/<id>/job.json`` — re-load
+    # so the in-memory JOBS dict reflects the restored state without a
+    # server bounce.
+    try:
+        _load_jobs_from_disk()
+    except Exception as e:  # noqa: BLE001
+        # Restore succeeded; reloading is best-effort.
+        print(f"[scribe] post-restore reload failed: {e}", flush=True)
+    return JSONResponse(summary.to_dict())
 
 
 @app.get("/api/settings/hf_token")

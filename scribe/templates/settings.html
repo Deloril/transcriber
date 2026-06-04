@@ -53,6 +53,47 @@
     <div class="hint">Read-only summary of the current PyTorch / CT2 backend. Mirrors <code>python -m scribe.devices</code>.</div>
     <div id="caps" class="hint" style="margin-top:8px">Loading…</div>
   </div>
+
+  <div class="card" data-test-id="settings-backup-card">
+    <h2>Backup &amp; restore</h2>
+    <div class="hint">
+      Pack every transcript, project, codebook, memo, AI suggestion,
+      and (optionally) source media into a single zip you can stash
+      somewhere safe. Restoring overwrites the current install.
+      <strong>The Hugging Face token is not included</strong> — re-set
+      it after a restore.
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-top:12px">
+      <div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px">
+          <input type="checkbox" id="backupIncludeUploads" checked>
+          Include source media (<code>uploads/</code>) — uncheck to skip the bulky
+          original recordings.
+        </label>
+        <a class="btn" id="backupDownloadBtn" href="#"
+           data-test-id="settings-backup-download"
+           style="display:inline-block;margin-top:6px">Download backup…</a>
+        <span id="backupStatus" class="hint" style="margin-left:8px"></span>
+      </div>
+      <hr style="border:0;border-top:1px solid var(--border)">
+      <div>
+        <label style="font-size:13px">Restore from a backup zip</label>
+        <input type="file" id="restoreFile" accept=".zip,application/zip"
+               data-test-id="settings-restore-file"
+               style="display:block;margin-top:6px">
+        <div id="restorePreview" class="hint" style="margin-top:6px;display:none"
+             data-test-id="settings-restore-preview"></div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:6px">
+          <input type="checkbox" id="restoreIncludeUploads" checked>
+          Restore source media if the backup includes it
+        </label>
+        <button type="button" id="restoreBtn"
+                data-test-id="settings-restore-button"
+                style="margin-top:8px" disabled>Restore…</button>
+        <span id="restoreStatus" class="hint" style="margin-left:8px"></span>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -133,5 +174,135 @@ fetch("/api/system/model-recommendations")
     document.getElementById("tier-summary").textContent =
       "Tier recommendations unavailable.";
   });
+
+// -------- Backup + restore -------- //
+//
+// The download path is straightforward: build the URL with the
+// uploads-include flag and let the browser handle Content-Disposition.
+//
+// Restore is two-step: the user picks a file, we POST it to
+// /api/backup/inspect to read the manifest (so we can show what
+// they're about to overwrite), then they confirm and we POST it
+// to /api/restore with force=true. We never restore without a
+// confirmation prompt because the current install gets clobbered.
+(function setupBackupRestore() {
+  const dlBtn = document.getElementById("backupDownloadBtn");
+  const dlStatus = document.getElementById("backupStatus");
+  const incUploadsBackup = document.getElementById("backupIncludeUploads");
+  const restoreFile = document.getElementById("restoreFile");
+  const restorePreview = document.getElementById("restorePreview");
+  const restoreBtn = document.getElementById("restoreBtn");
+  const restoreStatus = document.getElementById("restoreStatus");
+  const incUploadsRestore = document.getElementById("restoreIncludeUploads");
+  if (!dlBtn || !restoreBtn) return;
+
+  function fmtBytes(n) {
+    if (n == null) return "?";
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  }
+
+  dlBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    const inc = incUploadsBackup.checked ? "true" : "false";
+    dlStatus.textContent = "Building archive… (this can take a few minutes for large installs)";
+    dlStatus.style.color = "var(--muted)";
+    // Trigger a download by navigating an invisible link. The
+    // server streams the response with Content-Disposition.
+    const tmp = document.createElement("a");
+    tmp.href = `/api/backup?include_uploads=${inc}`;
+    // Setting a value on the download attribute would override the
+    // server's filename — leave it bare.
+    tmp.setAttribute("download", "");
+    document.body.appendChild(tmp);
+    tmp.click();
+    document.body.removeChild(tmp);
+    // We don't actually know when the download finishes, but the
+    // browser handles progress in its download tray. Reset the
+    // status line after a moment so it doesn't sit stale.
+    setTimeout(() => {
+      dlStatus.textContent = "Started — check your downloads folder.";
+      dlStatus.style.color = "var(--ok)";
+    }, 800);
+  });
+
+  let _restoreSelectedFile = null;
+  restoreFile.addEventListener("change", async () => {
+    _restoreSelectedFile = restoreFile.files[0] || null;
+    restoreBtn.disabled = !_restoreSelectedFile;
+    restorePreview.style.display = "none";
+    restoreStatus.textContent = "";
+    if (!_restoreSelectedFile) return;
+    // Inspect: peek at the manifest so we can show counts before
+    // the user commits to a destructive restore.
+    const fd = new FormData();
+    fd.append("file", _restoreSelectedFile);
+    try {
+      const r = await fetch("/api/backup/inspect", {method: "POST", body: fd});
+      const body = await r.json();
+      if (!r.ok) {
+        restorePreview.textContent = "Could not read backup: " + (body.detail || r.status);
+        restorePreview.style.color = "var(--err)";
+        restorePreview.style.display = "";
+        restoreBtn.disabled = true;
+        return;
+      }
+      const s = body.summary || {};
+      const parts = [
+        `created ${body.created_at || "(unknown)"}`,
+        `${s.outputs_files || 0} transcript files`,
+        `${s.projects_files || 0} project files`,
+        body.include_uploads ? `${s.uploads_files || 0} upload files` : "no source media",
+        s.profiles_present ? "profiles.json" : "no profiles",
+        `total ${fmtBytes(s.total_bytes)}`,
+      ];
+      restorePreview.innerHTML = "<strong>Backup contents</strong>: " + parts.join(" · ");
+      restorePreview.style.color = "var(--muted)";
+      restorePreview.style.display = "";
+    } catch (e) {
+      restorePreview.textContent = "Could not read backup: " + (e.message || e);
+      restorePreview.style.color = "var(--err)";
+      restorePreview.style.display = "";
+      restoreBtn.disabled = true;
+    }
+  });
+
+  restoreBtn.addEventListener("click", async () => {
+    if (!_restoreSelectedFile) return;
+    if (!confirm(
+      "Restore will overwrite the current install:\n" +
+      "  · every transcript in outputs/\n" +
+      "  · every project, codebook, memo, suggestion in projects/\n" +
+      "  · profiles.json\n\n" +
+      "Existing files NOT in the backup will be removed. The .env / HF_TOKEN is untouched.\n\n" +
+      "Continue?"
+    )) return;
+    restoreBtn.disabled = true;
+    restoreStatus.textContent = "Restoring…";
+    restoreStatus.style.color = "var(--muted)";
+    const fd = new FormData();
+    fd.append("file", _restoreSelectedFile);
+    fd.append("force", "true");
+    fd.append("include_uploads", incUploadsRestore.checked ? "true" : "false");
+    try {
+      const r = await fetch("/api/restore", {method: "POST", body: fd});
+      const body = await r.json();
+      if (!r.ok) {
+        throw new Error(body.detail || `HTTP ${r.status}`);
+      }
+      restoreStatus.style.color = "var(--ok)";
+      restoreStatus.textContent =
+        `Restored ${body.outputs_files || 0} transcripts, ` +
+        `${body.projects_files || 0} project files, ` +
+        `${body.uploads_files || 0} upload files. Reload the page.`;
+    } catch (e) {
+      restoreStatus.style.color = "var(--err)";
+      restoreStatus.textContent = "Restore failed: " + (e.message || e);
+      restoreBtn.disabled = false;
+    }
+  });
+})();
 </script>
 {% endblock %}
