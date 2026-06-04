@@ -186,8 +186,10 @@
     .segment {
       position: relative;
       display: grid;
-      grid-template-columns: 110px 1fr 84px;
-      gap: 12px;
+      /* Meta column widened so handle + timestamp + speaker chip
+         can sit on one row without truncating long speaker names. */
+      grid-template-columns: 200px 1fr 84px;
+      gap: 10px;
       /* Tightened from 10px 8px 12px / margin-bottom: 4px so the
          transcript reads as a continuous body rather than a list of
          widely-spaced paragraphs. Font sizes + line-height are
@@ -218,11 +220,23 @@
     .segment.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
     .segment.drop-after  { box-shadow: inset 0 -2px 0 var(--accent); }
     .segment .meta {
+      /* Single horizontal row: ⋮⋮ handle, [hh:mm:ss] timestamp,
+         then the speaker chip. The previous flex-column layout
+         stacked them and burned three rows of height per segment.
+         min-width: 0 lets the speaker chip shrink + ellipsise on a
+         very long custom name rather than blow out the column. */
       display: flex;
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 2px;
-      padding-top: 1px;
+      flex-direction: row;
+      align-items: center;
+      gap: 6px;
+      padding-top: 2px;
+      min-width: 0;
+    }
+    .segment .meta .seg-speaker {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .seg-time {
       color: var(--muted);
