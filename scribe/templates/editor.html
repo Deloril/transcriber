@@ -143,8 +143,8 @@
     }
 
     /* Main editor area */
-    main { padding: 22px 28px 200px; max-width: 1100px; width: 100%; margin: 0 auto; }
-    .hint-bar { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+    main { padding: 14px 28px 120px; max-width: 1100px; width: 100%; margin: 0 auto; }
+    .hint-bar { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
     .hint-bar kbd {
       background: var(--panel-2);
       border: 1px solid var(--border);
@@ -160,11 +160,11 @@
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      padding: 10px 12px;
+      padding: 6px 10px;
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 10px;
-      margin-bottom: 18px;
+      margin-bottom: 8px;
       align-items: center;
     }
     .speakers-bar .label { color: var(--muted); font-size: 12px; margin-right: 6px; }
@@ -188,9 +188,13 @@
       display: grid;
       grid-template-columns: 110px 1fr 84px;
       gap: 12px;
-      padding: 10px 8px 12px;
-      border-radius: 10px;
-      margin-bottom: 4px;
+      /* Tightened from 10px 8px 12px / margin-bottom: 4px so the
+         transcript reads as a continuous body rather than a list of
+         widely-spaced paragraphs. Font sizes + line-height are
+         unchanged; only the padding around each row shrinks. */
+      padding: 3px 8px 4px;
+      border-radius: 8px;
+      margin-bottom: 0;
     }
     .segment.current { background: rgba(122,167,255,.06); }
     /* Drag-and-drop affordance. The handle is draggable, the rest of
@@ -217,7 +221,7 @@
       display: flex;
       flex-direction: column;
       align-items: flex-start;
-      gap: 4px;
+      gap: 2px;
       padding-top: 1px;
     }
     .seg-time {
@@ -248,9 +252,13 @@
       outline: none;
       font-family: var(--reader);
       font-size: 15.5px;
-      line-height: 1.7;
+      /* Was 1.7 — too tall for a long transcript; the row felt like
+         a paragraph in a magazine layout. 1.45 is still comfortable
+         for prose without padding the rows out. Font size is
+         deliberately unchanged. */
+      line-height: 1.45;
       letter-spacing: .003em;
-      padding: 4px 8px;
+      padding: 2px 8px;
       border-radius: 6px;
       border: 1px solid transparent;
       white-space: pre-wrap;
