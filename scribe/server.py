@@ -12480,10 +12480,53 @@ async def download(job_id: str, kind: str) -> FileResponse:
         if kind not in job.output_paths:
             raise HTTPException(404, f"Format '{kind}' not available")
         rel = job.output_paths[kind]
+        display_name = (job.display_name or "").strip()
+        input_filename = job.input_filename or ""
     full = (ROOT / rel).resolve()
     if not _is_under(full, OUTPUT_DIR):
         raise HTTPException(403, "Forbidden")
-    return FileResponse(full, filename=full.name)
+    # Honour the user's library rename. ``display_name`` is the
+    # human-friendly label they typed; ``input_filename`` is the
+    # original upload's name. Fall back to ``full.name`` (the
+    # actual on-disk file) only when neither is set, so a download
+    # always lands with *something* recognisable.
+    filename = _download_filename(display_name, input_filename, full.name, kind)
+    return FileResponse(full, filename=filename)
+
+
+_DOWNLOAD_NAME_UNSAFE_RE = re.compile(r'[\x00-\x1f<>:"/\\|?*]')
+_DOWNLOAD_NAME_MAX_STEM_LEN = 200
+
+
+def _download_filename(
+    display_name: str, input_filename: str, on_disk_name: str, kind: str,
+) -> str:
+    """Pick the filename to attach to a transcript download.
+
+    Prefers the user's rename (``display_name``) over the original
+    upload filename, falling back to the file's actual on-disk name
+    only when nothing else is set. Strips characters that are invalid
+    in filenames on Windows / macOS (``< > : " / \\ | ? *`` plus
+    control bytes), collapses internal whitespace, and caps the stem
+    length so a wildly-long rename can't produce a filename Finder /
+    Explorer refuses to save.
+
+    Always replaces / appends the extension so the kind is honest:
+    a JSON download named ``meeting.txt`` would mislead an importer.
+    """
+    label = (display_name or input_filename or on_disk_name or "transcript").strip()
+    # Drop the existing extension if it matches the kind already; we
+    # add it back below. Strip any other extension off the original
+    # filename (``.wav`` from the upload, etc.) so the result is
+    # ``<stem>.<kind>`` regardless of where the label came from.
+    stem = label.rsplit(".", 1)[0] if "." in label else label
+    stem = _DOWNLOAD_NAME_UNSAFE_RE.sub("_", stem)
+    stem = re.sub(r"\s+", " ", stem).strip(" .")
+    if not stem:
+        stem = "transcript"
+    if len(stem) > _DOWNLOAD_NAME_MAX_STEM_LEN:
+        stem = stem[:_DOWNLOAD_NAME_MAX_STEM_LEN].rstrip(" .") or "transcript"
+    return f"{stem}.{kind}"
 
 
 # --------------------------------------------------------------------------- #
