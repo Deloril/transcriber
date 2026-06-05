@@ -133,11 +133,16 @@ function renderHead(schema) {
   // F3.3: a per-source "Participants" count column. Cheap inverse
   // navigation that lets the researcher spot a focus-group source
   // (multiple participants) at a glance.
+  // Code-count columns: total applications (coded spans) and the
+  // number of distinct codes used on this source. Lets the
+  // researcher see at a glance which sources are under-coded.
   tr.innerHTML = `
     <th>Name</th>
     <th>Type</th>
     <th>Language</th>
     <th title="Participants linked to this source (F3.3)" data-test-id="src-list-parts-col">Participants</th>
+    <th title="Total coded spans (applications) on this source" data-test-id="src-list-apps-col">Coded spans</th>
+    <th title="Number of distinct codes that have at least one application on this source" data-test-id="src-list-codes-col">Distinct codes</th>
     <th>Added</th>
   `;
   // F3.2 — append a column per schema attribute, in declared order.
@@ -160,17 +165,26 @@ function renderHead(schema) {
   head.appendChild(tr);
 }
 
-function renderRow(s, schema, partMap) {
+function renderRow(s, schema, partMap, codeCounts) {
   const tr = document.createElement("tr");
   const partIds = (partMap && partMap[s.id]) || [];
   const partCell = partIds.length
     ? `<td class="hint" data-test-id="src-list-part-count">${partIds.length}</td>`
     : `<td class="hint" data-test-id="src-list-part-count">—</td>`;
+  const counts = (codeCounts && codeCounts[s.id]) || { applications: 0, distinct_codes: 0 };
+  const appsCell = counts.applications
+    ? `<td class="hint" data-test-id="src-list-apps-count">${counts.applications}</td>`
+    : `<td class="hint" data-test-id="src-list-apps-count">—</td>`;
+  const codesCell = counts.distinct_codes
+    ? `<td class="hint" data-test-id="src-list-codes-count">${counts.distinct_codes}</td>`
+    : `<td class="hint" data-test-id="src-list-codes-count">—</td>`;
   const cells = [
     `<td><a href="/projects/${PROJECT_ID}/sources/${escapeHtml(s.id)}"><strong>${escapeHtml(s.name || "(unnamed)")}</strong></a></td>`,
     `<td>${escapeHtml(s.source_type || "transcript")}</td>`,
     `<td>${escapeHtml((s.language || "—").toUpperCase())}</td>`,
     partCell,
+    appsCell,
+    codesCell,
     `<td class="hint">${fmtDate(s.created_at)}</td>`,
   ];
   const attrs = (s.custom_attributes && typeof s.custom_attributes === "object")
@@ -218,19 +232,51 @@ async function fetchParticipantSourceMap() {
   }
 }
 
+async function fetchCodeCounts() {
+  // Build {source_id: {applications, distinct_codes}} by scanning
+  // the project's applications list. Single GET — the API already
+  // returns every application; we group client-side. Failures fall
+  // back to an empty map so the list still renders even if the
+  // applications endpoint is misbehaving.
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/applications`);
+    if (!r.ok) return {};
+    const data = await r.json();
+    const apps = Array.isArray(data && data.applications) ? data.applications : [];
+    const out = {};
+    for (const a of apps) {
+      const sid = a && a.source_id;
+      if (!sid) continue;
+      if (!out[sid]) out[sid] = { applications: 0, _codes: new Set() };
+      out[sid].applications += 1;
+      if (a.code_id) out[sid]._codes.add(a.code_id);
+    }
+    // Materialise the distinct count and drop the temp Set so the
+    // shape downstream is plain JSON-style {applications, distinct_codes}.
+    Object.keys(out).forEach(k => {
+      out[k].distinct_codes = out[k]._codes.size;
+      delete out[k]._codes;
+    });
+    return out;
+  } catch (_) {
+    return {};
+  }
+}
+
 async function load() {
   const loading = document.getElementById("loading");
   const card = document.getElementById("sourcesCard");
   const empty = document.getElementById("emptyState");
   const error = document.getElementById("errorState");
   try {
-    const [sourcesResp, schema, partMap] = await Promise.all([
+    const [sourcesResp, schema, partMap, codeCounts] = await Promise.all([
       fetch(`/api/projects/${PROJECT_ID}/sources`).then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       }),
       fetchSchema(),
       fetchParticipantSourceMap(),
+      fetchCodeCounts(),
     ]);
     const list = sourcesResp.sources || [];
     loading.style.display = "none";
@@ -238,7 +284,7 @@ async function load() {
     renderHead(schema);
     const body = document.getElementById("sourcesBody");
     body.innerHTML = "";
-    list.forEach(s => body.appendChild(renderRow(s, schema, partMap)));
+    list.forEach(s => body.appendChild(renderRow(s, schema, partMap, codeCounts)));
     card.style.display = "";
   } catch (e) {
     loading.style.display = "none";
