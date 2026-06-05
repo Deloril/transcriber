@@ -161,6 +161,13 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+# Public, versioned, read-only API for machine clients (LLMs / MCP /
+# scripts). See scribe.api_v1 for the design rationale; the router
+# applies its own bearer-token auth dependency to every endpoint, so
+# mounting it doesn't loosen security on the rest of the app.
+from . import api_v1 as _api_v1  # noqa: E402  (after FastAPI import)
+app.include_router(_api_v1.router)
+
 
 # --------------------------------------------------------------------------- #
 # Persistence
@@ -12705,6 +12712,82 @@ async def restore_endpoint(
         # Restore succeeded; reloading is best-effort.
         print(f"[scribe] post-restore reload failed: {e}", flush=True)
     return JSONResponse(summary.to_dict())
+
+
+# --------------------------------------------------------------------------- #
+# API key management — local-only, no auth.
+#
+# These three routes serve the Settings page's "API keys" card so the
+# user can mint / list / revoke keys from a browser tab on the same
+# machine the server is running on. They live under /api/settings
+# (which has no /api/v1/ bearer-token gate) on purpose: managing keys
+# from outside the localhost UI is a footgun that the explicit CLI
+# (scripts/api_keys.py) covers anyway.
+# --------------------------------------------------------------------------- #
+
+
+from . import api_auth as _api_auth  # noqa: E402  (after module-level state)
+
+
+@app.get("/api/settings/api_keys")
+async def list_api_keys_endpoint() -> JSONResponse:
+    """List API keys (id, label, created_at, last_used_at).
+
+    Plaintext is never returned — the user only sees it once at
+    mint time. ``hash`` is also omitted from the response so a
+    misconfigured page can't leak the verifier.
+    """
+    keys = _api_auth.load_keys()
+    return JSONResponse({
+        "keys": [
+            {
+                "id": k.id,
+                "label": k.label,
+                "created_at": k.created_at,
+                "last_used_at": k.last_used_at,
+            }
+            for k in keys
+        ],
+    })
+
+
+@app.post("/api/settings/api_keys")
+async def mint_api_key_endpoint(request: Request) -> JSONResponse:
+    """Mint a new API key.
+
+    Body: ``{"label": "claude-mcp"}`` (label is required, ≤200
+    chars). Returns ``{"key": {…}, "plaintext": "sk_scribe_…"}`` —
+    the plaintext is the *only* way to recover the token, ever.
+    The Settings page surfaces it in a one-time disclosure block.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected JSON object")
+    label = (body.get("label") or "").strip()
+    if not label:
+        raise HTTPException(400, "label is required")
+    record, plaintext = _api_auth.mint_api_key(label)
+    return JSONResponse({
+        "key": {
+            "id": record.id,
+            "label": record.label,
+            "created_at": record.created_at,
+            "last_used_at": record.last_used_at,
+        },
+        "plaintext": plaintext,
+    })
+
+
+@app.delete("/api/settings/api_keys/{key_id}")
+async def revoke_api_key_endpoint(key_id: str) -> JSONResponse:
+    if not key_id or not key_id.startswith("key-"):
+        raise HTTPException(400, "Invalid key id")
+    if not _api_auth.revoke_api_key(key_id):
+        raise HTTPException(404, "Key not found")
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/settings/hf_token")

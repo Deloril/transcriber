@@ -54,6 +54,59 @@
     <div id="caps" class="hint" style="margin-top:8px">Loading…</div>
   </div>
 
+  <div class="card" data-test-id="settings-api-keys-card">
+    <h2>API keys</h2>
+    <div class="hint">
+      Tokens for the read-only <code>/api/v1/</code> namespace —
+      what an LLM client (Claude API, MCP server, your own scripts)
+      uses to talk to Scribe. Keys are stored hashed on disk; the
+      plaintext is shown <strong>once</strong> at mint time and
+      can't be recovered. See <a href="/api/v1/" target="_blank" rel="noopener"
+      data-test-id="settings-api-keys-discovery-link">/api/v1/</a>
+      for the endpoint catalogue (requires a key to view).
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:12px">
+      <input type="text" id="apiKeyLabel"
+             data-test-id="settings-api-keys-label"
+             placeholder="Label (e.g. claude-mcp)"
+             style="flex:1;padding:6px 10px;font-size:13px">
+      <button type="button" id="apiKeyMintBtn"
+              data-test-id="settings-api-keys-mint">Mint key</button>
+    </div>
+    <div id="apiKeyDisclosure"
+         data-test-id="settings-api-keys-disclosure"
+         style="display:none;margin-top:10px;padding:10px 12px;
+                border:1px solid var(--accent);border-radius:6px;
+                background:var(--accent-soft)">
+      <div style="font-weight:600;margin-bottom:4px">
+        Copy this key now — it won't be shown again.
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <code id="apiKeyPlaintext" style="flex:1;font-size:12px;
+              padding:6px 8px;background:var(--panel);border-radius:4px;
+              word-break:break-all"></code>
+        <button type="button" id="apiKeyCopyBtn">Copy</button>
+        <button type="button" id="apiKeyDismissBtn">Done</button>
+      </div>
+    </div>
+    <table id="apiKeyList" data-test-id="settings-api-keys-list"
+           style="width:100%;margin-top:12px;font-size:13px;
+                  border-collapse:collapse">
+      <thead>
+        <tr style="text-align:left;color:var(--muted);font-weight:500;
+                   border-bottom:1px solid var(--border)">
+          <th style="padding:6px 8px">Label</th>
+          <th style="padding:6px 8px">ID</th>
+          <th style="padding:6px 8px">Created</th>
+          <th style="padding:6px 8px">Last used</th>
+          <th style="padding:6px 8px"></th>
+        </tr>
+      </thead>
+      <tbody id="apiKeyTbody"><tr><td colspan="5" style="padding:8px;color:var(--muted)">Loading…</td></tr></tbody>
+    </table>
+    <div id="apiKeyStatus" class="hint" style="margin-top:6px"></div>
+  </div>
+
   <div class="card" data-test-id="settings-backup-card">
     <h2>Backup &amp; restore</h2>
     <div class="hint">
@@ -303,6 +356,132 @@ fetch("/api/system/model-recommendations")
       restoreBtn.disabled = false;
     }
   });
+})();
+
+// -------- API key management -------- //
+//
+// The plaintext token is shown exactly once at mint time. We never
+// re-fetch or display it later — the server doesn't keep it.
+(function setupApiKeyManager() {
+  const labelEl = document.getElementById("apiKeyLabel");
+  const mintBtn = document.getElementById("apiKeyMintBtn");
+  const tbody = document.getElementById("apiKeyTbody");
+  const status = document.getElementById("apiKeyStatus");
+  const disclosure = document.getElementById("apiKeyDisclosure");
+  const plaintextEl = document.getElementById("apiKeyPlaintext");
+  const copyBtn = document.getElementById("apiKeyCopyBtn");
+  const dismissBtn = document.getElementById("apiKeyDismissBtn");
+  if (!labelEl || !mintBtn || !tbody) return;
+
+  const _esc = (s) => String(s == null ? "" : s)
+    .replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+
+  async function refresh() {
+    try {
+      const r = await fetch("/api/settings/api_keys");
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+      renderRows(body.keys || []);
+    } catch (e) {
+      tbody.innerHTML =
+        `<tr><td colspan="5" style="padding:8px;color:var(--err)">Could not load: ${_esc(e.message || e)}</td></tr>`;
+    }
+  }
+
+  function renderRows(keys) {
+    if (!keys.length) {
+      tbody.innerHTML =
+        `<tr><td colspan="5" style="padding:8px;color:var(--muted)">No API keys yet. Mint one above to start using <code>/api/v1/</code>.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = keys.map(k => `
+      <tr style="border-bottom:1px solid var(--border)" data-key-id="${_esc(k.id)}">
+        <td style="padding:6px 8px"><strong>${_esc(k.label)}</strong></td>
+        <td style="padding:6px 8px"><code>${_esc(k.id)}</code></td>
+        <td style="padding:6px 8px;color:var(--muted)">${_esc((k.created_at || "").slice(0, 10))}</td>
+        <td style="padding:6px 8px;color:var(--muted)">${_esc(k.last_used_at ? k.last_used_at.slice(0, 16).replace("T", " ") : "(never)")}</td>
+        <td style="padding:6px 8px;text-align:right">
+          <button type="button" class="apiKeyRevokeBtn" data-key-id="${_esc(k.id)}"
+                  data-test-id="settings-api-keys-revoke">Revoke</button>
+        </td>
+      </tr>
+    `).join("");
+    tbody.querySelectorAll(".apiKeyRevokeBtn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.keyId;
+        if (!confirm(`Revoke key ${id}?\n\nAny client using this key will stop working immediately.`)) return;
+        btn.disabled = true;
+        try {
+          const r = await fetch(`/api/settings/api_keys/${encodeURIComponent(id)}`, {
+            method: "DELETE",
+          });
+          if (!r.ok) {
+            const body = await r.json().catch(() => ({}));
+            throw new Error(body.detail || `HTTP ${r.status}`);
+          }
+          status.style.color = "var(--ok)";
+          status.textContent = `Revoked ${id}.`;
+          refresh();
+        } catch (e) {
+          status.style.color = "var(--err)";
+          status.textContent = "Revoke failed: " + (e.message || e);
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  mintBtn.addEventListener("click", async () => {
+    const label = (labelEl.value || "").trim();
+    if (!label) {
+      status.style.color = "var(--err)";
+      status.textContent = "Label is required.";
+      return;
+    }
+    mintBtn.disabled = true;
+    status.textContent = "";
+    try {
+      const r = await fetch("/api/settings/api_keys", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({label}),
+      });
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+      plaintextEl.textContent = body.plaintext;
+      disclosure.style.display = "";
+      labelEl.value = "";
+      refresh();
+    } catch (e) {
+      status.style.color = "var(--err)";
+      status.textContent = "Mint failed: " + (e.message || e);
+    } finally {
+      mintBtn.disabled = false;
+    }
+  });
+
+  copyBtn.addEventListener("click", async () => {
+    const text = plaintextEl.textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+    } catch (_e) {
+      // Fallback: select the element so the user can Cmd+C / Ctrl+C.
+      const range = document.createRange();
+      range.selectNode(plaintextEl);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  });
+
+  dismissBtn.addEventListener("click", () => {
+    plaintextEl.textContent = "";
+    disclosure.style.display = "none";
+  });
+
+  refresh();
 })();
 </script>
 {% endblock %}
