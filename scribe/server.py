@@ -894,6 +894,34 @@ async def readme_fragment() -> HTMLResponse:
     return HTMLResponse(_render_readme())
 
 
+# Raw markdown helper for the consumer-side Claude Code prompt.
+# Lets a Claude session on a *different* laptop fetch the API
+# guidance with a single curl, no auth required (the document
+# itself is generic and the user still needs an API key to
+# actually call /api/v1/, so there's no leak in serving this).
+_API_PROMPT_PATH = ROOT / "docs" / "scribe-api-claude-prompt.md"
+
+
+@app.get("/docs/api-claude-prompt", response_class=Response)
+async def api_claude_prompt() -> Response:
+    """Serve docs/scribe-api-claude-prompt.md as raw markdown.
+
+    Use case: on a consumer machine, drop the file into a directory
+    so Claude Code auto-loads it as ``CLAUDE.md`` context::
+
+        mkdir -p ~/scribe-client && cd ~/scribe-client
+        curl -s http://<scribe-host>:8765/docs/api-claude-prompt > CLAUDE.md
+        claude
+    """
+    if not _API_PROMPT_PATH.is_file():
+        raise HTTPException(404, "API prompt doc missing on this install.")
+    return Response(
+        content=_API_PROMPT_PATH.read_text(encoding="utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Profiles — server-side defaults you can apply per recording
 # --------------------------------------------------------------------------- #
