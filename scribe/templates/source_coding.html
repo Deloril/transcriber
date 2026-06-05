@@ -133,6 +133,40 @@
     cursor: pointer;
   }
   .seg .seg-gutter .lane-bar:hover { opacity: 1; }
+  /* Floating "📝 New memo" button anchored next to a lane-bar.
+     Hidden until the bar (or the segment) is hovered so the gutter
+     stays clean, then offered as a one-click affordance for "memo
+     about this coded span." Clicks the same openMemoComposer path
+     the right-click menu uses. */
+  .seg .seg-gutter .lane-memo-btn {
+    position: absolute;
+    top: 2px;
+    /* Sit just to the right of the lane-bar (lane-bar is 4px wide,
+       so left = lane*8 + 6 puts the button cleanly off the bar). */
+    width: 18px; height: 18px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: var(--panel);
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 5;
+  }
+  .seg:hover .seg-gutter .lane-memo-btn,
+  .seg .seg-gutter .lane-bar:hover ~ .lane-memo-btn,
+  .seg .seg-gutter .lane-memo-btn:focus,
+  .seg .seg-gutter .lane-memo-btn:hover {
+    display: inline-flex;
+  }
+  .seg .seg-gutter .lane-memo-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
   /* Stack-depth badge — shown when the segment has 4+ overlapping
      codes, the threshold past which in-text highlights become hard
      to read (F4.3 design rationale). */
@@ -1703,6 +1737,15 @@ async function loadSpeakerMap() {
       } catch (_) { /* non-fatal */ }
     }
     renderSpeakerMap();
+    // Re-paint transcript meta lines so any display_name change in
+    // the speaker map (or rename done in the editor) reflects in the
+    // segment headers. Cheap because it only re-renders on map load.
+    if (TRANSCRIPT && (TRANSCRIPT.segments || []).length) {
+      renderTranscript();
+      // The gutter is layered onto the transcript and needs re-paint
+      // after the segments are regenerated.
+      renderGutter();
+    }
     // Fire-and-forget — the distribution is decorative.
     loadSpeakerMapDistribution();
   } catch (e) {
@@ -1881,6 +1924,31 @@ document.getElementById("saveSpkBtn").addEventListener("click", async () => {
   } finally { btn.disabled = false; }
 });
 
+// Resolve the display name for a raw segment ``speaker`` label.
+// Two sources, in priority order:
+//   1. The speaker_map entry's ``display_name`` (set in this view's
+//      Speakers panel) — authoritative for coding work.
+//   2. The transcription editor's top-level ``speaker_names`` rename
+//      map (saved into edited.json by the editor) — what the user
+//      typed when they relabelled SPEAKER_00 to "Maria".
+// Falls back to the raw label so an unmapped speaker still shows up
+// rather than rendering as "—".
+function speakerDisplayName(rawLabel) {
+  if (!rawLabel) return "—";
+  // 1. speaker_map override
+  const entry = SPK_ENTRIES_BY_LABEL && SPK_ENTRIES_BY_LABEL.get(rawLabel);
+  if (entry && entry.display_name && entry.display_name.trim()) {
+    return entry.display_name.trim();
+  }
+  // 2. editor rename map (saved on edited.json under speaker_names)
+  const editorMap = TRANSCRIPT && TRANSCRIPT.speaker_names;
+  if (editorMap && typeof editorMap === "object") {
+    const v = editorMap[rawLabel];
+    if (v && String(v).trim()) return String(v).trim();
+  }
+  return rawLabel;
+}
+
 function renderTranscript() {
   const root = document.getElementById("transcript");
   root.innerHTML = "";
@@ -1900,7 +1968,7 @@ function renderTranscript() {
 
     const meta = document.createElement("div");
     meta.className = "meta";
-    const speaker = seg.speaker || "—";
+    const speaker = speakerDisplayName(seg.speaker);
     const start = formatTime(seg.start);
     meta.innerHTML = `<span class="speaker">${escapeHtml(speaker)}</span> · ${start}`;
     textCol.appendChild(meta);
@@ -2084,6 +2152,20 @@ function renderGutter() {
       // delegate keys off of.
       bar.dataset.provHover = "F9.9";
       gutter.appendChild(bar);
+      // Floating "📝 New memo" button anchored to this lane-bar.
+      // Sits just to the right of the bar; hidden until the segment
+      // is hovered (CSS rule above) so the gutter stays uncluttered.
+      // Click → openMemoComposer("application", a.id).
+      const memoBtn = document.createElement("button");
+      memoBtn.type = "button";
+      memoBtn.className = "lane-memo-btn";
+      memoBtn.dataset.appId = a.id;
+      memoBtn.dataset.testId = "gutter-lane-memo";
+      memoBtn.title = `Write a memo about: ${codeName}`;
+      memoBtn.setAttribute("aria-label", memoBtn.title);
+      memoBtn.textContent = "📝";
+      memoBtn.style.left = `${lane * 8 + 6}px`;
+      gutter.appendChild(memoBtn);
       painted += 1;
       const sd = stackOf.get(a.id) || 0;
       if (sd > maxStack) maxStack = sd;
@@ -3798,6 +3880,21 @@ document.addEventListener("click", (e) => {
   e.preventDefault();
   e.stopPropagation();
   playApplication(aid);
+});
+
+// Floating "📝 New memo" button next to each lane-bar. Same delegate
+// pattern as the lane-bar click — survives renderGutter() rebuilding
+// the gutter children.
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".lane-memo-btn[data-app-id]");
+  if (!btn) return;
+  const root = document.getElementById("transcript");
+  if (!root || !root.contains(btn)) return;
+  const aid = btn.dataset.appId;
+  if (!aid) return;
+  e.preventDefault();
+  e.stopPropagation();
+  openMemoComposer("application", aid);
 });
 
 function renderCodebookSummary() {
