@@ -193,6 +193,109 @@
   }
   .seg .word.in-selection { background: rgba(122,167,255,.25); }
 
+  /* Click-to-edit popover. Shown when the user clicks a coded word
+     (.word.is-applied). Lists every application that covers the
+     clicked word with a swatch, the current code name, a "Change…"
+     button that opens the code picker for replacement, and a
+     "Remove" button. Replacement is implemented as DELETE +
+     POST under the hood — code_id isn't updatable in-place
+     because the audit trail treats a recode as a new application. */
+  .edit-popover {
+    position: absolute;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px;
+    box-shadow: var(--shadow);
+    z-index: 60;
+    display: none;
+    min-width: 240px;
+    max-width: 320px;
+  }
+  .edit-popover.open { display: block; }
+  .edit-popover .edit-header {
+    color: var(--muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    padding: 0 2px 6px;
+    border-bottom: 1px dashed var(--border);
+    margin-bottom: 4px;
+  }
+  .edit-popover .edit-app-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .edit-popover .edit-app-row:hover { background: var(--panel-2); }
+  .edit-popover .edit-app-row .swatch {
+    flex: 0 0 auto;
+    width: 9px; height: 9px;
+    border-radius: 2px;
+  }
+  .edit-popover .edit-app-row .name {
+    flex: 1; min-width: 0;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .edit-popover .edit-app-row button {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .edit-popover .edit-app-row button[data-act="change"]:hover {
+    color: var(--accent); border-color: var(--accent);
+  }
+  .edit-popover .edit-app-row button[data-act="remove"]:hover {
+    color: var(--err); border-color: var(--err);
+  }
+  /* When the popover is in "pick a replacement code" sub-state, the
+     code list reuses the same .pop-list / .pop-row styles as the
+     apply popover so visual treatment stays consistent. */
+  .edit-popover .edit-pick-header {
+    font-size: 11px;
+    color: var(--muted);
+    padding: 4px 6px 6px;
+  }
+  .edit-popover .pop-search {
+    width: 100%;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 12px;
+    margin-bottom: 4px;
+    box-sizing: border-box;
+  }
+  .edit-popover .pop-list { max-height: 180px; overflow-y: auto; }
+  .edit-popover .pop-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .edit-popover .pop-row:hover { background: var(--panel-2); }
+  .edit-popover .pop-row .swatch {
+    flex: 0 0 auto;
+    width: 9px; height: 9px;
+    border-radius: 2px;
+  }
+  .edit-popover .pop-row .row-label {
+    flex: 1; min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   /* Floating "apply code" popover above the selection. */
   .apply-popover {
     position: absolute;
@@ -1094,6 +1197,25 @@
              preload="none"
              style="display:none"></audio>
     </div>
+  </div>
+</div>
+
+<!-- Click-to-edit popover. Shown when a coded word is clicked. Two
+     sub-states: list the covering applications (default) and "pick a
+     replacement code" (after the user clicks Change). The
+     pop-search + pop-list reuse the apply-popover styling so visual
+     treatment stays consistent. -->
+<div id="editPopover" class="edit-popover" role="dialog" aria-label="Edit code on this span">
+  <div class="edit-header" data-test-id="edit-popover-header">Edit codes on this span</div>
+  <div id="editAppRows"></div>
+  <div id="editPickArea" style="display:none">
+    <div class="edit-pick-header" data-test-id="edit-popover-pick-header">
+      Replace with…
+    </div>
+    <input id="editPopSearch" class="pop-search" type="text"
+           placeholder="Filter codes…" aria-label="Filter codes">
+    <div id="editPopList" class="pop-list"
+         data-test-id="edit-popover-pick-list"></div>
   </div>
 </div>
 
@@ -3042,6 +3164,279 @@ async function applyCode(codeId) {
     alert(`Couldn't apply code: ${e.message}`);
   }
 }
+
+// ---------- Click-to-edit highlighted code ----------
+//
+// Clicking a highlighted (`.word.is-applied`) word — without a drag
+// selection — opens an "edit codes on this span" popover anchored
+// to the clicked word. The popover lists every application that
+// covers the clicked word (a word can carry multiple stacked codes)
+// with two affordances per row:
+//
+//   * Change   — opens an inline code-picker; selecting a code
+//                does DELETE old + POST new application against the
+//                same anchor range. ``code_id`` isn't updatable in
+//                place because the audit trail treats a recode as a
+//                new application (see Application.apply_update
+//                docstring in scribe/applications.py). The two-step
+//                here matches that semantics: the old application's
+//                deletion is logged, the new application is logged.
+//   * Remove   — DELETE the application without replacement; same
+//                semantics as the side-panel Remove button.
+//
+// The popover dismisses on outside click, on Escape, and after any
+// successful mutation.
+
+let EDIT_TARGET_APP_ID = null;       // the application being changed
+let EDIT_ANCHOR_WORD_ID = null;      // word id the popover is anchored to
+
+function applicationsCoveringWord(wordId) {
+  // Linear scan — fine for the per-source app counts we deal with.
+  // An application "covers" a word when the word lies between the
+  // application's anchor_start_word_id and anchor_end_word_id (both
+  // inclusive). The compareWordIds helper handles cross-segment
+  // ranges via the (segIdx, wordIdx) lex order.
+  return APPS.filter(a => {
+    const lo = compareWordIds(a.anchor_start_word_id, a.anchor_end_word_id) <= 0
+      ? a.anchor_start_word_id
+      : a.anchor_end_word_id;
+    const hi = lo === a.anchor_start_word_id
+      ? a.anchor_end_word_id
+      : a.anchor_start_word_id;
+    return compareWordIds(wordId, lo) >= 0
+        && compareWordIds(wordId, hi) <= 0;
+  });
+}
+
+function showEditPopoverAt(wordEl, apps) {
+  const pop = document.getElementById("editPopover");
+  if (!pop) return;
+  EDIT_ANCHOR_WORD_ID = wordEl.dataset.wordId;
+  EDIT_TARGET_APP_ID = null;
+  // Default sub-state: show the list of covering applications.
+  document.getElementById("editPickArea").style.display = "none";
+  renderEditAppRows(apps);
+  // Position above the clicked word; if the popover would clip the
+  // top of the viewport, anchor below instead. Mirrors showPopover.
+  pop.classList.add("open");
+  const rect = wordEl.getBoundingClientRect();
+  const top = rect.top + window.scrollY - pop.offsetHeight - 8;
+  const left = rect.left + window.scrollX;
+  pop.style.top = `${Math.max(window.scrollY + 8, top)}px`;
+  pop.style.left = `${Math.max(8, left)}px`;
+}
+
+function hideEditPopover() {
+  const pop = document.getElementById("editPopover");
+  if (!pop) return;
+  pop.classList.remove("open");
+  EDIT_TARGET_APP_ID = null;
+  EDIT_ANCHOR_WORD_ID = null;
+}
+
+function renderEditAppRows(apps) {
+  const rows = document.getElementById("editAppRows");
+  if (!rows) return;
+  if (!apps.length) {
+    rows.innerHTML =
+      `<div class="hint" style="padding:6px">No coded application here.</div>`;
+    return;
+  }
+  rows.innerHTML = apps.map(a => {
+    const code = CODES.find(c => c.id === a.code_id);
+    const codeName = code
+      ? code.name
+      : `(deleted code ${(a.code_id || "").slice(0, 8)})`;
+    const colours = codeColours(code || { id: a.code_id });
+    return `<div class="edit-app-row" data-app-id="${escapeHtml(a.id)}"
+                 data-test-id="edit-app-row">
+      <span class="swatch" style="background:${colours.swatch}"></span>
+      <span class="name">${escapeHtml(codeName)}</span>
+      <button type="button" data-act="change"
+              data-test-id="edit-change-btn"
+              title="Replace with another code">Change…</button>
+      <button type="button" data-act="remove"
+              data-test-id="edit-remove-btn"
+              title="Remove this code application">Remove</button>
+    </div>`;
+  }).join("");
+}
+
+function renderEditPickList(filter) {
+  const list = document.getElementById("editPopList");
+  if (!list) return;
+  const f = (filter || "").trim().toLowerCase();
+  const candidates = CODES.filter(
+    c => !f || (c.name || "").toLowerCase().includes(f)
+  );
+  if (!candidates.length) {
+    list.innerHTML =
+      `<div class="hint" style="padding:6px">No codes match "${escapeHtml(filter)}".</div>`;
+    return;
+  }
+  list.innerHTML = candidates.map(c => {
+    const swatch = `<span class="swatch" style="background:${codeColour(c)}"></span>`;
+    return `<div class="pop-row" data-code-id="${escapeHtml(c.id)}"
+                 data-test-id="edit-pick-row">${swatch}<span class="row-label">${escapeHtml(c.name)}</span></div>`;
+  }).join("");
+}
+
+async function recodeApplication(oldAppId, newCodeId) {
+  // Find the old application so we know which anchor + offsets to
+  // carry over. We POST the new application *first* so a network
+  // glitch on the second hop doesn't leave the user with the span
+  // un-coded; if the POST fails we never delete.
+  const old = APPS.find(a => a.id === oldAppId);
+  if (!old) return;
+  const payload = {
+    code_id: newCodeId,
+    source_id: old.source_id,
+    anchor_start_word_id: old.anchor_start_word_id,
+    anchor_end_word_id: old.anchor_end_word_id,
+  };
+  if (old.start_char_offset != null) payload.start_char_offset = old.start_char_offset;
+  if (old.end_char_offset != null) payload.end_char_offset = old.end_char_offset;
+  // Honour the active coder selection — don't silently reattribute
+  // a recode to a different coder than the one editing.
+  const activeCoderId = (typeof getActiveCoderId === "function")
+    ? getActiveCoderId() : "";
+  if (activeCoderId) payload.coder_id = activeCoderId;
+  try {
+    const r = await fetch(`/api/projects/${PROJECT_ID}/applications`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${r.status}`);
+    }
+    const newApp = await r.json();
+    // Now delete the old one. If this fails the user has duplicate
+    // applications — surface the error but don't roll back the new
+    // one (the user's intent was "code is now X" and X exists).
+    try {
+      const dr = await fetch(
+        `/api/projects/${PROJECT_ID}/applications/${oldAppId}`,
+        { method: "DELETE" },
+      );
+      if (!dr.ok) throw new Error(`HTTP ${dr.status}`);
+      APPS = APPS.filter(a => a.id !== oldAppId);
+    } catch (delErr) {
+      // eslint-disable-next-line no-console
+      console.warn("Recode: replacement created but old delete failed:", delErr);
+      alert(
+        `Replacement code applied, but couldn't remove the old code: ${delErr.message}. ` +
+        `You may need to remove the original from the side panel.`
+      );
+    }
+    APPS.push(newApp);
+    paintApplications();
+    renderApps();
+    refreshSpans();
+    renderGutter();
+  } catch (e) {
+    alert(`Couldn't change code: ${e.message}`);
+  } finally {
+    hideEditPopover();
+  }
+}
+
+async function removeApplicationById(appId) {
+  if (!confirm("Remove this application? The code itself isn't affected.")) {
+    return;
+  }
+  try {
+    const r = await fetch(
+      `/api/projects/${PROJECT_ID}/applications/${appId}`,
+      { method: "DELETE" },
+    );
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    APPS = APPS.filter(a => a.id !== appId);
+    paintApplications();
+    renderApps();
+    refreshSpans();
+    renderGutter();
+  } catch (err) {
+    alert(`Couldn't delete: ${err.message}`);
+  } finally {
+    hideEditPopover();
+  }
+}
+
+// Click delegate on the transcript root: clicking a coded word opens
+// the edit popover. Skipped when the user is in the middle of a drag
+// (selection isn't collapsed) — that path belongs to the apply
+// popover. Hooked once at script-load time so it survives transcript
+// re-renders.
+document.addEventListener("click", (e) => {
+  // Don't interfere with clicks on the controls inside our own
+  // popovers.
+  if (e.target.closest("#editPopover") || e.target.closest("#applyPopover")) {
+    return;
+  }
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+  const wordEl = e.target.closest(".word.is-applied");
+  if (!wordEl) {
+    // Outside-click → close the popover.
+    hideEditPopover();
+    return;
+  }
+  const root = document.getElementById("transcript");
+  if (!root || !root.contains(wordEl)) return;
+  const apps = applicationsCoveringWord(wordEl.dataset.wordId);
+  if (!apps.length) {
+    hideEditPopover();
+    return;
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  showEditPopoverAt(wordEl, apps);
+});
+
+// Edit popover delegate: handles Change / Remove on the row layer
+// and code-pick on the replacement layer.
+document.addEventListener("click", (e) => {
+  const pop = document.getElementById("editPopover");
+  if (!pop || !pop.contains(e.target)) return;
+  const changeBtn = e.target.closest("button[data-act='change']");
+  const removeBtn = e.target.closest("button[data-act='remove']");
+  if (changeBtn) {
+    const row = changeBtn.closest(".edit-app-row");
+    if (!row) return;
+    EDIT_TARGET_APP_ID = row.dataset.appId;
+    document.getElementById("editPickArea").style.display = "";
+    document.getElementById("editPopSearch").value = "";
+    renderEditPickList("");
+    setTimeout(() => document.getElementById("editPopSearch").focus(), 0);
+    return;
+  }
+  if (removeBtn) {
+    const row = removeBtn.closest(".edit-app-row");
+    if (!row) return;
+    removeApplicationById(row.dataset.appId);
+    return;
+  }
+  const pickRow = e.target.closest(".pop-row[data-code-id]");
+  if (pickRow && EDIT_TARGET_APP_ID) {
+    const cid = pickRow.dataset.codeId;
+    recodeApplication(EDIT_TARGET_APP_ID, cid);
+  }
+});
+
+document.getElementById("editPopSearch").addEventListener("input", (e) => {
+  renderEditPickList(e.target.value);
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  const pop = document.getElementById("editPopover");
+  if (pop && pop.classList.contains("open")) {
+    e.preventDefault();
+    hideEditPopover();
+  }
+});
 
 // F4.2 — fetch the per-code spans summary for this source and paint
 // the diagnostic panel. Called after every APPS mutation
