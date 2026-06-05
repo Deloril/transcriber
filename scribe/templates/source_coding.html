@@ -64,14 +64,24 @@
     margin-bottom: 14px;
     line-height: 1.65;
     font-size: 14px;
-    /* F4.3 — two-column layout: text on the left, gutter on the
-       right. The gutter only takes width when the source has at
-       least one application (renderGutter() sets --gutter-width
-       on .seg-row to lane_count * 8px + 4px). */
+    /* F4.3 — three-column layout: text, gutter, line number.
+       Gutter only takes width when the source has at least one
+       application (renderGutter() sets --gutter-width on .seg to
+       lane_count * 8px + 4px). The line-number column is always
+       reserved at 36px so the transcript's right margin stays
+       aligned across rows. */
     display: grid;
-    grid-template-columns: minmax(0, 1fr) var(--gutter-width, 0px);
+    grid-template-columns: minmax(0, 1fr) var(--gutter-width, 0px) 36px;
     column-gap: 10px;
     align-items: start;
+  }
+  .seg .seg-lineno {
+    color: var(--muted-2, var(--muted));
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    padding-top: 2px;
+    user-select: none;
   }
   .seg .seg-text { min-width: 0; }
   .seg .meta {
@@ -1919,6 +1929,15 @@ function renderTranscript() {
     gutter.dataset.segIdx = segIdx;
     gutter.setAttribute("aria-label", "Code gutter");
     segEl.appendChild(gutter);
+
+    // Line number — right-margin annotation for "see line 42" style
+    // references. 1-based; reflects the segment's position in the
+    // transcript as currently loaded.
+    const lineno = document.createElement("div");
+    lineno.className = "seg-lineno";
+    lineno.textContent = String(segIdx + 1);
+    lineno.title = `Line ${segIdx + 1}`;
+    segEl.appendChild(lineno);
 
     root.appendChild(segEl);
   });

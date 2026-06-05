@@ -187,8 +187,10 @@
       position: relative;
       display: grid;
       /* Meta column widened so handle + timestamp + speaker chip
-         can sit on one row without truncating long speaker names. */
-      grid-template-columns: 200px 1fr 84px;
+         can sit on one row without truncating long speaker names.
+         Trailing 36px column carries the line number — narrow enough
+         to feel like a margin annotation, wide enough for "9999". */
+      grid-template-columns: 200px 1fr 84px 36px;
       gap: 10px;
       /* Tightened from 10px 8px 12px / margin-bottom: 4px so the
          transcript reads as a continuous body rather than a list of
@@ -197,6 +199,19 @@
       padding: 3px 8px 4px;
       border-radius: 8px;
       margin-bottom: 0;
+    }
+    /* Line-number column. Right-aligned tabular figures so the column
+       reads as a clean stripe of numbers down the right margin —
+       1-based for human reference (researcher saying "look at line 42"
+       in a meeting). The number is the segment's position in the
+       transcript and updates on reorder / split / delete. */
+    .segment .seg-lineno {
+      color: var(--muted-2, var(--muted));
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      padding-top: 4px;
+      user-select: none;
     }
     .segment.current { background: rgba(122,167,255,.06); }
     /* Drag-and-drop affordance. The handle is draggable, the rest of
@@ -1211,6 +1226,15 @@ import {
       handleSegmentAction(idx, btn.dataset.act, text, menuBtn);
     });
     div.appendChild(menu);
+
+    // Line number — right-margin annotation for "see line 42" style
+    // references. 1-based + reflects the row's *current* position
+    // (so split/reorder/delete renumber on the next render).
+    const lineno = document.createElement("div");
+    lineno.className = "seg-lineno";
+    lineno.textContent = String(idx + 1);
+    lineno.title = `Line ${idx + 1}`;
+    div.appendChild(lineno);
 
     return div;
   }

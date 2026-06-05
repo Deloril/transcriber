@@ -311,7 +311,7 @@ class TestDesiredIndexSpans:
         ])
         # An application touching segment 0 means paragraph (0,1) is
         # excluded from uncoded_paragraph entries; (2,2) remains.
-        proj = _saved_project(Path("/tmp/_does_not_matter_"))  # not saved but ok
+        proj = Project.new(name="x")  # in-memory; never saved
         app = _make_app(
             project_id=proj.id,
             start="s0w0",
@@ -330,7 +330,7 @@ class TestDesiredIndexSpans:
 
     def test_coded_segment_text_uses_anchor_words(self) -> None:
         segs = _segments([(None, ["alpha", "beta", "gamma"])])
-        proj = _saved_project(Path("/tmp/_does_not_matter_"))
+        proj = Project.new(name="x")  # in-memory; never saved
         app = _make_app(
             project_id=proj.id,
             start="s0w0",
@@ -351,7 +351,7 @@ class TestDesiredIndexSpans:
     def test_drops_application_with_empty_text(self) -> None:
         # Anchor outside any segment — extract returns "", so the
         # span is silently dropped.
-        proj = _saved_project(Path("/tmp/_does_not_matter_"))
+        proj = Project.new(name="x")  # in-memory; never saved
         app = _make_app(
             project_id=proj.id,
             start="s9w9",

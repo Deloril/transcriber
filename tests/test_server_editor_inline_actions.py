@@ -415,3 +415,30 @@ class TestSegmentDragHandle:
         body = client.get("/edit/abc123def456").text
         # Stable proof the handle's icon is wired up.
         assert 'drag.textContent = "⋮⋮"' in body
+
+
+# --------------------------------------------------------------------------- #
+# Per-line line numbers — right-margin annotation for "see line 42"
+# references.
+# --------------------------------------------------------------------------- #
+
+
+class TestSegmentLineNumbers:
+    def test_lineno_class_in_template(self, server_env) -> None:
+        srv, client, _ = server_env
+        _seed_done_job(srv)
+        body = client.get("/edit/abc123def456").text
+        # CSS rule for the column.
+        assert ".seg-lineno" in body
+        # JS path that builds the element + sets the displayed
+        # number — pinning the literal string shape so a refactor
+        # that changes the property name surfaces here.
+        assert 'lineno.className = "seg-lineno"' in body
+        assert "lineno.textContent = String(idx + 1)" in body
+
+    def test_grid_reserves_a_lineno_column(self, server_env) -> None:
+        srv, client, _ = server_env
+        _seed_done_job(srv)
+        body = client.get("/edit/abc123def456").text
+        # The .segment grid grew a fourth column for the line number.
+        assert "200px 1fr 84px 36px" in body
