@@ -12389,6 +12389,7 @@ async def discard_media_endpoint(job_id: str) -> JSONResponse:
                 f"Cannot discard media while job is {job.status}",
             )
         in_path = job.input_path.resolve()
+        out_dir = job.output_dir.resolve()
         already = bool(job.media_discarded)
     upload_dir = in_path.parent
     if upload_dir != UPLOAD_DIR.resolve() and not _is_under(upload_dir, UPLOAD_DIR.resolve()):
@@ -12398,6 +12399,7 @@ async def discard_media_endpoint(job_id: str) -> JSONResponse:
         # stragglers — best-effort, no error surfaced.
         if upload_dir.exists():
             shutil.rmtree(upload_dir, ignore_errors=True)
+        _delete_playback_mix_files(out_dir)
         return JSONResponse({"ok": True, "id": job_id, "already": True})
     # Remove the upload directory (source media + anything else the
     # uploader cached there). Errors deleting individual files are
@@ -12405,6 +12407,12 @@ async def discard_media_endpoint(job_id: str) -> JSONResponse:
     # reclaim disk space"; the persistent flag below is what the rest
     # of the system reads.
     shutil.rmtree(upload_dir, ignore_errors=True)
+    # Also remove the cached playback-mix file (``playback.<hash>.<ext>``
+    # under the job's output dir). Without this, multi-track jobs leave
+    # the synthesised mix on disk even though the user asked to drop
+    # the media — the file is derived from the source so it must be
+    # discarded with the source.
+    _delete_playback_mix_files(out_dir)
     with JOBS_LOCK:
         # Re-check — the job could have been deleted out from under
         # us between unlock and re-lock.
@@ -12414,6 +12422,31 @@ async def discard_media_endpoint(job_id: str) -> JSONResponse:
         j.media_discarded = True
     _persist_job(j)
     return JSONResponse({"ok": True, "id": job_id, "already": False})
+
+
+def _delete_playback_mix_files(output_dir: Path) -> None:
+    """Best-effort delete of cached playback-mix files in a job dir.
+
+    The mix is built by :func:`_resolve_playback_mix` as
+    ``playback.<sel-hash>.<ext>`` — there can be more than one if the
+    user changed the picker selection between plays. Errors are
+    swallowed because the user-facing semantic of discard-media is
+    "best-effort reclaim disk space"; if a file can't be removed the
+    caller's persistent flag still records the discard.
+    """
+    if not output_dir.exists():
+        return
+    try:
+        for p in output_dir.glob("playback.*"):
+            try:
+                p.unlink()
+            except OSError:
+                # File vanished or perms issue — keep going.
+                pass
+    except OSError:
+        # The glob itself can fail on a transient FS error; nothing
+        # to do but bail.
+        pass
 
 
 # Reattach external media to a job whose source recording was

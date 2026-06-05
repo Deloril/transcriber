@@ -254,6 +254,65 @@ class TestDiscardMediaEndpointReachable:
         assert srv.JOBS[job.id].media_discarded is False
         assert job.input_path.exists()
 
+    def test_post_also_deletes_cached_playback_mix(
+        self, server_env
+    ) -> None:
+        """The multi-track player builds a cached
+        ``<output>/playback.<hash>.<ext>`` mix on first /media GET.
+        That file is *derived* from the source recording, so when the
+        user discards media it has to go too — otherwise discarding
+        leaves the synthesised mix on disk and the UI's "media gone"
+        contract is a lie. Pinned because a regression here silently
+        keeps tens of MB of audio on disk per discarded multi-track
+        job."""
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        # Drop a fake cached playback file — the mix is opaque to the
+        # endpoint, so we don't need ffmpeg.
+        mix = job.output_dir / "playback.deadbeef.mp4"
+        mix.write_bytes(b"fake mp4 bytes")
+        # And a second one with a different selection hash; the
+        # cleanup glob has to remove both.
+        mix2 = job.output_dir / "playback.cafef00d.mp3"
+        mix2.write_bytes(b"fake mp3 bytes")
+        # An unrelated sidecar that must NOT be removed — only files
+        # matching the playback.* glob are derived from the source.
+        sidecar = job.output_dir / "transcript.json"
+        sidecar.write_text('{"segments": []}')
+
+        r = client.post(f"/api/job/{job.id}/discard-media")
+        assert r.status_code == 200, r.text
+        assert not mix.exists()
+        assert not mix2.exists()
+        assert sidecar.exists(), \
+            "Sidecar transcript JSON must survive discard"
+
+    def test_idempotent_call_also_cleans_stragglers(
+        self, server_env
+    ) -> None:
+        """A first discard left the flag set but somehow missed a
+        playback file (older Scribe build, or the mix was rebuilt
+        between discards). The second idempotent call must still
+        sweep ``playback.*`` so we don't leak audio on a re-discard."""
+        srv, client, _ = server_env
+        job = _new_job(
+            srv, id="abc123def456", media_discarded=True,
+        )
+        # First call already happened in some prior life; the upload
+        # dir is already gone and the flag is already set. Drop a
+        # leftover playback file directly into the output dir.
+        if job.input_path.parent.exists():
+            import shutil as _sh
+            _sh.rmtree(job.input_path.parent, ignore_errors=True)
+        leftover = job.output_dir / "playback.abcd1234.mp4"
+        leftover.write_bytes(b"leftover mp4")
+
+        r = client.post(f"/api/job/{job.id}/discard-media")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["already"] is True
+        assert not leftover.exists()
+
 
 # --------------------------------------------------------------------------- #
 # Media-bearing endpoints degrade to HTTP 410 once discarded
