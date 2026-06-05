@@ -35,6 +35,17 @@
           data-test-id="src-orphan-queue-count"
           style="font-size:11px;margin-left:4px"></span>
   </a>
+  {# PDF export — Word-style annotated transcript with margin
+     comments. Plain link with download attribute so the browser
+     does the work; no JS needed and the URL is shareable from a
+     bookmark. #}
+  <a class="btn secondary"
+     href="/api/projects/{{ project_id }}/sources/{{ source_id }}/export/pdf"
+     download
+     data-test-id="src-export-pdf"
+     title="Download this transcript as an annotated PDF (codes shown as Word-style margin comments)">
+    📄 Download PDF
+  </a>
   {# F8.6 — Whole-transcript AI review pass.
      Sweeps every paragraph (default) of this source's transcript and
      produces a list of pending CodeSuggestions for the researcher to

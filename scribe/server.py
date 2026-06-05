@@ -1891,6 +1891,98 @@ async def delete_source_endpoint(project_id: str, source_id: str) -> JSONRespons
     return JSONResponse({"ok": True})
 
 
+@app.get("/api/projects/{project_id}/sources/{source_id}/export/pdf")
+async def export_source_pdf_endpoint(
+    project_id: str, source_id: str
+) -> Response:
+    """Render this source's coded transcript as a Word-style PDF.
+
+    Highlights every coded span in the code's colour and stacks
+    margin annotations on the right showing the code name, its
+    definition, the quoted text, and the coder. The colour palette
+    mirrors the on-screen coding view so a printed PDF reads as the
+    same document the researcher annotated.
+
+    weasyprint pulls in cairo/pango at runtime — when those system
+    libraries are missing on the host we surface a 500 with a clear
+    message rather than crashing the whole server."""
+    _check_project_id(project_id)
+    _check_source_id(source_id)
+    # Lazy imports — these live further down the file and we don't
+    # want to reorder every other endpoint to bring them up here.
+    from . import applications as _applications_local
+    from . import codes as _codes_local
+    from . import coders as _coders_local
+    from . import speaker_map as _speaker_map_local
+    from . import pdf_export
+
+    with PROJECTS_LOCK:
+        _project_must_exist(project_id)
+        try:
+            project = _projects.load_project(_projects_root(), project_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        try:
+            source = _sources.load_source(
+                _projects_root(), project_id, source_id
+            )
+        except FileNotFoundError:
+            raise HTTPException(404, "Source not found")
+        try:
+            apps = _applications_local.list_applications(
+                _projects_root(), project_id, source_id=source_id,
+            )
+        except _projects.ProjectValidationError as e:
+            raise HTTPException(400, str(e))
+        codes_list = _codes_local.list_codes(_projects_root(), project_id)
+        coders_list = _coders_local.list_coders(_projects_root(), project_id)
+        try:
+            sp_map = _speaker_map_local.load_or_empty_speaker_map(
+                _projects_root(), project_id, source_id
+            )
+        except FileNotFoundError:
+            sp_map = None
+
+    segments = _load_segments_for_source_speaker_map(source) or []
+
+    # Build label → display-name map. Fall back to the raw label so
+    # an unmapped speaker shows up as ``SPEAKER_00`` rather than
+    # blank.
+    speaker_names: dict[str, str] = {}
+    if sp_map is not None:
+        for entry in sp_map.entries:
+            display = (entry.display_name or "").strip() or entry.label
+            speaker_names[entry.label] = display
+
+    try:
+        pdf_bytes = pdf_export.render_pdf_for_source(
+            project=project.to_dict(),
+            source=source.to_dict(),
+            segments=list(segments),
+            applications=[a.to_dict() for a in apps],
+            codes=[c.to_dict() for c in codes_list],
+            coders=[c.to_dict() for c in coders_list],
+            speaker_names=speaker_names,
+        )
+    except pdf_export.PdfExportError as e:
+        raise HTTPException(500, f"PDF export failed: {e}")
+
+    # Sanitise the source name into a filename-safe slug. Falls back
+    # to the source id if the name has no usable characters.
+    raw_name = (source.name or "").strip() or source_id
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_name).strip("-")
+    if not slug:
+        slug = source_id
+    filename = f"{slug}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Source attribute schema (F3.2) — user-defined columns per source.
 #
