@@ -288,6 +288,69 @@ class TestSuggestNew:
         assert body["kind"] == "new"
         assert "suggestion" in body
 
+    def test_unexpected_exception_returns_500_with_class_and_message(
+        self, env, monkeypatch,
+    ) -> None:
+        """Pin the regression: a stray exception from the AI stack
+        used to bubble out as opaque ``Internal Server Error``. The
+        endpoint now wraps unexpected exceptions in an HTTP 500 whose
+        body identifies the exception class + message so the user
+        (and a dev they paste it to) can diagnose without server
+        logs."""
+        client, _ = env
+        pid, cid, sid = _seed(client)
+        _force_gate_on(client, pid)
+        _install_fake_backend(FakeBackend())
+
+        from scribe import new_code_suggestions as _ncs
+
+        def boom(**_kwargs):
+            raise RuntimeError("simulated AI stack explosion")
+
+        monkeypatch.setattr(_ncs, "suggest_new_codes_for_span", boom)
+
+        r = client.post(
+            f"/api/projects/{pid}/ai/suggestions",
+            json={"source_id": sid, "anchor_start_word_id": "s0w0",
+                  "anchor_end_word_id": "s0w3",
+                  "query_text": "anything",
+                  "mode": "new"},
+        )
+        assert r.status_code == 500, r.text
+        # Body must carry the class name *and* the message so the
+        # user can self-diagnose; "Internal Server Error" alone is
+        # what the regression looked like.
+        body = r.json()
+        # FastAPI puts HTTPException detail under "detail".
+        detail = body.get("detail") or body
+        assert "RuntimeError" in str(detail)
+        assert "simulated AI stack explosion" in str(detail)
+
+    def test_filenotfound_returns_500_with_path(
+        self, env, monkeypatch,
+    ) -> None:
+        client, _ = env
+        pid, cid, sid = _seed(client)
+        _force_gate_on(client, pid)
+        _install_fake_backend(FakeBackend())
+
+        from scribe import new_code_suggestions as _ncs
+
+        def boom(**_kwargs):
+            raise FileNotFoundError("/does/not/exist/codes.json")
+
+        monkeypatch.setattr(_ncs, "suggest_new_codes_for_span", boom)
+
+        r = client.post(
+            f"/api/projects/{pid}/ai/suggestions",
+            json={"source_id": sid, "anchor_start_word_id": "s0w0",
+                  "anchor_end_word_id": "s0w3",
+                  "query_text": "anything", "mode": "new"},
+        )
+        assert r.status_code == 500
+        detail = r.json().get("detail") or r.json()
+        assert "/does/not/exist/codes.json" in str(detail)
+
 
 # --------------------------------------------------------------------------- #
 # Accept

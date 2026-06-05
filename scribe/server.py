@@ -8969,6 +8969,34 @@ async def post_ai_suggestion_endpoint(project_id: str, request: Request) -> JSON
             raise HTTPException(502, f"Backend unavailable: {e}")
         except _ai_backend.BackendError as e:
             raise HTTPException(500, str(e))
+        except FileNotFoundError as e:
+            # The suggestion modules touch disk (read codes, write
+            # suggestion JSON). A missing file mid-flight has shown
+            # up in dev when the projects dir is recreated under the
+            # running server — surface it with the path so the user
+            # can self-diagnose instead of staring at a generic 500.
+            raise HTTPException(500, f"AI suggestion failed: file not found: {e}")
+        except (TypeError, ValueError) as e:
+            # The LLM-response parser is tolerant, but the surrounding
+            # plumbing (proposal hydration, char-offset coercion) can
+            # still raise on shapes the type system doesn't cover.
+            # Echo the class name so the message is actionable rather
+            # than "Internal Server Error".
+            raise HTTPException(
+                500, f"AI suggestion failed ({type(e).__name__}): {e}",
+            )
+        except Exception as e:  # noqa: BLE001
+            # Defensive catch-all so a stray exception from the AI
+            # stack doesn't bubble out as opaque "Internal Server
+            # Error" in the browser. FastAPI still logs the full
+            # traceback to stderr; we just rewrite the response so
+            # the user sees the exception class + message.
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                500,
+                f"AI suggestion failed ({type(e).__name__}): {e}",
+            )
 
 
 @app.post("/api/projects/{project_id}/ai/suggestions/{suggestion_id}/accept")
