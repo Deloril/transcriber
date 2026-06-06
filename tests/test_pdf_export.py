@@ -209,7 +209,10 @@ class TestRenderHtml:
         html = pdf_export.render_html(**self._ctx())
         assert html.startswith("<!doctype html>")
         assert "<style>" in html
-        assert "body-grid" in html
+        # One ``<section class='row'>`` per segment, each a 3-column
+        # grid (meta · text · annotations).
+        assert "class='row'" in html
+        assert "class='anns'" in html
         assert html.rstrip().endswith("</html>")
 
     def test_carries_source_name_and_research_question(self) -> None:
@@ -237,27 +240,43 @@ class TestRenderHtml:
         assert "Maria" in html  # for SPEAKER_00 → Maria
         assert "Tom" in html
 
-    def test_coded_span_carries_callout_class(self) -> None:
+    def test_coded_span_uses_per_code_colour(self) -> None:
         html = pdf_export.render_html(**self._ctx())
-        # Should wrap "believe things" in a coded span carrying the
-        # callout class so the printed output gets the left border.
-        assert "class='coded callout'" in html
+        # Coded text is wrapped in ``<span class='coded'>`` — the
+        # numbered marker + matching annotation card connect it to
+        # the code visually.
+        assert "class='coded'" in html
         assert "believe things" in html
-        # The user-set #7aa7ff colour should appear on the span.
+        # The user-set #7aa7ff colour should appear on the highlight.
         assert "#7aa7ff" in html
+        # And on the annotation card (same hue → matching colour).
+        assert "class='ann' style='color:#7aa7ff'" in html
 
-    def test_margin_annotation_includes_quote_and_definition(self) -> None:
+    def test_marker_pairs_highlight_with_annotation(self) -> None:
+        """The ① marker on the inline highlight must also appear on
+        the matching annotation card. Without this pairing, a
+        researcher reading the printed PDF can't tell which code
+        applies to which span when a segment carries several."""
+        html = pdf_export.render_html(**self._ctx())
+        # Marker appears twice as a structural element: once on the
+        # inline ``<span class='num'>`` inside the highlight, once on
+        # the matching annotation card. Counting the structural
+        # ``num`` spans avoids false positives from any ① that might
+        # show up in CSS comments.
+        assert html.count("<span class='num'>①</span>") == 2
+
+    def test_annotation_card_includes_definition_and_coder(self) -> None:
         html = pdf_export.render_html(**self._ctx())
         assert "What they believe." in html
-        assert "believe things" in html
         assert "by Luke" in html
 
-    def test_coded_text_appears_only_inside_span(self) -> None:
+    def test_coded_text_appears_only_in_transcript(self) -> None:
+        # The text is no longer repeated in the annotation card —
+        # the marker + colour + connector tell the reader which
+        # span the card describes, so quoting it in the card is
+        # redundant. Pin that we render the span exactly once.
         html = pdf_export.render_html(**self._ctx())
-        # "believe things" must appear once in the transcript text
-        # column (inside the span) and once in the margin quote.
-        # Counting raw occurrences should be exactly 2.
-        assert html.count("believe things") == 2
+        assert html.count("believe things") == 1
 
     def test_no_codes_renders_clean_document(self) -> None:
         ctx = self._ctx()

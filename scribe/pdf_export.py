@@ -345,96 +345,122 @@ h1 {
     border-radius: 2pt;
     vertical-align: middle;
 }
-/* Two-column layout: transcript on the left, margin annotations on
-   the right. The right column starts with a vertical rule so it
-   reads as a margin column rather than a body column. */
-.body-grid {
+/* One row per segment. The annotations sit *immediately* to the
+   right of the segment they belong to — when the segment has
+   highlights, the right column carries a card per coded span,
+   visually next to the highlight in the text. The connection is
+   carried by:
+     * **Colour** — each highlight + its annotation use the same
+       per-code hue,
+     * **A numbered marker** — ①②③ next to the inline highlight,
+       repeated on the matching annotation card,
+     * **A short horizontal connector line** that pokes out the
+       left edge of each annotation card in the code's colour,
+       pointing back into the transcript column.
+   Together those three signals make it unambiguous which code
+   belongs to which span, even when a segment carries several. */
+.row {
     display: grid;
-    grid-template-columns: 1fr 220pt;
-    gap: 14pt;
+    grid-template-columns: 50pt 1fr 210pt;
+    gap: 12pt;
+    margin: 0 0 12pt 0;
     align-items: start;
+    page-break-inside: avoid;
 }
-.transcript .seg {
-    display: grid;
-    grid-template-columns: 60pt 1fr 18pt;
-    gap: 6pt;
-    margin: 0 0 8pt 0;
-    page-break-inside: auto;
-}
-.transcript .seg .meta {
+.row .meta {
     color: #555;
     font-size: 8.5pt;
     padding-top: 1pt;
 }
-.transcript .seg .meta .speaker {
+.row .meta .speaker {
     color: #1d1d1d; font-weight: 600;
     display: block;
+    overflow-wrap: anywhere;
 }
-.transcript .seg .meta .ts {
+.row .meta .ts {
     font-variant-numeric: tabular-nums;
     color: #777;
-}
-.transcript .seg .text { font-size: 10.5pt; }
-.transcript .seg .lineno {
     font-size: 8pt;
-    color: #aaa;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    padding-top: 1pt;
 }
-/* Coded inline runs — borrow the on-screen highlight shape: a
-   subtle background + a stronger left border so the eye picks
-   the start of the span. */
+.row .text { font-size: 10.5pt; }
+.row .anns {
+    /* The annotations column. Stacked cards, one per coded span on
+       this segment. Empty for plain segments — the column just
+       collapses visually. */
+    display: flex;
+    flex-direction: column;
+    gap: 6pt;
+}
+/* Coded inline runs in the transcript column. The colour is set
+   per-span via inline style so this rule is just the shape. */
 .coded {
-    padding: 0 1pt;
-    border-radius: 2pt;
+    padding: 0 2pt 1pt;
+    border-bottom: 2pt solid currentColor;
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
 }
-.coded.callout {
-    border-left-width: 2.5pt;
-    border-left-style: solid;
-    padding-left: 3pt;
+.coded .num {
+    /* Numbered marker that pairs with the same number on the
+       annotation card to its right. Same colour as the highlight. */
+    display: inline-block;
+    margin-left: 2pt;
+    font-size: 8pt;
+    font-weight: 700;
+    vertical-align: super;
+    line-height: 1;
+    color: currentColor;
 }
-/* Margin column. Each annotation pins to the segment that owns it
-   via vertical position; weasyprint's grid layout keeps them
-   roughly aligned even if the text column wraps. */
-.margin .ann {
-    border-left: 2.5pt solid currentColor;
-    padding: 3pt 4pt 4pt 6pt;
-    margin: 0 0 8pt 0;
+/* Annotation card. The pseudo-element draws a small coloured
+   horizontal connector pointing back into the transcript column
+   — that connector + the matching number + the matching colour
+   are what tell the reader which highlight this card describes. */
+.ann {
+    position: relative;
+    border: 1pt solid #ddd;
+    border-left: 3pt solid currentColor;
+    padding: 4pt 7pt 5pt 8pt;
+    background: #fafafa;
     font-size: 8.5pt;
     color: #1d1d1d;
-    background: #fafafa;
     page-break-inside: avoid;
+    margin-left: 8pt;  /* room for the connector line */
 }
-.margin .ann .codes {
-    font-weight: 600;
-    margin-bottom: 1pt;
+.ann::before {
+    /* Coloured horizontal connector. Sits in the gap between the
+       transcript column and the annotation card; the left edge
+       extends past the card so the eye reads it as bridging from
+       the annotation toward the highlight on the left. */
+    content: "";
+    position: absolute;
+    top: 8pt;
+    left: -8pt;
+    width: 8pt;
+    height: 1.5pt;
+    background: currentColor;
 }
-.margin .ann .codes .swatch {
+.ann .num {
+    /* Same number style as the inline marker so the visual
+       pairing is obvious. */
     display: inline-block;
-    width: 7pt; height: 7pt;
-    margin-right: 3pt;
-    border-radius: 2pt;
-    vertical-align: middle;
+    font-size: 9pt;
+    font-weight: 700;
+    color: currentColor;
+    margin-right: 4pt;
 }
-.margin .ann .definition {
+.ann .name {
+    color: #1d1d1d;
+    font-weight: 600;
+}
+.ann .definition {
     color: #555;
     font-size: 8pt;
-    margin: 1pt 0 2pt 0;
+    margin: 2pt 0 0 0;
     font-style: italic;
 }
-.margin .ann .quote {
-    color: #777;
-    font-size: 8pt;
-    border-top: 1px dotted #ccc;
-    padding-top: 2pt;
+.ann .coder {
+    color: #888;
+    font-size: 7.5pt;
     margin-top: 2pt;
-}
-.margin .ann .coder {
-    color: #888; font-size: 7.5pt;
-    margin-top: 1pt;
 }
 """
 
@@ -528,10 +554,27 @@ def render_html(
             )
         parts.append("</ul></div>")
 
-    parts.append("<div class='body-grid'>")
-    parts.append("<div class='transcript'>")
+    # One row per segment. Each row is a 3-column grid:
+    #   [meta (speaker + timestamp)] [transcript text] [annotation cards]
+    # Coded spans within the text get a numbered superscript marker
+    # whose colour matches the highlight underline; the matching
+    # annotation card carries the same number + same colour + a small
+    # horizontal connector line on its left edge. That triple — colour,
+    # number, connector — pairs each highlight with its annotation
+    # without any ambiguity even when a segment carries several codes.
+    parts.append("<div class='body'>")
 
-    annotations_html: list[str] = ["<div class='margin'>"]
+    # Marker glyphs. Use circled digits for the first 20, then fall
+    # back to plain ``[N]`` so we never run out — segments with more
+    # than 20 coded spans are vanishingly rare but worth handling.
+    _MARKER_GLYPHS = (
+        "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+    )
+
+    def _marker(n: int) -> str:
+        if 1 <= n <= len(_MARKER_GLYPHS):
+            return _MARKER_GLYPHS[n - 1]
+        return f"[{n}]"
 
     for seg_idx, seg in enumerate(segments):
         if not isinstance(seg, Mapping):
@@ -549,41 +592,40 @@ def render_html(
         seg_apps = apps_by_seg.get(seg_idx, ())
         runs = split_segment_into_runs(seg, seg_idx, seg_apps)
 
+        # Walk runs to build (a) the inline transcript HTML with
+        # numbered markers and (b) the parallel annotation cards.
+        # Counter resets per segment so each segment's markers start
+        # at ① — researchers think "this segment had three codes",
+        # not "global span #347".
         text_html: list[str] = []
+        ann_html: list[str] = []
+        marker_n = 0
         for run in runs:
             run_text = _esc(run.text)
             if not run.application_ids:
                 text_html.append(run_text)
                 continue
-            # Multiple overlapping codes → use the first code's colour
-            # for the highlight + show every overlapping code in the
-            # margin annotation. Most transcripts have at most one
-            # code per span, but the data model allows stacks so we
-            # don't crash on them.
-            first_code = code_by_id.get(_app_code_id(seg_apps, run.application_ids[0])) or {}
-            colours = code_colour(first_code)
-            text_html.append(
-                f"<span class='coded callout' "
-                f"style='background:{colours['bg']};border-color:{colours['border']}'>"
-                f"{run_text}</span>"
+            # Resolve the colour from the first overlapping code; the
+            # remaining stacked codes (if any) ride along on the same
+            # marker so the visual pairing stays simple.
+            first_code = (
+                code_by_id.get(_app_code_id(seg_apps, run.application_ids[0])) or {}
             )
-
-        parts.append(
-            "<section class='seg'>"
-            "<div class='meta'>"
-            f"<span class='speaker'>{_esc(sp_label)}</span>"
-            f"<span class='ts'>{_esc(ts)}</span>"
-            "</div>"
-            f"<div class='text'>{' '.join(text_html)}</div>"
-            f"<div class='lineno'>{seg_idx + 1}</div>"
-            "</section>"
-        )
-
-        # One annotation per coded run. Walk the runs in render order
-        # so the margin annotations cluster near their text.
-        for run_idx, run in enumerate(runs):
-            if not run.application_ids:
-                continue
+            colours = code_colour(first_code)
+            marker_n += 1
+            marker = _marker(marker_n)
+            # Inline highlight: coloured underline + small numbered
+            # superscript marker that matches the annotation card.
+            text_html.append(
+                f"<span class='coded' style='color:{colours['border']}'>"
+                f"<span style='color:#1d1d1d'>{run_text}</span>"
+                f"<span class='num'>{marker}</span>"
+                f"</span>"
+            )
+            # Build the annotation card for this run. Multiple
+            # overlapping codes are listed inside a single card; this
+            # is rare and visually cleaner than splitting into N cards
+            # for the same span of text.
             run_codes: list[Mapping[str, Any]] = []
             run_coder_labels: list[str] = []
             for app_id in run.application_ids:
@@ -598,29 +640,49 @@ def render_html(
                 run_coder_labels.append(coder_by_id.get(coder_id, coder_id))
             if not run_codes:
                 continue
-            # Margin annotation HTML.
-            colours = code_colour(run_codes[0])
-            code_names = "".join(
-                f"<span><span class='swatch' "
-                f"style='background:{code_colour(c)['swatch']}'></span>"
-                f"{_esc(c.get('name'))}</span> "
-                for c in run_codes
-            )
+            # Names. For a single-code span this is just one name; for
+            # stacks we list every code, comma-separated. The card's
+            # accent colour is the first code's hue (matches the
+            # highlight); secondary stacked codes carry their own
+            # colour swatch inline so it's still legible which is which.
+            if len(run_codes) == 1:
+                name_html = (
+                    f"<span class='name'>{_esc(run_codes[0].get('name'))}</span>"
+                )
+            else:
+                name_html = " · ".join(
+                    f"<span class='name' style='color:{code_colour(c)['border']}'>"
+                    f"{_esc(c.get('name'))}</span>"
+                    for c in run_codes
+                )
             definition = (run_codes[0].get("definition") or "").strip()
-            coder_str = ", ".join(c for c in run_coder_labels if c) or "(unknown coder)"
-            annotations_html.append(
+            coder_str = (
+                ", ".join(c for c in run_coder_labels if c)
+                or "(unknown coder)"
+            )
+            ann_html.append(
                 f"<div class='ann' style='color:{colours['border']}'>"
-                f"<div class='codes'>{code_names}</div>"
-                + (f"<div class='definition'>{_esc(definition)}</div>" if definition else "")
-                + f"<div class='quote'>“{_esc(run.text)}”</div>"
-                f"<div class='coder'>by {_esc(coder_str)}</div>"
+                f"<span class='num'>{marker}</span>{name_html}"
+                + (
+                    f"<div class='definition'>{_esc(definition)}</div>"
+                    if definition else ""
+                )
+                + f"<div class='coder'>by {_esc(coder_str)}</div>"
                 "</div>"
             )
 
-    parts.append("</div>")  # transcript
-    annotations_html.append("</div>")
-    parts.extend(annotations_html)
-    parts.append("</div>")  # body-grid
+        parts.append(
+            "<section class='row'>"
+            "<div class='meta'>"
+            f"<span class='speaker'>{_esc(sp_label)}</span>"
+            f"<span class='ts'>{_esc(ts)}</span>"
+            "</div>"
+            f"<div class='text'>{' '.join(text_html)}</div>"
+            f"<div class='anns'>{''.join(ann_html)}</div>"
+            "</section>"
+        )
+
+    parts.append("</div>")  # body
     parts.append("</body></html>")
     return "".join(parts)
 
