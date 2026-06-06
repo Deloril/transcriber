@@ -306,3 +306,76 @@ class TestPdfExportEndpoint:
         assert r.status_code == 200
         # Source A has 1 coded span, Source B's app shouldn't leak in.
         assert "1 coded spans" in captured["html"]
+
+    def test_unexpected_exception_returns_500_with_class_and_message(
+        self, server_env, monkeypatch
+    ) -> None:
+        """Pin the regression: the user reported a generic 500 with
+        no body when /export/pdf failed. The endpoint now wraps any
+        unexpected exception (anything that isn't already a typed
+        PdfExportError) so the response body carries the class +
+        message — same pattern as the AI suggestions endpoint."""
+        from scribe import pdf_export
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("simulated weasyprint C-extension blowup")
+
+        monkeypatch.setattr(pdf_export, "render_pdf_for_source", boom)
+
+        srv, client, _ = server_env
+        pid = _make_project(client)
+        sid = _make_source(client, pid)
+        r = client.get(
+            f"/api/projects/{pid}/sources/{sid}/export/pdf"
+        )
+        assert r.status_code == 500
+        body = r.json()
+        # FastAPI puts HTTPException detail under "detail".
+        detail = body.get("detail") or body
+        assert "RuntimeError" in str(detail)
+        assert "simulated weasyprint C-extension blowup" in str(detail)
+
+    def test_malformed_segment_start_does_not_500(
+        self, server_env, monkeypatch
+    ) -> None:
+        """Some legacy transcripts carry non-numeric ``start`` values
+        on segments. The renderer used to ``float(...)`` them
+        unguarded → ValueError → opaque 500. Drop a transcript with
+        a string ``start`` and prove the endpoint still produces
+        HTML without crashing."""
+        from scribe import pdf_export
+
+        captured: dict[str, str] = {}
+
+        def fake_render(html):
+            captured["html"] = html
+            return b"%PDF-1.4 fake"
+
+        monkeypatch.setattr(pdf_export, "render_pdf_bytes", fake_render)
+
+        srv, client, _ = server_env
+        # Hand-craft a transcript with a bad ``start`` value.
+        job_dir = srv.OUTPUT_DIR / JOB_ID
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "edited.json").write_text(
+            json.dumps({
+                "segments": [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "start": "not-a-number",
+                        "end": 2.0,
+                        "words": [
+                            {"text": "hi", "start": 0, "end": 1,
+                             "speaker": "SPEAKER_00"},
+                        ],
+                    },
+                ],
+            })
+        )
+        pid = _make_project(client)
+        sid = _make_source(client, pid)
+        r = client.get(
+            f"/api/projects/{pid}/sources/{sid}/export/pdf"
+        )
+        assert r.status_code == 200, r.text
+        assert "1 segments" in captured["html"]

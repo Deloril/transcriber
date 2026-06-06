@@ -1966,6 +1966,20 @@ async def export_source_pdf_endpoint(
         )
     except pdf_export.PdfExportError as e:
         raise HTTPException(500, f"PDF export failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        # Anything else — bad data shape, weasyprint blowing up at the
+        # C-extension layer in a way our PdfExportError didn't catch,
+        # disk IO error, etc. Without this branch the exception bubbles
+        # to FastAPI's default handler which returns an opaque body
+        # ("Internal Server Error") and leaves the user with no clue.
+        # Echo class + message so the user can self-diagnose; the full
+        # traceback still hits stderr for the server log.
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            500,
+            f"PDF export failed ({type(e).__name__}): {e}",
+        )
 
     # Sanitise the source name into a filename-safe slug. Falls back
     # to the source id if the name has no usable characters.

@@ -538,7 +538,14 @@ def render_html(
             continue
         sp = str(seg.get("speaker") or "")
         sp_label = speaker_names.get(sp, sp) or "—"
-        ts = _format_time(float(seg.get("start") or 0.0))
+        # Some legacy transcripts carry non-numeric ``start`` values
+        # (or none at all). Coerce defensively — a malformed segment
+        # shouldn't kill the whole export.
+        try:
+            start_secs = float(seg.get("start") or 0.0)
+        except (TypeError, ValueError):
+            start_secs = 0.0
+        ts = _format_time(start_secs)
         seg_apps = apps_by_seg.get(seg_idx, ())
         runs = split_segment_into_runs(seg, seg_idx, seg_apps)
 
