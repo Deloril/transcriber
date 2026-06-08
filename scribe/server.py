@@ -12402,8 +12402,19 @@ async def discard_media_endpoint(job_id: str) -> JSONResponse:
                 409,
                 f"Cannot discard media while job is {job.status}",
             )
-        in_path = job.input_path.resolve()
-        out_dir = job.output_dir.resolve()
+        # ``resolve()`` can raise on older platforms when the path
+        # doesn't exist; fall back to the unresolved path so a
+        # user clicking discard on a row whose source vanished
+        # (manual rm, OS cleanup, external move) still proceeds
+        # to the flag flip rather than 500ing on the resolve.
+        try:
+            in_path = job.input_path.resolve()
+        except (OSError, RuntimeError):
+            in_path = job.input_path
+        try:
+            out_dir = job.output_dir.resolve()
+        except (OSError, RuntimeError):
+            out_dir = job.output_dir
         already = bool(job.media_discarded)
     upload_dir = in_path.parent
     if upload_dir != UPLOAD_DIR.resolve() and not _is_under(upload_dir, UPLOAD_DIR.resolve()):

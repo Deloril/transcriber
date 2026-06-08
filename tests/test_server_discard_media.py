@@ -287,6 +287,60 @@ class TestDiscardMediaEndpointReachable:
         assert sidecar.exists(), \
             "Sidecar transcript JSON must survive discard"
 
+    def test_post_succeeds_when_source_already_gone(
+        self, server_env
+    ) -> None:
+        """User-reported scenario: someone deletes the source file
+        out from under Scribe (manual rm, OS cleanup, external move).
+        Pressing 'Discard media' should still succeed and flip the
+        flag so the library row shows 'media discarded' — without
+        this, the row reports 'has media' but every /media request
+        returns a 404 from disk and the user has no way to clean up
+        the persisted state."""
+        import shutil as _sh
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        # Pull the upload dir out from under the running server,
+        # then call discard. Under the current (working) impl, the
+        # rmtree is a no-op and the persistent flag still flips.
+        _sh.rmtree(job.input_path.parent, ignore_errors=True)
+        assert not job.input_path.exists()
+
+        r = client.post(f"/api/job/{job.id}/discard-media")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # ``already`` is False because the persistent flag wasn't set
+        # before this call; what matters for the user is that the
+        # flag is now True.
+        assert body["already"] is False
+        assert srv.JOBS[job.id].media_discarded is True
+        # And the persisted job.json reflects it so the next library
+        # render shows the indicator without a server restart.
+        persisted = srv._job_state_path(job.output_dir)
+        data = json.loads(persisted.read_text())
+        assert data["media_discarded"] is True
+
+    def test_library_reflects_missing_source_after_discard(
+        self, server_env
+    ) -> None:
+        """Tie the discard endpoint to the library row the user
+        actually looks at. After a discard on a job whose source was
+        already gone, /api/jobs must return ``media_discarded: true``
+        for that row — pinning the contract the library's indicator
+        keys off of."""
+        import shutil as _sh
+        srv, client, _ = server_env
+        job = _new_job(srv, id="abc123def456")
+        _sh.rmtree(job.input_path.parent, ignore_errors=True)
+
+        r = client.post(f"/api/job/{job.id}/discard-media")
+        assert r.status_code == 200
+
+        rows = client.get("/api/jobs").json()["jobs"]
+        match = [row for row in rows if row["id"] == job.id]
+        assert match, "job missing from /api/jobs"
+        assert match[0]["media_discarded"] is True
+
     def test_idempotent_call_also_cleans_stragglers(
         self, server_env
     ) -> None:
