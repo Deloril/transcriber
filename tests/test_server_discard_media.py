@@ -287,6 +287,53 @@ class TestDiscardMediaEndpointReachable:
         assert sidecar.exists(), \
             "Sidecar transcript JSON must survive discard"
 
+    def test_post_succeeds_on_reattached_job(
+        self, server_env, tmp_path: Path,
+    ) -> None:
+        """Real-world reproduction of the 403 the user reported.
+
+        Reattach-media (``POST /api/job/<id>/reattach-media``)
+        symlinks ``uploads/<id>/<filename>`` at a user-supplied
+        absolute path that lives *outside* ``UPLOAD_DIR``. The
+        discard endpoint used to ``resolve()`` ``input_path``,
+        which followed the symlink to the real file, then refused
+        the request with 403 "input_path escapes UPLOAD_DIR" —
+        bricking discard for any reattached row.
+
+        The fix: don't follow the symlink (``input_path.parent`` is
+        already ``uploads/<id>/``, which IS under UPLOAD_DIR), and
+        use the symlink-tolerant ``_link_or_path_is_under`` check.
+        """
+        srv, client, _ = server_env
+        # External media file lives outside UPLOAD_DIR.
+        external = tmp_path / "external" / "user-keeps-it-here.mp4"
+        external.parent.mkdir(parents=True, exist_ok=True)
+        external.write_bytes(b"\x00" * 64)
+
+        # Build a job and re-link its input_path as a symlink to the
+        # external file — same shape the reattach-media endpoint
+        # leaves the FS in.
+        job = _new_job(srv, id="abc123def456")
+        original = job.input_path
+        if original.exists():
+            original.unlink()
+        original.symlink_to(external)
+        # Sanity: input_path is a symlink whose target is outside
+        # UPLOAD_DIR — exactly the post-reattach state.
+        assert original.is_symlink()
+        assert original.resolve() == external.resolve()
+
+        r = client.post(f"/api/job/{job.id}/discard-media")
+        # Pre-fix: this returned 403 "input_path escapes UPLOAD_DIR".
+        assert r.status_code == 200, r.text
+        assert srv.JOBS[job.id].media_discarded is True
+        # The symlink (and the uploads/<id>/ dir) are gone; the
+        # external file the symlink pointed at is *not* touched —
+        # Scribe doesn't own it.
+        assert not original.parent.exists()
+        assert external.exists(), \
+            "Reattached external file must survive discard — Scribe doesn't own it."
+
     def test_post_succeeds_when_source_already_gone(
         self, server_env
     ) -> None:

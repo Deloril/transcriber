@@ -12402,22 +12402,28 @@ async def discard_media_endpoint(job_id: str) -> JSONResponse:
                 409,
                 f"Cannot discard media while job is {job.status}",
             )
-        # ``resolve()`` can raise on older platforms when the path
-        # doesn't exist; fall back to the unresolved path so a
-        # user clicking discard on a row whose source vanished
-        # (manual rm, OS cleanup, external move) still proceeds
-        # to the flag flip rather than 500ing on the resolve.
-        try:
-            in_path = job.input_path.resolve()
-        except (OSError, RuntimeError):
-            in_path = job.input_path
+        # Don't ``resolve()`` ``input_path``: that follows a reattach
+        # symlink off to wherever the user keeps the file (outside
+        # UPLOAD_DIR), and the containment check below would then
+        # 403. The discard semantic is "drop ``uploads/<id>/`` and
+        # everything inside it" — that's the unresolved parent. Use
+        # the unresolved path so a reattached job (the user's most
+        # likely failure mode here) discards cleanly.
+        in_path = job.input_path
         try:
             out_dir = job.output_dir.resolve()
         except (OSError, RuntimeError):
             out_dir = job.output_dir
         already = bool(job.media_discarded)
     upload_dir = in_path.parent
-    if upload_dir != UPLOAD_DIR.resolve() and not _is_under(upload_dir, UPLOAD_DIR.resolve()):
+    # Containment check. ``_link_or_path_is_under`` is the
+    # symlink-tolerant variant — it accepts ``uploads/<id>/<file>``
+    # whose terminal component is a symlink off to a user-managed
+    # path (the reattach-media flow), as long as the *link itself*
+    # lives under ``UPLOAD_DIR``. The strict ``_is_under`` would
+    # reject reattached jobs with 403 "input_path escapes UPLOAD_DIR"
+    # the moment a user tries to discard them.
+    if not _link_or_path_is_under(in_path, UPLOAD_DIR):
         raise HTTPException(403, "input_path escapes UPLOAD_DIR")
     if already:
         # Defensive cleanup in case a partial earlier discard left
