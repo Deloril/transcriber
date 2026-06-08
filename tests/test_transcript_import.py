@@ -168,6 +168,62 @@ class TestParseTxt:
         ]
         assert out["speakers"] == ["Maria", "guest 2"]
 
+    def test_bare_speaker_on_own_line_otter_style(self) -> None:
+        """User-supplied sample (NVivo / Otter export shape):
+        speaker name sits on its own line, body follows on the
+        next line(s), turns separated by blank lines. Covers the
+        common pattern where the exporter doesn't use ``Speaker:``
+        prefixes at all."""
+        body = (
+            "Interviewer\n"
+            "go start cool so everything we discuss now will not "
+            "have anything that identifies you\n"
+            "\n"
+            "Participant12\n"
+            "Oh, what have I got here in front of me?\n"
+            "The official history of ASIO.\n"
+            "\n"
+            "Interviewer\n"
+            "And how would you spell ASIO?\n"
+            "\n"
+            "Participant12\n"
+            "A-S-I-O.\n"
+        )
+        out = ti.parse_txt(body)
+        assert len(out["segments"]) == 4
+        assert [s["speaker"] for s in out["segments"]] == [
+            "Interviewer", "Participant12",
+            "Interviewer", "Participant12",
+        ]
+        assert out["speakers"] == ["Interviewer", "Participant12"]
+        # Multi-line body lines join into a single segment text.
+        assert out["segments"][1]["text"].startswith(
+            "Oh, what have I got here in front of me?"
+        )
+        assert "official history of ASIO" in out["segments"][1]["text"]
+
+    def test_bare_speaker_line_with_punctuated_short_first_line(
+        self,
+    ) -> None:
+        """A turn whose body's first line is a short sentence
+        ('Yes.') must NOT be treated as a speaker label. Sentence
+        punctuation on the first line is the sentinel that
+        distinguishes a label from a fragment."""
+        body = (
+            "Interviewer\n"
+            "Hello there.\n"
+            "\n"
+            "Yes.\n"
+            "Continued.\n"
+        )
+        out = ti.parse_txt(body)
+        # 2 segments: the second turn has no bare-speaker line, so
+        # it inherits "Interviewer" rather than turning "Yes." into
+        # a speaker label.
+        assert len(out["segments"]) == 2
+        assert out["segments"][1]["speaker"] == "Interviewer"
+        assert "Yes." in out["segments"][1]["text"]
+
     def test_continuation_line_without_time_prefix_joins_previous(
         self,
     ) -> None:
@@ -485,6 +541,37 @@ class TestParseSpeakerPrefix:
 
     def test_angle_bracketed_speaker_with_inner_whitespace(self) -> None:
         assert ti._parse_speaker_prefix("<  guest 2 >: hi") == ("guest 2", "hi")
+
+
+class TestLooksLikeBareSpeakerLine:
+    """The NVivo/Otter export shape puts the speaker name on its own
+    line with no colon. Pin the heuristic so a future tweak doesn't
+    silently break the export shape it's there for."""
+
+    def test_simple_label_matches(self) -> None:
+        assert ti._looks_like_bare_speaker_line("Interviewer")
+        assert ti._looks_like_bare_speaker_line("Participant12")
+        assert ti._looks_like_bare_speaker_line("Speaker A")
+
+    def test_sentence_punctuation_disqualifies(self) -> None:
+        # ``Yes.`` is a sentence fragment, not a label.
+        assert not ti._looks_like_bare_speaker_line("Yes.")
+        assert not ti._looks_like_bare_speaker_line("Hello?")
+        assert not ti._looks_like_bare_speaker_line("Wait!")
+
+    def test_long_phrase_disqualifies(self) -> None:
+        # >6 words → almost certainly not a label.
+        assert not ti._looks_like_bare_speaker_line(
+            "this is a fairly long sentence with many words"
+        )
+
+    def test_blank_disqualifies(self) -> None:
+        assert not ti._looks_like_bare_speaker_line("")
+        assert not ti._looks_like_bare_speaker_line("   ")
+
+    def test_colon_inline_disqualifies(self) -> None:
+        # That's the prefix shape, handled by ``_parse_speaker_prefix``.
+        assert not ti._looks_like_bare_speaker_line("LUKE: hi")
 
 
 class TestParseClockPrefix:

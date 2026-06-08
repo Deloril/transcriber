@@ -201,6 +201,51 @@ def _parse_speaker_prefix(line: str) -> tuple[str | None, str]:
     return (name or None), m.group(3)
 
 
+# A line that looks like a speaker label *on its own line* — the
+# Otter / NVivo paragraph-style shape, where the speaker name sits
+# on a line by itself and the body follows on the next line(s):
+#
+#     Interviewer
+#     Hello there.
+#
+#     Participant12
+#     Hi back.
+#
+# Heuristic: ≤6 words, ≤64 chars, no trailing punctuation, no colon,
+# starts with a letter, and not a sentence (avoids matching lines
+# like "Yes." or "I see."). Allows letters, digits, spaces, hyphens,
+# and a couple of low-risk punctuation marks (apostrophes for names
+# like "O'Brien").
+_BARE_SPEAKER_LINE_RE = re.compile(
+    r"^\s*([A-Za-z][\w \-.'_/&]{0,63})\s*$"
+)
+
+
+def _looks_like_bare_speaker_line(line: str) -> bool:
+    """Return True when ``line`` looks like a speaker label on its
+    own (no colon, no time prefix, ≤6 words, ≤64 chars).
+
+    Trade-off: this *can* mis-classify a very short single-line
+    sentence ("Yes.") as a speaker label. The sentinel is that
+    such fragments end with sentence punctuation (``. ! ?``) — we
+    require the line to NOT end that way. Combined with the
+    "first line of a turn whose remainder is non-empty" guard at
+    the call site, false positives are rare.
+    """
+    s = line.strip()
+    if not s:
+        return False
+    if s.endswith((".", "!", "?", ",", ";", ":")):
+        return False
+    if not _BARE_SPEAKER_LINE_RE.match(s):
+        return False
+    # Cap word count — a long phrase that happens to lack
+    # punctuation is more likely a sentence than a speaker label.
+    if len(s.split()) > 6:
+        return False
+    return True
+
+
 def _parse_clock_str(s: str) -> float:
     """Parse ``HH:MM:SS,mmm`` or ``HH:MM:SS.mmm`` (or shorter).
 
@@ -408,6 +453,22 @@ def parse_txt(content: str) -> dict[str, Any]:
         first_line, *rest_lines = turn.split("\n", 1)
         secs, first_remainder = _parse_clock_prefix(first_line.strip())
         speaker, first_remainder = _parse_speaker_prefix(first_remainder)
+
+        # Otter / NVivo paragraph-style:
+        #     Interviewer
+        #     Hello there.
+        # The speaker sits on its own line with no colon, then the
+        # body starts on the next line. Detect that by checking the
+        # first line (after time-prefix peel) is "speakery-looking"
+        # and there *is* continuation text on a following line.
+        if (
+            speaker is None
+            and rest_lines
+            and _looks_like_bare_speaker_line(first_remainder)
+        ):
+            speaker = first_remainder.strip()
+            first_remainder = ""
+
         # Re-attach the continuation lines.
         if rest_lines:
             tail = " ".join(
