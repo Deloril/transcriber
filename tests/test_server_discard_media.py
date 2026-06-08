@@ -176,6 +176,29 @@ class TestEditorRendersDiscardAffordance:
         assert 'id="mediaDiscardedNotice"' in r.text
         assert "Source media discarded" in r.text
 
+    def test_editor_notice_hidden_attribute_actually_hides(
+        self, server_env
+    ) -> None:
+        """The notice was rendering on *every* transcript regardless
+        of the job's media_discarded flag. Cause: the
+        ``.media-discarded-notice`` rule sets ``display: flex`` at
+        class specificity, which beat the user-agent
+        ``[hidden] { display: none }`` rule. Without the attribute-
+        selector override here, every editor page renders the banner
+        as if media had been discarded.
+
+        Pin the override CSS in the rendered template so a future
+        refactor of the styles can't silently drop it again."""
+        srv, client, _ = server_env
+        _new_job(srv, id="abc123def456")
+        body = client.get("/edit/abc123def456").text
+        # The banner element ships with the ``hidden`` attribute, so
+        # the user-visible behaviour relies on the attribute being
+        # honoured. Pin both the markup AND the override CSS rule.
+        assert 'id="mediaDiscardedNotice" class="media-discarded-notice" hidden' in body
+        assert ".media-discarded-notice[hidden]" in body
+        assert "display: none" in body
+
     def test_editor_page_posts_to_discard_endpoint(self, server_env) -> None:
         srv, client, _ = server_env
         _new_job(srv, id="abc123def456")
@@ -286,6 +309,45 @@ class TestDiscardMediaEndpointReachable:
         assert not mix2.exists()
         assert sidecar.exists(), \
             "Sidecar transcript JSON must survive discard"
+
+    def test_post_succeeds_when_containment_check_fails(
+        self, server_env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Even when the upload-dir containment check fails (unusual
+        mount layout, manually-edited input_path, edge case the
+        symlink-tolerant helper can't reason about), the discard
+        endpoint still flips the persistent flag. The destructive
+        cleanup is best-effort — the user's actual intent is "record
+        that this row no longer has media" and that intent must not
+        be blocked by a path-canonicalisation surprise.
+
+        Pre-fix: a containment failure returned 403 and left
+        media_discarded=False. The user reported hitting this
+        repeatedly on a reattached job; even after the symlink-
+        tolerant helper landed there were apparently still cases the
+        check refused. This test pins that *any* containment failure
+        gracefully degrades to 'flip the flag, skip the rmtree'."""
+        from scribe import server as srv
+        # Force the containment check to always say no, regardless of
+        # the helper's underlying logic. That gives us a fixture-free
+        # way to exercise the degraded path.
+        monkeypatch.setattr(srv, "_link_or_path_is_under", lambda *a, **kw: False)
+        srv2, client, _ = server_env
+        job = _new_job(srv2, id="abc123def456")
+
+        r = client.post(f"/api/job/{job.id}/discard-media")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # Flag flipped; the response carries cleaned_upload_dir=False
+        # so a caller that wants to surface "couldn't clean up the
+        # orphan dir" can do so. UI today just refreshes the row.
+        assert body["already"] is False
+        assert body["cleaned_upload_dir"] is False
+        assert srv2.JOBS[job.id].media_discarded is True
+        # The upload dir is left alone — Scribe didn't trust it
+        # enough to rmtree, but the flag persistently records the
+        # discard. The user can clean up by hand if they care.
+        assert job.input_path.parent.exists()
 
     def test_post_succeeds_on_reattached_job(
         self, server_env, tmp_path: Path,

@@ -1234,7 +1234,13 @@ class TestDiscardMediaAPI:
         r = client.post(f"/api/job/{job.id}/discard-media")
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body == {"ok": True, "id": job.id, "already": False}
+        assert body["ok"] is True
+        assert body["id"] == job.id
+        assert body["already"] is False
+        # cleaned_upload_dir reports whether the rmtree path ran;
+        # for a regular (non-reattached) job under UPLOAD_DIR it
+        # should be True.
+        assert body.get("cleaned_upload_dir") is True
 
         # The flag is set on the live Job and persisted to job.json.
         assert srv.JOBS[job.id].media_discarded is True

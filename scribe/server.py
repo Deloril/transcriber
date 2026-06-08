@@ -12405,10 +12405,9 @@ async def discard_media_endpoint(job_id: str) -> JSONResponse:
         # Don't ``resolve()`` ``input_path``: that follows a reattach
         # symlink off to wherever the user keeps the file (outside
         # UPLOAD_DIR), and the containment check below would then
-        # 403. The discard semantic is "drop ``uploads/<id>/`` and
-        # everything inside it" — that's the unresolved parent. Use
-        # the unresolved path so a reattached job (the user's most
-        # likely failure mode here) discards cleanly.
+        # refuse to clean up. The discard semantic is "drop
+        # ``uploads/<id>/`` and everything inside it" — that's the
+        # unresolved parent.
         in_path = job.input_path
         try:
             out_dir = job.output_dir.resolve()
@@ -12416,19 +12415,28 @@ async def discard_media_endpoint(job_id: str) -> JSONResponse:
             out_dir = job.output_dir
         already = bool(job.media_discarded)
     upload_dir = in_path.parent
-    # Containment check. ``_link_or_path_is_under`` is the
-    # symlink-tolerant variant — it accepts ``uploads/<id>/<file>``
-    # whose terminal component is a symlink off to a user-managed
-    # path (the reattach-media flow), as long as the *link itself*
-    # lives under ``UPLOAD_DIR``. The strict ``_is_under`` would
-    # reject reattached jobs with 403 "input_path escapes UPLOAD_DIR"
-    # the moment a user tries to discard them.
-    if not _link_or_path_is_under(in_path, UPLOAD_DIR):
-        raise HTTPException(403, "input_path escapes UPLOAD_DIR")
+    # The user's actual intent is "this row's media is gone — record
+    # that and reclaim what disk space you can." The destructive
+    # cleanup is *best-effort*: if the path containment check fails
+    # for any reason (reattach symlink, unusual mount layout, missing
+    # leaf canonicalising weirdly), we still flip the persistent
+    # flag — the row's row in /api/jobs reflects the discard either
+    # way, and the user can clean up the orphan dir manually if it
+    # came to that. ``_link_or_path_is_under`` is the symlink-tolerant
+    # check; if it fails we log + skip the rmtree but proceed to the
+    # flag flip so the UI updates.
+    safe_to_remove = _link_or_path_is_under(in_path, UPLOAD_DIR)
+    if not safe_to_remove:
+        print(
+            f"[scribe] discard-media: skipping rmtree on {upload_dir} "
+            f"(failed containment check against {UPLOAD_DIR}); "
+            "flipping media_discarded flag anyway",
+            flush=True,
+        )
     if already:
         # Defensive cleanup in case a partial earlier discard left
         # stragglers — best-effort, no error surfaced.
-        if upload_dir.exists():
+        if safe_to_remove and upload_dir.exists():
             shutil.rmtree(upload_dir, ignore_errors=True)
         _delete_playback_mix_files(out_dir)
         return JSONResponse({"ok": True, "id": job_id, "already": True})
@@ -12437,7 +12445,8 @@ async def discard_media_endpoint(job_id: str) -> JSONResponse:
     # *not* surfaced because the user-facing semantic is "best-effort
     # reclaim disk space"; the persistent flag below is what the rest
     # of the system reads.
-    shutil.rmtree(upload_dir, ignore_errors=True)
+    if safe_to_remove:
+        shutil.rmtree(upload_dir, ignore_errors=True)
     # Also remove the cached playback-mix file (``playback.<hash>.<ext>``
     # under the job's output dir). Without this, multi-track jobs leave
     # the synthesised mix on disk even though the user asked to drop
@@ -12452,7 +12461,10 @@ async def discard_media_endpoint(job_id: str) -> JSONResponse:
             raise HTTPException(404, "Job not found")
         j.media_discarded = True
     _persist_job(j)
-    return JSONResponse({"ok": True, "id": job_id, "already": False})
+    return JSONResponse({
+        "ok": True, "id": job_id, "already": False,
+        "cleaned_upload_dir": safe_to_remove,
+    })
 
 
 def _delete_playback_mix_files(output_dir: Path) -> None:

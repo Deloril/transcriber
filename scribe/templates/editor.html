@@ -109,6 +109,12 @@
       align-items: center;
       gap: 10px;
     }
+    /* The user-agent ``[hidden] { display: none }`` rule loses to
+       the class-level ``display: flex`` above on specificity, so
+       the banner shows on every transcript even when the job's
+       media isn't discarded. Re-assert it at the same specificity
+       as the class so ``hidden`` actually hides. */
+    .media-discarded-notice[hidden] { display: none; }
     .media-discarded-notice .icon { font-size: 16px; }
     .media-discarded-notice strong { color: var(--text); }
     .controls {
