@@ -442,3 +442,33 @@ class TestSegmentLineNumbers:
         body = client.get("/edit/abc123def456").text
         # The .segment grid grew a fourth column for the line number.
         assert "200px 1fr 84px 36px" in body
+
+
+# --------------------------------------------------------------------------- #
+# Split-at-cursor must cut, not copy.
+# --------------------------------------------------------------------------- #
+
+
+class TestSplitAtCursorIsACut:
+    """User-reported regression: clicking ✂ left the original segment's
+    full text unchanged AND added a copy of the after-cursor text to a
+    new segment below. Cause: render() destroys the focused
+    contenteditable, the resulting blur fires on the (now-detached)
+    DOM node, and onSegmentBlur reads node.textContent — the *original*
+    full text — and writes it back into state.segments[idx], which by
+    that point points at the new (truncated) left half of the split.
+
+    Fix: onSegmentBlur bails when the node is detached (``isConnected
+    === false``). Pin the guard so a future refactor can't drop it
+    silently."""
+
+    def test_blur_handler_skips_detached_node(self, server_env) -> None:
+        srv, client, _ = server_env
+        _seed_done_job(srv)
+        body = client.get("/edit/abc123def456").text
+        # The function carrying the bug is ``onSegmentBlur``; the
+        # guard is keyed off ``node.isConnected``. Pin both — a
+        # rename of either is the kind of refactor that reintroduces
+        # the regression.
+        assert "function onSegmentBlur" in body
+        assert "node.isConnected" in body

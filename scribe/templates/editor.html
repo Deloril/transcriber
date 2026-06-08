@@ -1270,6 +1270,15 @@ import {
   }
 
   function onSegmentBlur(idx, node) {
+    // Bail if the blur fired because we just programmatically re-rendered
+    // (split / merge / annotate / undo). The node is detached from the
+    // document and reading its textContent would feed the *previous*
+    // segment's text back into ``state.segments[idx]`` — which by now
+    // points at the new (truncated) left half of the split. Without
+    // this guard, splitting at a cursor leaves the original full text
+    // in the left segment + a copy of the after-cursor text in the
+    // right segment, instead of cutting the text cleanly in two.
+    if (!node.isConnected) return;
     // Resync text + words from edited content.
     const seg = state.segments[idx];
     const oldText = (seg.text || "").replace(/\s+/g, " ").trim();
