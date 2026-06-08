@@ -140,11 +140,20 @@ MAX_SEGMENTS = 100_000
 MAX_TEXT_LEN = 50_000
 
 # Speaker prefix at the start of a line: ``LUKE:``, ``Guest 2:``,
-# ``Speaker A:``. We accept letters, digits, spaces, hyphens and a
-# couple of other low-risk separators; the colon is required so we
-# don't mistake the first capitalised word of the sentence for a
-# speaker label.  Bounded to 64 chars on the speaker side.
-_SPEAKER_PREFIX_RE = re.compile(r"^\s*([A-Za-z][\w \-.'_/&]{0,63}):\s+(.*)$")
+# ``Speaker A:``, ``<guest 2>:`` (Otter / Descript style). We
+# accept letters, digits, spaces, hyphens and a couple of other
+# low-risk separators; the colon is required so we don't mistake
+# the first capitalised word of the sentence for a speaker label.
+# Bounded to 64 chars on the speaker side.
+_SPEAKER_PREFIX_RE = re.compile(
+    r"^\s*"
+    # Either a bare name, or the same wrapped in ``<...>``. The
+    # bracket form is what some tools emit when speakers haven't
+    # been renamed yet (``<Speaker 2>`` instead of ``Speaker 2``).
+    r"(?:<\s*([A-Za-z][\w \-.'_/&]{0,63})\s*>"
+    r"|([A-Za-z][\w \-.'_/&]{0,63}))"
+    r":\s+(.*)$"
+)
 
 # Optional ``[HH:MM:SS]`` or ``[MM:SS]`` clock prefix in plain-text
 # transcripts. We tolerate either bracket style; the format we
@@ -177,11 +186,19 @@ def _parse_clock_prefix(line: str) -> tuple[float | None, str]:
 
 
 def _parse_speaker_prefix(line: str) -> tuple[str | None, str]:
-    """If ``line`` begins with ``SPEAKER: ...`` peel it off."""
+    """If ``line`` begins with ``SPEAKER: ...`` peel it off.
+
+    Accepts both the bare ``Name:`` form and the angle-bracket
+    ``<Name>:`` form some tools emit. Returns ``(speaker, remainder)``
+    where ``speaker`` is None when no prefix is present.
+    """
     m = _SPEAKER_PREFIX_RE.match(line)
     if not m:
         return None, line
-    return m.group(1).strip(), m.group(2)
+    bracketed = m.group(1)
+    bare = m.group(2)
+    name = (bracketed or bare or "").strip()
+    return (name or None), m.group(3)
 
 
 def _parse_clock_str(s: str) -> float:
@@ -310,39 +327,95 @@ def parse_txt(content: str) -> dict[str, Any]:
 
         [00:03] GUEST: Hi back.
 
-    Tolerant: missing timestamps, missing speaker labels, blank
-    lines between or inside paragraphs are all handled. When no
-    timestamps are present at all, segments are placed back-to-back
-    starting from 0.0 with a 4-second guess per segment so the
-    editor has *something* to anchor to; the user can fix the
+    Tolerant of common author variants:
+
+    * **No blank lines between turns.** Many tools (Otter, Descript,
+      manual transcriptions) emit one ``[mm:ss] Speaker: text``
+      *line* per turn with no blank separators. We treat any line
+      whose start has a ``[time]`` prefix as a new segment boundary
+      regardless of blank lines, so per-line transcripts split at
+      the right places.
+    * **Speaker name wrapped in angle brackets.**
+      ``[00:03] <guest 2>: text`` is identical to ``[00:03] guest 2:
+      text`` — both produce the same segment.
+    * **Missing timestamps.** When no ``[time]`` is present we fall
+      back to paragraph-style splitting (blank lines).
+    * **Missing speaker labels.** The previous turn's speaker carries
+      over (mirrors what a human reader assumes when a follow-up
+      paragraph has no prefix).
+
+    When no timestamps are present at all, segments are placed
+    back-to-back starting from 0.0 with a 4-second guess per segment
+    so the editor has *something* to anchor to; the user can fix the
     timing afterwards by re-syncing against an audio file or just
     trusting the order.
-
-    Each non-empty paragraph (separated by a blank line) becomes a
-    single segment. Within a paragraph we honour optional ``[time]``
-    and ``SPEAKER:`` prefixes.
     """
     text = _strip_bom(content).replace("\r\n", "\n").replace("\r", "\n")
-    # Split paragraphs on one-or-more blank lines.
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+    # Build a list of "turns" — each one is the full text body for a
+    # single segment. Two split rules feed the list:
+    #
+    #   1. Any line whose *first non-whitespace character* opens a
+    #      ``[time]`` prefix starts a new turn. This covers the
+    #      author-style "one per line, no blanks" shape the user
+    #      reported as broken.
+    #   2. Blank lines also start new turns. This covers the
+    #      Scribe-written style and pasted-in paragraphs.
+    #
+    # Lines without a leading time prefix accumulate into the
+    # currently-open turn (so a multi-line quote stays together).
+    turns: list[str] = []
+    current: list[str] = []
+    for raw_line in text.split("\n"):
+        line = raw_line.rstrip()
+        is_blank = not line.strip()
+        is_timed = bool(_TIME_PREFIX_RE.match(line))
+        if is_timed:
+            # Flush the in-progress turn (if any) and start a new
+            # one with this timed line.
+            if current:
+                turns.append("\n".join(current).strip())
+                current = []
+            current.append(line)
+            continue
+        if is_blank:
+            # Paragraph break — close the current turn.
+            if current:
+                turns.append("\n".join(current).strip())
+                current = []
+            continue
+        # Continuation of the current turn.
+        current.append(line)
+    if current:
+        turns.append("\n".join(current).strip())
+
+    # Drop empty turns the rules above can produce on degenerate
+    # input.
+    turns = [t for t in turns if t]
 
     segments: list[dict[str, Any]] = []
     last_speaker: str | None = None
     cursor = 0.0
     DEFAULT_SEG_DUR = 4.0
 
-    for para in paragraphs:
-        # Collapse newlines inside a paragraph; the writer doesn't
-        # produce them but pasted-in text might.
-        first_line, *rest = para.split("\n", 1)
-        body = first_line + (("\n" + rest[0]) if rest else "")
-
-        secs, remainder = _parse_clock_prefix(body.strip())
-        speaker, remainder = _parse_speaker_prefix(remainder)
-        # Re-split on newlines now that we've peeled the prefixes
-        # off.  Multi-line paragraphs (rare) get joined with a
-        # single space.
-        body_text = " ".join(t.strip() for t in remainder.splitlines() if t.strip())
+    for turn in turns:
+        # The first line carries the optional ``[time]`` and
+        # ``Speaker:`` prefixes; remaining lines (if any) are plain
+        # continuation text. Parse the prefixes on the first line
+        # only — the speaker regex doesn't span newlines, and we
+        # don't want to mistake a continuation that starts with a
+        # capital word for a speaker label.
+        first_line, *rest_lines = turn.split("\n", 1)
+        secs, first_remainder = _parse_clock_prefix(first_line.strip())
+        speaker, first_remainder = _parse_speaker_prefix(first_remainder)
+        # Re-attach the continuation lines.
+        if rest_lines:
+            tail = " ".join(
+                t.strip() for t in rest_lines[0].splitlines() if t.strip()
+            )
+            body_text = (first_remainder.strip() + " " + tail).strip()
+        else:
+            body_text = first_remainder.strip()
         if not body_text:
             continue
 

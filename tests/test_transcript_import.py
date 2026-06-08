@@ -127,6 +127,64 @@ class TestParseTxt:
         out = ti.parse_txt("[00:00] Speaker A-1: hi\n")
         assert out["segments"][0]["speaker"] == "Speaker A-1"
 
+    def test_one_per_line_no_blank_separators(self) -> None:
+        """User-reported regression: ``[mm:ss] Speaker: text`` one
+        line per turn with no blank lines between (Otter / Descript /
+        manual-transcription style) collapsed into a single segment
+        and put every line under the *first* speaker.
+
+        Each line that opens with a ``[time]`` prefix should be its
+        own segment, regardless of whether a blank line precedes
+        it."""
+        body = (
+            "[00:00] LUKE: First line.\n"
+            "[00:05] GUEST: Second line.\n"
+            "[00:10] LUKE: Third line.\n"
+        )
+        out = ti.parse_txt(body)
+        assert len(out["segments"]) == 3
+        assert [s["speaker"] for s in out["segments"]] == [
+            "LUKE", "GUEST", "LUKE",
+        ]
+        assert out["segments"][0]["text"] == "First line."
+        assert out["segments"][1]["text"] == "Second line."
+        assert out["segments"][2]["text"] == "Third line."
+        assert out["speakers"] == ["LUKE", "GUEST"]
+
+    def test_one_per_line_with_angle_bracketed_speaker(self) -> None:
+        """User's transcripts use ``[mm:ss] <speaker name>:`` —
+        Otter / Descript export shape. Same per-line splitting + the
+        angle-bracket form must yield the same segments as the bare
+        form."""
+        body = (
+            "[00:00] <Maria>: Hello there.\n"
+            "[00:05] <guest 2>: Hi back.\n"
+            "[00:10] <Maria>: How are you?\n"
+        )
+        out = ti.parse_txt(body)
+        assert len(out["segments"]) == 3
+        assert [s["speaker"] for s in out["segments"]] == [
+            "Maria", "guest 2", "Maria",
+        ]
+        assert out["speakers"] == ["Maria", "guest 2"]
+
+    def test_continuation_line_without_time_prefix_joins_previous(
+        self,
+    ) -> None:
+        """A line without a ``[time]`` prefix and without a blank
+        separator continues the current turn. This lets a long quote
+        wrap onto multiple lines and stay in one segment."""
+        body = (
+            "[00:00] LUKE: First sentence.\n"
+            "Continuation of LUKE's turn.\n"
+            "[00:10] GUEST: Second turn.\n"
+        )
+        out = ti.parse_txt(body)
+        assert len(out["segments"]) == 2
+        assert out["segments"][0]["speaker"] == "LUKE"
+        assert "Continuation of LUKE's turn." in out["segments"][0]["text"]
+        assert out["segments"][1]["speaker"] == "GUEST"
+
 
 # --------------------------------------------------------------------------- #
 # SRT parser
@@ -419,6 +477,14 @@ class TestParseSpeakerPrefix:
         # we'd pull "Wait" out.  Document that expectation rather
         # than fight it.
         assert ti._parse_speaker_prefix("Wait: hi") == ("Wait", "hi")
+
+    def test_angle_bracketed_speaker(self) -> None:
+        # Otter / Descript-style ``<Speaker 2>: text`` — exporters
+        # use this when the speaker hasn't been renamed yet.
+        assert ti._parse_speaker_prefix("<Speaker 2>: hello") == ("Speaker 2", "hello")
+
+    def test_angle_bracketed_speaker_with_inner_whitespace(self) -> None:
+        assert ti._parse_speaker_prefix("<  guest 2 >: hi") == ("guest 2", "hi")
 
 
 class TestParseClockPrefix:
