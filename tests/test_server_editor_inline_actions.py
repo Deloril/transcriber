@@ -459,8 +459,11 @@ class TestSplitAtCursorIsACut:
     that point points at the new (truncated) left half of the split.
 
     Fix: onSegmentBlur bails when the node is detached (``isConnected
-    === false``). Pin the guard so a future refactor can't drop it
-    silently."""
+    === false``) AND while a programmatic re-render is in flight
+    (``rendering`` flag) — some browsers dispatch the teardown blur
+    *synchronously while the node is still connected*, which slips
+    past the isConnected guard alone. Pin both so a future refactor
+    can't drop them silently."""
 
     def test_blur_handler_skips_detached_node(self, server_env) -> None:
         srv, client, _ = server_env
@@ -472,3 +475,17 @@ class TestSplitAtCursorIsACut:
         # the regression.
         assert "function onSegmentBlur" in body
         assert "node.isConnected" in body
+
+    def test_blur_handler_skips_during_render(self, server_env) -> None:
+        # A focused segment removed during ``root.innerHTML = ""`` can
+        # fire blur synchronously *while still connected*. The
+        # ``rendering`` flag set around render() must short-circuit
+        # onSegmentBlur so the pre-split text isn't written back over
+        # the truncated left half.
+        srv, client, _ = server_env
+        _seed_done_job(srv)
+        body = client.get("/edit/abc123def456").text
+        assert "if (rendering || !node.isConnected) return;" in body
+        # The flag is raised/lowered around the render body.
+        assert "rendering = true;" in body
+        assert "rendering = false;" in body

@@ -1045,10 +1045,23 @@ import {
   }
 
   // ---- Rendering ----
+  // True while we're tearing down + rebuilding the segment list. A focused
+  // contenteditable that gets removed during ``root.innerHTML = ""`` fires a
+  // blur — and some browsers dispatch it *synchronously while the node is
+  // still connected*, which slips past the ``node.isConnected`` guard in
+  // ``onSegmentBlur`` and writes the segment's pre-split text back over the
+  // freshly-truncated left half. Suppress the resync outright while a
+  // programmatic render is in flight.
+  let rendering = false;
   function render() {
-    renderSpeakersBar();
-    renderSegments();
-    rebindWordHighlight();
+    rendering = true;
+    try {
+      renderSpeakersBar();
+      renderSegments();
+      rebindWordHighlight();
+    } finally {
+      rendering = false;
+    }
   }
 
   function renderSpeakersBar() {
@@ -1278,7 +1291,7 @@ import {
     // this guard, splitting at a cursor leaves the original full text
     // in the left segment + a copy of the after-cursor text in the
     // right segment, instead of cutting the text cleanly in two.
-    if (!node.isConnected) return;
+    if (rendering || !node.isConnected) return;
     // Resync text + words from edited content.
     const seg = state.segments[idx];
     const oldText = (seg.text || "").replace(/\s+/g, " ").trim();
